@@ -1,0 +1,7 @@
+{
+  "terminal.integrated.env.windows": {
+    "PATH": "${workspaceFolder}\\.tools\\flutter\\bin;${workspaceFolder}\\.tools\\go\\bin;${env:PATH}",
+    "GOPROXY": "https://goproxy.cn,direct",
+    "GOTOOLCHAIN": "local"
+  }
+}

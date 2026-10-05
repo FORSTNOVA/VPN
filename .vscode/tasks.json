@@ -1,0 +1,142 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "SmartVPN: Generate Windows runner",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-Command",
+        "if (-not (Test-Path -LiteralPath 'windows/CMakeLists.txt')) { & '../.tools/flutter/bin/flutter.bat' create --platforms=windows .; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE } }"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}/frontend",
+        "env": { "PATH": "${workspaceFolder}\\.tools\\flutter\\bin;${workspaceFolder}\\.tools\\go\\bin;${env:PATH}" }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "SmartVPN: Resolve Flutter packages",
+      "type": "process",
+      "command": "${workspaceFolder}/.tools/flutter/bin/flutter.bat",
+      "args": ["pub", "get"],
+      "options": {
+        "cwd": "${workspaceFolder}/frontend",
+        "env": { "PATH": "${workspaceFolder}\\.tools\\flutter\\bin;${workspaceFolder}\\.tools\\go\\bin;${env:PATH}" }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "SmartVPN: Build Flutter Windows app",
+      "type": "process",
+      "command": "${workspaceFolder}/.tools/flutter/bin/flutter.bat",
+      "args": ["build", "windows", "--release"],
+      "options": {
+        "cwd": "${workspaceFolder}/frontend",
+        "env": { "PATH": "${workspaceFolder}\\.tools\\flutter\\bin;${workspaceFolder}\\.tools\\go\\bin;${env:PATH}" }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "SmartVPN: Build Go service",
+      "type": "process",
+      "command": "${workspaceFolder}/.tools/go/bin/go.exe",
+      "args": ["build", "-ldflags=-s -w", "-o", "../frontend/build/windows/x64/runner/Release/smartvpn-service-current.exe", "."],
+      "options": {
+        "cwd": "${workspaceFolder}/backend",
+        "env": {
+          "PATH": "${workspaceFolder}\\.tools\\flutter\\bin;${workspaceFolder}\\.tools\\go\\bin;${env:PATH}",
+          "GOCACHE": "${workspaceFolder}\\.tools\\go-cache",
+          "GOPATH": "${workspaceFolder}\\.tools\\gopath",
+          "GOPROXY": "https://goproxy.cn,direct",
+          "GOTOOLCHAIN": "local"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "SmartVPN: Test Go service",
+      "type": "process",
+      "command": "${workspaceFolder}/.tools/go/bin/go.exe",
+      "args": ["test", "./..."],
+      "options": {
+        "cwd": "${workspaceFolder}/backend",
+        "env": {
+          "PATH": "${workspaceFolder}\\.tools\\flutter\\bin;${workspaceFolder}\\.tools\\go\\bin;${env:PATH}",
+          "GOCACHE": "${workspaceFolder}\\.tools\\go-cache",
+          "GOPATH": "${workspaceFolder}\\.tools\\gopath",
+          "GOPROXY": "https://goproxy.cn,direct",
+          "GOTOOLCHAIN": "local"
+        }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "SmartVPN: Test Flutter app",
+      "type": "process",
+      "command": "${workspaceFolder}/.tools/flutter/bin/flutter.bat",
+      "args": ["test"],
+      "options": {
+        "cwd": "${workspaceFolder}/frontend",
+        "env": { "PATH": "${workspaceFolder}\\.tools\\flutter\\bin;${workspaceFolder}\\.tools\\go\\bin;${env:PATH}" }
+      },
+      "problemMatcher": []
+    },
+    {
+      "label": "SmartVPN: Run all tests",
+      "dependsOn": [
+        "SmartVPN: Test Go service",
+        "SmartVPN: Test Flutter app"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "SmartVPN: Copy proxy helper",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-Command",
+        "Copy-Item -LiteralPath 'backend/proxy.ps1' -Destination 'frontend/build/windows/x64/runner/Release/proxy.ps1' -Force"
+      ],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "SmartVPN: Package portable zip",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
+        "-File",
+        "${workspaceFolder}\\package.ps1"
+      ],
+      "options": { "cwd": "${workspaceFolder}" },
+      "problemMatcher": []
+    },
+    {
+      "label": "SmartVPN: Build Windows MVP",
+      "dependsOn": [
+        "SmartVPN: Generate Windows runner",
+        "SmartVPN: Resolve Flutter packages",
+        "SmartVPN: Build Flutter Windows app",
+        "SmartVPN: Build Go service",
+        "SmartVPN: Copy proxy helper"
+      ],
+      "dependsOrder": "sequence",
+      "problemMatcher": []
+    },
+    {
+      "label": "SmartVPN: Run Windows MVP",
+      "dependsOn": "SmartVPN: Build Windows MVP",
+      "dependsOrder": "sequence",
+      "type": "process",
+      "command": "${workspaceFolder}/frontend/build/windows/x64/runner/Release/smartvpn_windows.exe",
+      "problemMatcher": []
+    }
+  ]
+}

@@ -1,0 +1,51 @@
+# Build and local tooling
+.tools/
+.stage/
+dist/
+
+# Cloned reference repo
+clash-verge-rev/
+
+# Go / Backend binaries
+backend/*.exe
+backend/*.dll
+backend/*.so
+backend/*.dylib
+
+# Flutter / Dart build artifacts
+frontend/.dart_tool/
+frontend/.flutter-plugins
+frontend/.flutter-plugins-dependencies
+frontend/.packages
+frontend/.pub-cache/
+frontend/.pub/
+frontend/build/
+frontend/screen_*.png
+
+# Android build artifacts and native binaries
+frontend/android/.gradle/
+frontend/android/local.properties
+frontend/android/app/build/
+frontend/android/app/debug/
+frontend/android/app/profile/
+frontend/android/app/release/
+frontend/android/app/src/main/jniLibs/*/*.so
+frontend/android/.cxx/
+
+# Windows build artifacts
+frontend/windows/flutter/ephemeral/
+frontend/windows/x64/
+frontend/windows/x86/
+
+# IDE and Editor files
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Operating System files
+Thumbs.db
+[Dd]esktop.ini
+.DS_Store
+*.swp
+*.log
