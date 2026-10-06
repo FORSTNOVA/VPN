@@ -25,15 +25,16 @@ type subscriptionProxy struct {
 	// lives under is not a name that answers.
 	Server string `yaml:"server"`
 	TLS    any    `yaml:"tls"`
-	WsOpts  struct {
+	WsOpts struct {
 		Path    string         `yaml:"path"`
 		Headers map[string]any `yaml:"headers"`
 	} `yaml:"ws-opts"`
 }
 
 var (
-	errSubscriptionNetwork = errors.New("subscription network request failed; check connectivity or firewall")
-	errNoUsableNodes       = errors.New("subscription response contained no usable nodes")
+	errSubscriptionNetwork    = errors.New("subscription network request failed; check connectivity or firewall")
+	errNoUsableNodes          = errors.New("subscription response contained no usable nodes")
+	errNoSubscriptionUserInfo = errors.New("subscription response did not include usage information")
 )
 
 func decodeSubscriptionBase64(input string) ([]byte, error) {
@@ -304,6 +305,51 @@ func parseSubscriptionUserInfo(header string) *subscriptionUserInfo {
 		return nil
 	}
 	return info
+}
+
+// fetchSubscriptionUserInfo requests only the response headers so refreshing a
+// quota does not download and rebuild the subscription's node profile.
+func fetchSubscriptionUserInfo(subscriptionURL, proxyAddress string) (*subscriptionUserInfo, error) {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	defer transport.CloseIdleConnections()
+	if proxyAddress == "direct" {
+		transport.Proxy = nil
+	} else if proxyAddress != "" {
+		pURL := proxyAddress
+		if !strings.Contains(pURL, "://") {
+			pURL = "http://" + pURL
+		}
+		proxyURL, err := url.Parse(pURL)
+		if err != nil {
+			return nil, errors.New("invalid local proxy address")
+		}
+		transport.Proxy = http.ProxyURL(proxyURL)
+	} else {
+		transport.Proxy = http.ProxyFromEnvironment
+	}
+	timeout := 15 * time.Second
+	if proxyAddress == "direct" {
+		timeout = 7 * time.Second
+	}
+	client := http.Client{Timeout: timeout, Transport: transport}
+	request, err := http.NewRequest(http.MethodGet, subscriptionURL, nil)
+	if err != nil {
+		return nil, errors.New("invalid subscription URL")
+	}
+	request.Header.Set("User-Agent", subscriptionUserAgent)
+	response, err := client.Do(request)
+	if err != nil {
+		return nil, errSubscriptionNetwork
+	}
+	defer response.Body.Close()
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return nil, errors.New("subscription server returned a non-success status")
+	}
+	info := parseSubscriptionUserInfo(response.Header.Get("Subscription-Userinfo"))
+	if info == nil {
+		return nil, errNoSubscriptionUserInfo
+	}
+	return info, nil
 }
 
 func downloadProfileWithInfo(subscriptionURL, proxyAddress string) ([]byte, []proxyNode, *subscriptionUserInfo, error) {

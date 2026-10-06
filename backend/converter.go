@@ -665,7 +665,7 @@ type SubscriptionSource struct {
 func mergeSubscriptionSources(sources []SubscriptionSource) ([]byte, []proxyNode, error) {
 	var allProxies []map[string]any
 	var allNodes []proxyNode
-	nameCounts := make(map[string]int)
+	usedNames := make(map[string]struct{})
 
 	for _, src := range sources {
 		proxies, nodes, err := parseSubscriptionBodyToProxies(src.Body)
@@ -681,20 +681,10 @@ func mergeSubscriptionSources(sources []SubscriptionSource) ([]byte, []proxyNode
 			if prefix != "" && !strings.HasPrefix(name, prefix) {
 				name = prefix + " " + name
 			}
-			if count, seen := nameCounts[name]; seen {
-				nameCounts[name] = count + 1
-				newName := fmt.Sprintf("%s (%d)", name, count+1)
-				p["name"] = newName
-				if i < len(nodes) {
-					nodes[i].Name = newName
-				}
-				nameCounts[newName] = 1
-			} else {
-				p["name"] = name
-				if i < len(nodes) {
-					nodes[i].Name = name
-				}
-				nameCounts[name] = 1
+			name = uniqueMergedNodeName(name, usedNames)
+			p["name"] = name
+			if i < len(nodes) {
+				nodes[i].Name = name
 			}
 			allProxies = append(allProxies, p)
 		}
@@ -711,6 +701,23 @@ func mergeSubscriptionSources(sources []SubscriptionSource) ([]byte, []proxyNode
 	return mergedYAML, uniqueNodes(allNodes), nil
 }
 
+// uniqueMergedNodeName also checks names produced by suffixing. A later source
+// may already contain "Node (2)", so a duplicate "Node" must skip that name.
+func uniqueMergedNodeName(name string, used map[string]struct{}) string {
+	if _, exists := used[name]; !exists {
+		used[name] = struct{}{}
+		return name
+	}
+	for suffix := 2; ; suffix++ {
+		candidate := fmt.Sprintf("%s (%d)", name, suffix)
+		if _, exists := used[candidate]; exists {
+			continue
+		}
+		used[candidate] = struct{}{}
+		return candidate
+	}
+}
+
 // mergeSubscriptionProfiles merges multiple profile bodies into a single Clash YAML profile,
 // deduplicating duplicate node names across sources.
 func mergeSubscriptionProfiles(profiles [][]byte) ([]byte, []proxyNode, error) {
@@ -720,4 +727,3 @@ func mergeSubscriptionProfiles(profiles [][]byte) ([]byte, []proxyNode, error) {
 	}
 	return mergeSubscriptionSources(sources)
 }
-

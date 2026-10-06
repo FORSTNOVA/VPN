@@ -456,6 +456,8 @@ class SavedSubscription {
     required this.nodeCount,
     required this.lastError,
     this.userInfo,
+    this.quotaUpdatedAt = 0,
+    this.quotaError = '',
   });
 
   final String id;
@@ -467,6 +469,8 @@ class SavedSubscription {
   final int nodeCount;
   final String lastError;
   final SubscriptionUserInfo? userInfo;
+  final int quotaUpdatedAt;
+  final String quotaError;
 
   bool get hasFailed => lastError.isNotEmpty;
 
@@ -484,6 +488,8 @@ class SavedSubscription {
             ? SubscriptionUserInfo.fromJson(
                 value['userInfo'] as Map<String, dynamic>)
             : null,
+        quotaUpdatedAt: (value['quotaUpdatedAt'] as num?)?.toInt() ?? 0,
+        quotaError: value['quotaError'] as String? ?? '',
       );
 }
 

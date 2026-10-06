@@ -161,6 +161,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int _desktopPetUploadRate = 0;
   int _desktopPetDownloadRate = 0;
   List<SavedSubscription> _savedSubscriptions = const [];
+  String? _quotaRefreshingId;
   int _autoMergeHours = 0;
   bool _subscriptionsFromCache = false;
   bool _kernelRunning = false;
@@ -1717,6 +1718,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final res = await _request('POST', '/api/subscriptions/refresh', body: {
         'id': entry.id,
       });
+      if (_isMergedSubscription) await _loadNodes();
       await _loadSubscriptions();
       if (!mounted) return;
       final sub = res['subscription'] is Map<String, dynamic>
@@ -1733,6 +1735,30 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
     } finally {
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Future<void> _refreshSubscriptionQuota(SavedSubscription entry) async {
+    if (_quotaRefreshingId != null) return;
+    setState(() => _quotaRefreshingId = entry.id);
+    try {
+      await _request('POST', '/api/subscriptions/quota', body: {
+        'id': entry.id,
+      });
+      await _loadSubscriptions();
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text('「${entry.label}」流量信息已更新'),
+      ));
+    } catch (e) {
+      if (!mounted) return;
+      await _loadSubscriptions().catchError((_) {});
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(e.toString().replaceFirst('Exception: ', '')),
+      ));
+    } finally {
+      if (mounted) setState(() => _quotaRefreshingId = null);
     }
   }
 
@@ -2715,66 +2741,62 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Widget _detail() {
     final narrow = MediaQuery.sizeOf(context).width < Tokens.mobileBreakpoint;
     return Column(children: [
+      Padding(
+        padding: EdgeInsets.fromLTRB(narrow ? 14 : 28, narrow ? 12 : 20,
+            narrow ? 14 : 28, narrow ? 10 : 16),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: Tokens.contentMaxWidth),
+            child: Row(children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(_page.label, style: Tokens.pageTitle),
+                  const SizedBox(height: 2),
+                  Text('// PRTS · ${_page.englishCode}',
+                      style: Tokens.akBilingualEn),
+                ],
+              ),
+              if (!narrow) ...[
+                const Spacer(),
+                _statusBadge(),
+              ],
+            ]),
+          ),
+        ),
+      ),
+      const Divider(height: 1),
+      if (_error != null)
         Padding(
-          padding: EdgeInsets.fromLTRB(
-              narrow ? 14 : 28,
-              narrow ? 12 : 20,
-              narrow ? 14 : 28,
-              narrow ? 10 : 16),
+          padding:
+              EdgeInsets.fromLTRB(narrow ? 14 : 28, 14, narrow ? 14 : 28, 0),
           child: Center(
             child: ConstrainedBox(
               constraints:
                   const BoxConstraints(maxWidth: Tokens.contentMaxWidth),
-              child: Row(children: [
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(_page.label, style: Tokens.pageTitle),
-                    const SizedBox(height: 2),
-                    Text('// PRTS · ${_page.englishCode}',
-                        style: Tokens.akBilingualEn),
-                  ],
-                ),
-                if (!narrow) ...[
-                  const Spacer(),
-                  _statusBadge(),
-                ],
-              ]),
-            ),
-          ),
-        ),
-        const Divider(height: 1),
-        if (_error != null)
-          Padding(
-            padding: EdgeInsets.fromLTRB(
-                narrow ? 14 : 28, 14, narrow ? 14 : 28, 0),
-            child: Center(
-              child: ConstrainedBox(
-                constraints:
-                    const BoxConstraints(maxWidth: Tokens.contentMaxWidth),
-                child: _Notice(
-                  kind: _NoticeKind.bad,
-                  text: _error!,
-                  action: TextButton(
-                    onPressed: () => setState(() => _error = null),
-                    child: const Text('忽略'),
-                  ),
+              child: _Notice(
+                kind: _NoticeKind.bad,
+                text: _error!,
+                action: TextButton(
+                  onPressed: () => setState(() => _error = null),
+                  child: const Text('忽略'),
                 ),
               ),
             ),
           ),
-        Expanded(
-          child: switch (_page) {
-            _AppPage.connect => _connectPage(),
-            _AppPage.traffic => _trafficPage(),
-            _AppPage.nodes => _nodesPage(),
-            _AppPage.region => _regionPage(),
-            _AppPage.checks => _checksPage(),
-            _AppPage.subscription => _subscriptionPage(),
-          },
         ),
-      ]);
+      Expanded(
+        child: switch (_page) {
+          _AppPage.connect => _connectPage(),
+          _AppPage.traffic => _trafficPage(),
+          _AppPage.nodes => _nodesPage(),
+          _AppPage.region => _regionPage(),
+          _AppPage.checks => _checksPage(),
+          _AppPage.subscription => _subscriptionPage(),
+        },
+      ),
+    ]);
   }
 
   Widget _statusBadge() {

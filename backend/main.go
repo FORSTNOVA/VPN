@@ -24,15 +24,15 @@ import (
 )
 
 type settings struct {
-	SubscriptionURL string            `json:"subscriptionUrl"`
-	MihomoPath      string            `json:"mihomoPath"`
-	SelectedNode    string            `json:"selectedNode,omitempty"`
-	SelectionMode   string            `json:"selectionMode,omitempty"`
-	LockedRegion    string            `json:"lockedRegion,omitempty"`
-	LockedNode      string            `json:"lockedNode,omitempty"`
-	ConnectionMode  string            `json:"connectionMode,omitempty"`
-	WintunPath      string            `json:"wintunPath,omitempty"`
-	AutoMergeHours  int               `json:"autoMergeHours,omitempty"`
+	SubscriptionURL string `json:"subscriptionUrl"`
+	MihomoPath      string `json:"mihomoPath"`
+	SelectedNode    string `json:"selectedNode,omitempty"`
+	SelectionMode   string `json:"selectionMode,omitempty"`
+	LockedRegion    string `json:"lockedRegion,omitempty"`
+	LockedNode      string `json:"lockedNode,omitempty"`
+	ConnectionMode  string `json:"connectionMode,omitempty"`
+	WintunPath      string `json:"wintunPath,omitempty"`
+	AutoMergeHours  int    `json:"autoMergeHours,omitempty"`
 	// The sites the path monitor checks, and how often.
 	PathChecks pathCheckSettings `json:"pathChecks,omitempty"`
 }
@@ -60,14 +60,14 @@ type app struct {
 	cachedNodes     []proxyNode
 	store           *store
 	autoMergeCancel chan struct{}
-	healthParams healthParams
-	health       map[string]nodeHealth
-	regions      map[string]regionRecord
-	regionJob    *regionJob
-	patrolCancel chan struct{}
-	blocked      bool
-	blockReason  string
-	lastSwitch   time.Time
+	healthParams    healthParams
+	health          map[string]nodeHealth
+	regions         map[string]regionRecord
+	regionJob       *regionJob
+	patrolCancel    chan struct{}
+	blocked         bool
+	blockReason     string
+	lastSwitch      time.Time
 	// Set when a sweep condemned every node of the locked region while a real
 	// request still got through, which is a measurement problem rather than a
 	// dead region. It says so on the connection page until a sweep measures
@@ -345,6 +345,7 @@ func (a *app) routes(token string) *http.ServeMux {
 	mux.HandleFunc("POST /api/subscriptions/update", a.authorize(token, a.updateSubscription))
 	mux.HandleFunc("POST /api/subscriptions/merge", a.authorize(token, a.mergeSubscriptions))
 	mux.HandleFunc("POST /api/subscriptions/refresh", a.authorize(token, a.refreshSingleSubscription))
+	mux.HandleFunc("POST /api/subscriptions/quota", a.authorize(token, a.refreshSubscriptionQuota))
 	mux.HandleFunc("POST /api/subscriptions/auto-merge", a.authorize(token, a.setAutoMergeHours))
 	mux.HandleFunc("PUT /api/subscriptions", a.authorize(token, a.renameSubscription))
 	mux.HandleFunc("DELETE /api/subscriptions", a.authorize(token, a.deleteSubscription))

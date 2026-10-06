@@ -26,15 +26,17 @@ type subscriptionUserInfo struct {
 // rest of the pipeline — profile matching, the node cache, fetch and connect —
 // is untouched; this list is only the register of what the user has saved.
 type subscriptionEntry struct {
-	ID        string                `json:"id"`
-	URL       string                `json:"url"`
-	Label     string                `json:"label"`
-	Prefix    string                `json:"prefix,omitempty"`
-	Enabled   bool                  `json:"enabled"`
-	UpdatedAt int64                 `json:"updatedAt,omitempty"`
-	NodeCount int                   `json:"nodeCount,omitempty"`
-	LastError string                `json:"lastError,omitempty"`
-	UserInfo  *subscriptionUserInfo `json:"userInfo,omitempty"`
+	ID             string                `json:"id"`
+	URL            string                `json:"url"`
+	Label          string                `json:"label"`
+	Prefix         string                `json:"prefix,omitempty"`
+	Enabled        bool                  `json:"enabled"`
+	UpdatedAt      int64                 `json:"updatedAt,omitempty"`
+	NodeCount      int                   `json:"nodeCount,omitempty"`
+	LastError      string                `json:"lastError,omitempty"`
+	UserInfo       *subscriptionUserInfo `json:"userInfo,omitempty"`
+	QuotaUpdatedAt int64                 `json:"quotaUpdatedAt,omitempty"`
+	QuotaError     string                `json:"quotaError,omitempty"`
 }
 
 const (
@@ -137,10 +139,10 @@ func (a *app) ensureSubscriptionLocked(rawURL string) {
 		}
 	}
 	a.subscriptions = append(a.subscriptions, subscriptionEntry{
-		ID:        subscriptionHash(rawURL),
-		URL:       rawURL,
-		Label:     subscriptionLabel(rawURL),
-		Enabled:   true,
+		ID:      subscriptionHash(rawURL),
+		URL:     rawURL,
+		Label:   subscriptionLabel(rawURL),
+		Enabled: true,
 	})
 	_ = a.saveSubscriptionsLocked()
 }
@@ -474,6 +476,8 @@ func (a *app) recordSubscriptionUseAndInfoLocked(id string, nodeCount int, failu
 		a.subscriptions[i].LastError = failure
 		if info != nil {
 			a.subscriptions[i].UserInfo = info
+			a.subscriptions[i].QuotaUpdatedAt = time.Now().Unix()
+			a.subscriptions[i].QuotaError = ""
 		}
 	}
 	_ = a.saveSubscriptionsLocked()
@@ -660,6 +664,34 @@ func (a *app) mergeAllEnabledSubscriptionsLocked() ([]proxyNode, error) {
 		return nil, errors.New("所有已启用的订阅均拉取失败且无可用本地缓存")
 	}
 
+	return a.writeMergedSourcesLocked(sources)
+}
+
+// mergeEnabledSubscriptionCachesLocked reapplies the current source selection
+// without downloading again. Every source included in a successful merge has
+// its own last-good profile, which lets a single-source refresh update the live
+// aggregate while offline sources keep their prior nodes.
+func (a *app) mergeEnabledSubscriptionCachesLocked() ([]proxyNode, error) {
+	var sources []SubscriptionSource
+	for _, entry := range a.subscriptions {
+		if !entry.Enabled || strings.TrimSpace(entry.URL) == "" {
+			continue
+		}
+		body, err := os.ReadFile(a.profileCachePath(entry.ID))
+		if err != nil || len(parseProfileNodes(body)) == 0 {
+			continue
+		}
+		sources = append(sources, SubscriptionSource{
+			ID: entry.ID, Label: entry.Label, Prefix: entry.Prefix, Body: body,
+		})
+	}
+	if len(sources) == 0 {
+		return nil, errors.New("没有可用的订阅缓存，请执行「一键合并更新」")
+	}
+	return a.writeMergedSourcesLocked(sources)
+}
+
+func (a *app) writeMergedSourcesLocked(sources []SubscriptionSource) ([]proxyNode, error) {
 	mergedYAML, mergedNodes, err := mergeSubscriptionSources(sources)
 	if err != nil {
 		return nil, err
@@ -845,7 +877,126 @@ func (a *app) refreshSingleSubscription(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
+	if a.settings.SubscriptionURL == mergedSubscriptionURL && updated.Enabled {
+		if _, err := a.mergeEnabledSubscriptionCachesLocked(); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+	}
 	writeJSON(w, map[string]any{"ok": true, "subscription": updated})
+}
+
+// refreshSubscriptionQuota reads only Subscription-Userinfo. It deliberately
+// leaves profile caches and the running Mihomo configuration untouched.
+func (a *app) refreshSubscriptionQuota(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ID string `json:"id"`
+	}
+	if err := decodeJSON(r.Body, &body); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	id := strings.TrimSpace(body.ID)
+	if id == "" {
+		http.Error(w, "missing subscription id", http.StatusBadRequest)
+		return
+	}
+
+	a.mu.Lock()
+	entry, ok := a.findSubscriptionLocked(id)
+	if !ok {
+		a.mu.Unlock()
+		http.Error(w, "没有这个订阅", http.StatusNotFound)
+		return
+	}
+	remoteURLs, _ := categorizeSubscriptionInput(entry.URL)
+	proxies := a.proxyAddressesForDownloadLocked()
+	a.mu.Unlock()
+
+	if len(remoteURLs) == 0 {
+		a.recordSubscriptionQuotaError(id, entry.URL, "此订阅没有可刷新的远程流量信息", http.StatusBadRequest, w)
+		return
+	}
+
+	var userInfo *subscriptionUserInfo
+	respondedWithoutInfo := false
+	for _, remoteURL := range remoteURLs {
+		candidates := []string{remoteURL}
+		if alt, ok := clashFormatURL(remoteURL); ok {
+			candidates = append(candidates, alt)
+		}
+		for _, proxy := range proxies {
+			for _, candidate := range candidates {
+				info, err := fetchSubscriptionUserInfo(candidate, proxy)
+				if err == nil {
+					userInfo = info
+					break
+				}
+				if errors.Is(err, errNoSubscriptionUserInfo) {
+					respondedWithoutInfo = true
+				}
+			}
+			if userInfo != nil {
+				break
+			}
+		}
+		if userInfo != nil {
+			break
+		}
+	}
+
+	if userInfo == nil {
+		message := "无法连接订阅服务，流量信息未刷新"
+		if respondedWithoutInfo {
+			message = "订阅服务未返回流量信息"
+		}
+		a.recordSubscriptionQuotaError(id, entry.URL, message, http.StatusBadGateway, w)
+		return
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i := range a.subscriptions {
+		if a.subscriptions[i].ID != id {
+			continue
+		}
+		if a.subscriptions[i].URL != entry.URL {
+			http.Error(w, "订阅已变更，请重新刷新", http.StatusConflict)
+			return
+		}
+		a.subscriptions[i].UserInfo = userInfo
+		a.subscriptions[i].QuotaUpdatedAt = time.Now().Unix()
+		a.subscriptions[i].QuotaError = ""
+		if err := a.saveSubscriptionsLocked(); err != nil {
+			http.Error(w, "无法保存流量信息", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"ok": true, "subscription": a.subscriptions[i]})
+		return
+	}
+	http.Error(w, "订阅已删除，请重新刷新", http.StatusConflict)
+}
+
+func (a *app) recordSubscriptionQuotaError(id, originalURL, message string, status int, w http.ResponseWriter) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for i := range a.subscriptions {
+		if a.subscriptions[i].ID != id {
+			continue
+		}
+		if a.subscriptions[i].URL != originalURL {
+			http.Error(w, "订阅已变更，请重新刷新", http.StatusConflict)
+			return
+		}
+		a.subscriptions[i].QuotaError = message
+		if err := a.saveSubscriptionsLocked(); err != nil {
+			http.Error(w, "无法保存流量刷新状态", http.StatusInternalServerError)
+			return
+		}
+		http.Error(w, message, status)
+		return
+	}
+	http.Error(w, "订阅已删除，请重新刷新", http.StatusConflict)
 }
 
 func (a *app) renameSubscription(w http.ResponseWriter, r *http.Request) {
@@ -899,6 +1050,7 @@ func (a *app) deleteSubscription(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "没有这个订阅", http.StatusNotFound)
 		return
 	}
+	previous := append([]subscriptionEntry(nil), a.subscriptions...)
 	kept := make([]subscriptionEntry, 0, len(a.subscriptions))
 	for _, item := range a.subscriptions {
 		if item.ID != id {
@@ -906,15 +1058,35 @@ func (a *app) deleteSubscription(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.subscriptions = kept
-	if err := a.saveSubscriptionsLocked(); err != nil {
-		http.Error(w, "无法保存订阅列表", http.StatusInternalServerError)
-		return
-	}
-	_ = os.Remove(a.profileCachePath(id))
-	_ = os.Remove(a.profileCachePath(id) + ".format")
-	// Removing the subscription that was in use leaves the app without one; the
-	// nodes it contributed go with it.
-	if entry.URL == a.settings.SubscriptionURL {
+	if a.settings.SubscriptionURL == mergedSubscriptionURL {
+		remainingEnabled := false
+		for _, item := range a.subscriptions {
+			if item.Enabled {
+				remainingEnabled = true
+				break
+			}
+		}
+		if remainingEnabled {
+			if _, err := a.mergeEnabledSubscriptionCachesLocked(); err != nil {
+				a.subscriptions = previous
+				_ = a.saveSubscriptionsLocked()
+				http.Error(w, "无法更新合并节点列表："+err.Error(), http.StatusBadGateway)
+				return
+			}
+		} else {
+			// An aggregate with no enabled source must not keep serving nodes from
+			// the deleted sources. Manual nodes remain available on their own.
+			a.settings.SubscriptionURL = ""
+			a.profileFromCache = false
+			a.clearNodeBoundStateLocked()
+			a.removeConfigLocked()
+			_ = os.Remove(a.profilePath())
+			_ = os.Remove(a.profilePath() + ".source")
+			_ = os.Remove(a.profilePath() + ".format")
+		}
+	} else if entry.URL == a.settings.SubscriptionURL {
+		// Removing the single subscription that was in use leaves the app without
+		// one; the nodes it contributed go with it.
 		a.settings.SubscriptionURL = ""
 		a.profileFromCache = false
 		a.clearNodeBoundStateLocked()
@@ -923,6 +1095,13 @@ func (a *app) deleteSubscription(w http.ResponseWriter, r *http.Request) {
 		_ = os.Remove(a.profilePath() + ".source")
 		_ = os.Remove(a.profilePath() + ".format")
 	}
+	if err := a.saveSubscriptionsLocked(); err != nil {
+		a.subscriptions = previous
+		_ = a.saveSubscriptionsLocked()
+		http.Error(w, "无法保存订阅列表", http.StatusInternalServerError)
+		return
+	}
+	_ = os.Remove(a.profileCachePath(id))
+	_ = os.Remove(a.profileCachePath(id) + ".format")
 	writeJSON(w, map[string]any{"ok": true, "activeUrl": a.settings.SubscriptionURL})
 }
-

@@ -262,79 +262,80 @@ extension _SubscriptionPage on _HomePageState {
           ]),
         ),
       ] else ...[
-      const _SectionHeader(title: '内核'),
-      _Panel(
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          TextField(
-            controller: _mihomo,
-            enabled: !_connected && !_busy,
-            decoration: InputDecoration(
-              labelText: 'Mihomo 程序路径',
-              hintText: _mihomoResolved.isEmpty
-                  ? '留空则用配置目录下的 mihomo.exe'
-                  : '留空则用 $_mihomoResolved',
-              prefixIcon: const Icon(Icons.memory_rounded, size: 18),
+        const _SectionHeader(title: '内核'),
+        _Panel(
+          child:
+              Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            TextField(
+              controller: _mihomo,
+              enabled: !_connected && !_busy,
+              decoration: InputDecoration(
+                labelText: 'Mihomo 程序路径',
+                hintText: _mihomoResolved.isEmpty
+                    ? '留空则用配置目录下的 mihomo.exe'
+                    : '留空则用 $_mihomoResolved',
+                prefixIcon: const Icon(Icons.memory_rounded, size: 18),
+              ),
             ),
-          ),
-          const SizedBox(height: 16),
-          Row(children: [
-            Icon(
-                wintunInstalled
-                    ? Icons.check_circle_rounded
-                    : Icons.error_outline_rounded,
-                size: 18,
-                color: wintunInstalled ? Tokens.ok : Tokens.bad),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text('wintun.dll',
-                        style: TextStyle(
-                            fontSize: 13, fontWeight: FontWeight.w600)),
-                    Text(
-                      wintunInstalled
-                          ? '${tun?.wintun.version ?? ''}　${tun?.wintun.path ?? ''}'
-                          : '尚未安装。TUN 模式需要它，下载时会校验哈希与 WireGuard 的数字签名。',
-                      style: Tokens.hint,
-                    ),
-                  ]),
+            const SizedBox(height: 16),
+            Row(children: [
+              Icon(
+                  wintunInstalled
+                      ? Icons.check_circle_rounded
+                      : Icons.error_outline_rounded,
+                  size: 18,
+                  color: wintunInstalled ? Tokens.ok : Tokens.bad),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('wintun.dll',
+                          style: TextStyle(
+                              fontSize: 13, fontWeight: FontWeight.w600)),
+                      Text(
+                        wintunInstalled
+                            ? '${tun?.wintun.version ?? ''}　${tun?.wintun.path ?? ''}'
+                            : '尚未安装。TUN 模式需要它，下载时会校验哈希与 WireGuard 的数字签名。',
+                        style: Tokens.hint,
+                      ),
+                    ]),
+              ),
+              TextButton(
+                onPressed: _busy ? null : _downloadWintun,
+                child: Text(wintunInstalled ? '重新安装' : '下载 wintun.dll'),
+              ),
+            ]),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _wintun,
+              enabled: !_connected && !_busy,
+              decoration: const InputDecoration(
+                labelText: 'wintun.dll 路径（留空则自动下载）',
+                prefixIcon: Icon(Icons.folder_outlined, size: 18),
+              ),
             ),
-            TextButton(
-              onPressed: _busy ? null : _downloadWintun,
-              child: Text(wintunInstalled ? '重新安装' : '下载 wintun.dll'),
+            const SizedBox(height: 18),
+            const Divider(),
+            const SizedBox(height: 10),
+            _KeyValueRow(label: '虚拟网卡', value: tun?.interface ?? 'SmartVPN'),
+            _KeyValueRow(label: 'TUN 栈', value: tun?.stack ?? 'gvisor'),
+            _KeyValueRow(label: 'MTU', value: '${tun?.mtu ?? 1500}'),
+            _KeyValueRow(
+                label: '配置目录',
+                value: profileLabel(home: _homePath, portable: _portable)),
+            _KeyValueRow(
+              label: '管理员权限',
+              value: _elevated ? '已获得' : '未获得',
+              valueColor: _elevated ? Tokens.ok : Tokens.warn,
+              trailing: _elevated
+                  ? null
+                  : TextButton(
+                      onPressed: _busy ? null : _relaunchElevated,
+                      child: const Text('以管理员身份重启')),
             ),
           ]),
-          const SizedBox(height: 12),
-          TextField(
-            controller: _wintun,
-            enabled: !_connected && !_busy,
-            decoration: const InputDecoration(
-              labelText: 'wintun.dll 路径（留空则自动下载）',
-              prefixIcon: Icon(Icons.folder_outlined, size: 18),
-            ),
-          ),
-          const SizedBox(height: 18),
-          const Divider(),
-          const SizedBox(height: 10),
-          _KeyValueRow(label: '虚拟网卡', value: tun?.interface ?? 'SmartVPN'),
-          _KeyValueRow(label: 'TUN 栈', value: tun?.stack ?? 'gvisor'),
-          _KeyValueRow(label: 'MTU', value: '${tun?.mtu ?? 1500}'),
-          _KeyValueRow(
-              label: '配置目录',
-              value: profileLabel(home: _homePath, portable: _portable)),
-          _KeyValueRow(
-            label: '管理员权限',
-            value: _elevated ? '已获得' : '未获得',
-            valueColor: _elevated ? Tokens.ok : Tokens.warn,
-            trailing: _elevated
-                ? null
-                : TextButton(
-                    onPressed: _busy ? null : _relaunchElevated,
-                    child: const Text('以管理员身份重启')),
-          ),
-        ]),
-      ),
+        ),
       ],
     ]);
   }
@@ -403,7 +404,7 @@ extension _SubscriptionPage on _HomePageState {
                               tint: Tokens.okTint)
                         else if (isPartInMerged)
                           const _Badge(
-                              label: '合并生效中',
+                              label: '已启用来源',
                               color: Tokens.ok,
                               tint: Tokens.okTint),
                       ],
@@ -428,6 +429,18 @@ extension _SubscriptionPage on _HomePageState {
                     : Tokens.hint,
               ),
             ),
+            if (uinfo == null)
+              Padding(
+                padding: const EdgeInsets.only(left: 44, right: 8, bottom: 4),
+                child: Text(
+                  entry.quotaError.isNotEmpty
+                      ? '流量刷新失败：${entry.quotaError}'
+                      : '暂无流量信息，可点击“刷新用量”获取',
+                  style: entry.quotaError.isNotEmpty
+                      ? const TextStyle(fontSize: 12, color: Tokens.warn)
+                      : Tokens.hint,
+                ),
+              ),
             if (uinfo != null) ...[
               Padding(
                 padding: const EdgeInsets.only(
@@ -463,6 +476,15 @@ extension _SubscriptionPage on _HomePageState {
                         ),
                       ],
                     ),
+                    const SizedBox(height: 3),
+                    Text(
+                      entry.quotaError.isNotEmpty
+                          ? '刷新失败：${entry.quotaError} · 上次更新 ${updatedLabel(entry.quotaUpdatedAt > 0 ? entry.quotaUpdatedAt : entry.updatedAt)}'
+                          : '用量更新于 ${updatedLabel(entry.quotaUpdatedAt > 0 ? entry.quotaUpdatedAt : entry.updatedAt)}',
+                      style: entry.quotaError.isNotEmpty
+                          ? const TextStyle(fontSize: 11, color: Tokens.warn)
+                          : Tokens.hint,
+                    ),
                   ],
                 ),
               ),
@@ -487,6 +509,24 @@ extension _SubscriptionPage on _HomePageState {
                             horizontal: 8, vertical: 4),
                       ),
                     ),
+                  TextButton.icon(
+                    onPressed: (_busy || _quotaRefreshingId != null)
+                        ? null
+                        : () => unawaited(_refreshSubscriptionQuota(entry)),
+                    icon: _quotaRefreshingId == entry.id
+                        ? const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.data_usage_rounded, size: 14),
+                    label: const Text('刷新用量'),
+                    style: TextButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 8, vertical: 4),
+                    ),
+                  ),
                   TextButton.icon(
                     onPressed: blocked
                         ? null
@@ -554,7 +594,7 @@ extension _SubscriptionPage on _HomePageState {
                       ] else if (isPartInMerged) ...[
                         const SizedBox(width: 6),
                         const _Badge(
-                            label: '合并生效中',
+                            label: '已启用来源',
                             color: Tokens.ok,
                             tint: Tokens.okTint),
                       ],
@@ -576,6 +616,19 @@ extension _SubscriptionPage on _HomePageState {
                 onPressed: blocked
                     ? null
                     : () => unawaited(_refreshSingleSubscription(entry)),
+              ),
+              IconButton(
+                tooltip: '刷新剩余流量',
+                icon: _quotaRefreshingId == entry.id
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.data_usage_rounded, size: 18),
+                onPressed: (_busy || _quotaRefreshingId != null)
+                    ? null
+                    : () => unawaited(_refreshSubscriptionQuota(entry)),
               ),
               if (!active)
                 TextButton(
@@ -628,10 +681,31 @@ extension _SubscriptionPage on _HomePageState {
                         ),
                       ],
                     ),
+                    const SizedBox(height: 3),
+                    Text(
+                      entry.quotaError.isNotEmpty
+                          ? '刷新失败：${entry.quotaError} · 上次更新 ${updatedLabel(entry.quotaUpdatedAt > 0 ? entry.quotaUpdatedAt : entry.updatedAt)}'
+                          : '用量更新于 ${updatedLabel(entry.quotaUpdatedAt > 0 ? entry.quotaUpdatedAt : entry.updatedAt)}',
+                      style: entry.quotaError.isNotEmpty
+                          ? const TextStyle(fontSize: 11, color: Tokens.warn)
+                          : Tokens.hint,
+                    ),
                   ],
                 ),
               ),
             ],
+            if (uinfo == null)
+              Padding(
+                padding: const EdgeInsets.only(left: 44, right: 8, bottom: 4),
+                child: Text(
+                  entry.quotaError.isNotEmpty
+                      ? '流量刷新失败：${entry.quotaError}'
+                      : '暂无流量信息，可点击“刷新剩余流量”获取',
+                  style: entry.quotaError.isNotEmpty
+                      ? const TextStyle(fontSize: 12, color: Tokens.warn)
+                      : Tokens.hint,
+                ),
+              ),
           ],
         ],
       ),
