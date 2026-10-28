@@ -3,5 +3,25 @@
     "PATH": "${workspaceFolder}\\.tools\\flutter\\bin;${workspaceFolder}\\.tools\\go\\bin;${env:PATH}",
     "GOPROXY": "https://goproxy.cn,direct",
     "GOTOOLCHAIN": "local"
-  }
+  },
+  "java.import.exclusions": [
+    "**/node_modules/**",
+    "**/.metadata/**",
+    "**/archetype-resources/**",
+    "**/META-INF/maven/**",
+    "**/.tools",
+    "**/.tools/**"
+  ],
+  "java.project.resourceFilters": [
+    "node_modules",
+    "\\.git",
+    "\\.tools"
+  ],
+  "files.watcherExclude": {
+    "**/.tools/**": true
+  },
+  "gradle.nestedProjects": [
+    "frontend/android"
+  ],
+  "java.compile.nullAnalysis.mode": "automatic"
 }

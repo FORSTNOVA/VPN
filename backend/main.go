@@ -16,6 +16,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -230,6 +231,14 @@ func newService(home, bundleDir string, portable, elevated bool) *app {
 		if params, err := a.store.loadHealthParams(); err != nil {
 			log.Printf("%v", err)
 		} else {
+			if runtime.GOOS == "android" {
+				if params.ConnectTimeoutMs < 5000 {
+					params.ConnectTimeoutMs = 6000
+				}
+				if params.FailureThreshold < 3 {
+					params.FailureThreshold = 3
+				}
+			}
 			a.healthParams = params
 		}
 		if health, err := a.store.loadHealth(); err != nil {

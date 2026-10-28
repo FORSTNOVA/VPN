@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"net"
+	"sync/atomic"
 	"time"
 )
 
@@ -22,17 +23,31 @@ import (
 // be answered is not a quick failure — it is a timeout, which is how a checks
 // page ends up holding the service for minutes.
 //
-// So the service asks resolvers that answer on the open network. They are the
-// same ones the kernel is configured with, and the same two, so a lookup that
-// works here and a lookup that works there mean the same thing.
+// So the service asks resolvers that answer on the open network. Multiple
+// resilient upstream servers are configured with round-robin rotation so that
+// packet drops or port-53 UDP interception on cellular networks do not stall
+// retries on the same unreachable upstream.
+var (
+	androidDNSServers = []string{
+		"223.5.5.5:53",      // AliDNS primary
+		"119.29.29.29:53",    // DNSPod / Tencent primary
+		"114.114.114.114:53", // 114DNS (carrier-friendly nationwide)
+		"223.6.6.6:53",      // AliDNS secondary
+		"180.76.76.76:53",    // Baidu DNS
+	}
+	androidDNSCounter uint32
+)
+
 func init() {
-	servers := []string{"223.5.5.5:53", "119.29.29.29:53"}
 	net.DefaultResolver = &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+			count := len(androidDNSServers)
+			start := int(atomic.AddUint32(&androidDNSCounter, 1)) % count
 			var lastErr error
-			for _, server := range servers {
-				dialer := net.Dialer{Timeout: 4 * time.Second}
+			for i := 0; i < count; i++ {
+				server := androidDNSServers[(start+i)%count]
+				dialer := net.Dialer{Timeout: 2500 * time.Millisecond}
 				conn, err := dialer.DialContext(ctx, network, server)
 				if err == nil {
 					return conn, nil

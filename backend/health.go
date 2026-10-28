@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"runtime"
 	"sort"
 	"strconv"
 	"time"
@@ -48,6 +49,16 @@ type healthParams struct {
 // faster cadence can set it back in the interface, where the value is editable
 // and clamped to a range the loop can run with.
 func defaultHealthParams() healthParams {
+	if runtime.GOOS == "android" {
+		return healthParams{
+			ConnectTimeoutMs:  6000,
+			PatrolIntervalSec: 60,
+			FailureThreshold:  3,
+			CooldownSec:       60,
+			MinDwellSec:       30,
+			RecoverySuccesses: 3,
+		}
+	}
 	return healthParams{
 		ConnectTimeoutMs:  3000,
 		PatrolIntervalSec: 60,
@@ -432,6 +443,15 @@ func (a *app) pickFailoverTargetLocked(now time.Time) (string, int) {
 // the sweep gives each node less time than this to answer its own probe.
 const confirmProbeTimeout = 5 * time.Second
 
+var confirmProbeTargets = []struct {
+	name string
+	url  string
+}{
+	{"Cloudflare Trace", cloudflareTraceURL},
+	{"Google 204", "https://connectivitycheck.gstatic.com/generate_204"},
+	{"Cloudflare 204", "https://cp.cloudflare.com/generate_204"},
+}
+
 // confirmTrafficFlowsLocked asks whether a request can still get through, using
 // the path an application takes: the local mixed port, so the kernel routes it
 // exactly as it routes the user's own traffic, and an HTTPS address that is not
@@ -441,6 +461,8 @@ const confirmProbeTimeout = 5 * time.Second
 // It answers a narrower question than a sweep and answers it independently,
 // which is what makes it usable as a second opinion: the sweep reports what the
 // kernel's delay probe saw, this reports what the tunnel actually carried.
+// To avoid false fail-closed triggers when a single probe target is blocked or throttled,
+// multiple independent targets are checked.
 func (a *app) confirmTrafficFlowsLocked() bool {
 	if a.confirmProbe != nil {
 		return a.confirmProbe()
@@ -458,7 +480,16 @@ func (a *app) confirmTrafficFlowsLocked() bool {
 		Scheme: "http",
 		Host:   net.JoinHostPort("127.0.0.1", strconv.Itoa(a.mixedPort)),
 	}
-	return pathPassed(checkSiteWithin(proxyURL, "通路确认", cloudflareTraceURL, confirmProbeTimeout))
+	timeout := confirmProbeTimeout
+	if runtime.GOOS == "android" {
+		timeout = 6 * time.Second
+	}
+	for _, target := range confirmProbeTargets {
+		if pathPassed(checkSiteWithin(proxyURL, target.name, target.url, timeout)) {
+			return true
+		}
+	}
+	return false
 }
 
 // noteSweepAnomalyLocked records that the region measured as dead while a real
