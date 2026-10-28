@@ -420,33 +420,39 @@ class _Panel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final activeColor = accentColor ?? Tokens.cyan;
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(Tokens.radiusPanel),
+    const cutShape = BeveledRectangleBorder(
+      borderRadius: BorderRadius.all(Radius.circular(Tokens.akCutMd)),
+    );
+    return ClipPath(
+      clipper: const ShapeBorderClipper(shape: cutShape),
       child: CustomPaint(
         foregroundPainter: (highlighted || showCorner)
             ? _AkPanelAccentPainter(
                 color: activeColor,
                 drawCorner: highlighted || showCorner,
                 drawBar: highlighted,
-                cornerSize: 10,
+                cornerSize: Tokens.akCutMd + 3,
                 barWidth: Tokens.barWidth,
               )
             : null,
         child: Container(
           padding: padding,
-          decoration: BoxDecoration(
+          decoration: ShapeDecoration(
             color: Tokens.surface,
-            border: Border.all(
-              color: highlighted
-                  ? activeColor.withOpacity(0.55)
-                  : Tokens.hairline,
-              width: 1.0,
+            shape: BeveledRectangleBorder(
+              borderRadius:
+                  const BorderRadius.all(Radius.circular(Tokens.akCutMd)),
+              side: BorderSide(
+                color: highlighted
+                    ? activeColor.withOpacity(0.65)
+                    : Tokens.hairline,
+                width: 1.0,
+              ),
             ),
-            borderRadius: BorderRadius.circular(Tokens.radiusPanel),
-            boxShadow: highlighted
+            shadows: highlighted
                 ? [
                     BoxShadow(
-                      color: activeColor.withOpacity(0.14),
+                      color: activeColor.withOpacity(0.15),
                       blurRadius: 16,
                       offset: const Offset(0, 3),
                     ),
@@ -958,31 +964,39 @@ class _Badge extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Container(
         padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
-        decoration: BoxDecoration(
+        decoration: ShapeDecoration(
           color: tint ?? Tokens.idleTint,
-          borderRadius: BorderRadius.circular(Tokens.radiusBadge),
-          border: Border.all(color: color.withOpacity(0.35), width: 0.9),
+          shape: BeveledRectangleBorder(
+            borderRadius:
+                const BorderRadius.all(Radius.circular(Tokens.akCutSm)),
+            side: BorderSide(color: color.withOpacity(0.4), width: 0.9),
+          ),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             if (showDot) ...[
-              Container(
-                width: 5,
-                height: 5,
-                decoration: BoxDecoration(
+              Transform.rotate(
+                angle: 0.785398,
+                child: Container(
+                  width: 4.5,
+                  height: 4.5,
                   color: color,
-                  borderRadius: BorderRadius.circular(1.0),
                 ),
               ),
               const SizedBox(width: 5),
             ],
-            Text(label,
-                style: TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w700,
-                    color: color,
-                    letterSpacing: 0.3)),
+            Text(
+              label,
+              style: TextStyle(
+                fontFamily: 'JetBrains Mono',
+                fontFamilyFallback: Tokens.fontMonoFallback,
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: color,
+                letterSpacing: 0.3,
+              ),
+            ),
           ],
         ),
       );
@@ -1258,31 +1272,51 @@ class _PathSurface extends StatelessWidget {
           const SizedBox(height: 16),
           Row(children: [
             Container(
-              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
-              decoration: BoxDecoration(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3.5),
+              decoration: ShapeDecoration(
                 color: Tokens.surfaceElevated,
-                borderRadius: BorderRadius.circular(Tokens.radiusBadge),
-                border: Border.all(color: Tokens.hairlineBright),
+                shape: BeveledRectangleBorder(
+                  borderRadius:
+                      const BorderRadius.all(Radius.circular(Tokens.akCutSm)),
+                  side: BorderSide(
+                    color: connected
+                        ? Tokens.cyan.withOpacity(0.6)
+                        : Tokens.hairlineBright,
+                    width: 0.9,
+                  ),
+                ),
               ),
-              child: const Text('本机', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600)),
+              child: const Text('本机',
+                  style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
             ),
             const SizedBox(width: 10),
             Expanded(child: _Connector(active: connected)),
             const SizedBox(width: 10),
             Flexible(
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-                decoration: BoxDecoration(
-                  color: connected ? Tokens.cyan.withOpacity(0.12) : Tokens.surfaceElevated,
-                  borderRadius: BorderRadius.circular(Tokens.radiusBadge),
-                  border: Border.all(
-                    color: connected ? Tokens.cyan.withOpacity(0.4) : Tokens.hairline,
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: ShapeDecoration(
+                  color: connected
+                      ? Tokens.cyan.withOpacity(0.12)
+                      : Tokens.surfaceElevated,
+                  shape: BeveledRectangleBorder(
+                    borderRadius:
+                        const BorderRadius.all(Radius.circular(Tokens.akCutSm)),
+                    side: BorderSide(
+                      color: connected
+                          ? Tokens.cyan.withOpacity(0.55)
+                          : Tokens.hairline,
+                      width: 0.9,
+                    ),
                   ),
                 ),
                 child: Text(
                   nodeLabel,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
+                    fontFamily: 'JetBrains Mono',
+                    fontFamilyFallback: Tokens.fontMonoFallback,
                     fontSize: 12.5,
                     fontWeight: FontWeight.w700,
                     color: connected ? Tokens.cyan : Tokens.ink,
@@ -1316,23 +1350,35 @@ class _Connector extends StatelessWidget {
   @override
   Widget build(BuildContext context) => Row(children: [
         Expanded(
-            child: Container(
-                height: 1.5,
-                color: active ? Tokens.cyan.withOpacity(0.5) : Tokens.hairline)),
-        Container(
-          width: 7,
-          height: 7,
-          decoration: BoxDecoration(
+          child: Container(
+            height: 1.5,
+            color: active ? Tokens.cyan.withOpacity(0.55) : Tokens.hairline,
+          ),
+        ),
+        Transform.rotate(
+          angle: 0.785398, // 45°
+          child: Container(
+            width: 7,
+            height: 7,
+            decoration: BoxDecoration(
               color: active ? Tokens.cyan : Tokens.inkFaint,
-              shape: BoxShape.circle,
               boxShadow: active
-                  ? [BoxShadow(color: Tokens.cyan.withOpacity(0.6), blurRadius: 6)]
-                  : null),
+                  ? [
+                      BoxShadow(
+                        color: Tokens.cyan.withOpacity(0.75),
+                        blurRadius: 6,
+                      ),
+                    ]
+                  : null,
+            ),
+          ),
         ),
         Expanded(
-            child: Container(
-                height: 1.5,
-                color: active ? Tokens.cyan.withOpacity(0.5) : Tokens.hairline)),
+          child: Container(
+            height: 1.5,
+            color: active ? Tokens.cyan.withOpacity(0.55) : Tokens.hairline,
+          ),
+        ),
       ]);
 }
 

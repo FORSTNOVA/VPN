@@ -2532,11 +2532,36 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               backgroundColor: Tokens.rail,
               foregroundColor: Tokens.ink,
               elevation: 0,
-              title: const Text('SmartVPN',
-                  style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: 0.2)),
+              title: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Container(
+                    width: Tokens.barWidth,
+                    height: 14,
+                    color: Tokens.cyan,
+                  ),
+                  const SizedBox(width: 8),
+                  const Text('SmartVPN',
+                      style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: 0.3)),
+                  const SizedBox(width: 6),
+                  Text('// PRTS',
+                      style: Tokens.akBilingualEn.copyWith(
+                          fontSize: 10, color: Tokens.cyan)),
+                ],
+              ),
+              bottom: PreferredSize(
+                preferredSize: const Size.fromHeight(2),
+                child: _AkStripes(
+                  height: 2,
+                  color: _connected
+                      ? Tokens.cyan.withOpacity(0.5)
+                      : Tokens.hairlineBright,
+                  background: Colors.transparent,
+                ),
+              ),
               actions: [
                 Padding(
                     padding: const EdgeInsets.only(right: 12),
@@ -2544,7 +2569,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               ],
             )
           : null,
-      drawer: narrow ? Drawer(child: SafeArea(child: _rail(inDrawer: true))) : null,
+      drawer: narrow
+          ? Drawer(
+              backgroundColor: Tokens.rail,
+              child: SafeArea(child: _rail(inDrawer: true)),
+            )
+          : null,
       body: SafeArea(
         child: Stack(
           children: [
@@ -2767,6 +2797,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ),
       ),
       const Divider(height: 1),
+      _AkStripes(
+        height: 1.5,
+        color: _connected
+            ? Tokens.cyan.withOpacity(0.4)
+            : Tokens.hairlineBright.withOpacity(0.3),
+        background: Colors.transparent,
+      ),
       if (_error != null)
         Padding(
           padding:
@@ -2808,15 +2845,33 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       (true, false, false) => ('代理已关闭', Tokens.warn, Tokens.warnTint),
     };
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-      decoration: BoxDecoration(
-          color: tint, borderRadius: BorderRadius.circular(Tokens.radiusBadge)),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: ShapeDecoration(
+        color: tint,
+        shape: BeveledRectangleBorder(
+          borderRadius:
+              const BorderRadius.all(Radius.circular(Tokens.akCutSm)),
+          side: BorderSide(color: color.withOpacity(0.4), width: 0.9),
+        ),
+      ),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
-        _StatusDot(color: color, size: 7),
-        const SizedBox(width: 8),
+        Transform.rotate(
+          angle: 0.785398,
+          child: Container(
+            width: 5,
+            height: 5,
+            color: color,
+          ),
+        ),
+        const SizedBox(width: 7),
         Text(label,
             style: TextStyle(
-                fontSize: 12, fontWeight: FontWeight.w600, color: color)),
+                fontFamily: 'JetBrains Mono',
+                fontFamilyFallback: Tokens.fontMonoFallback,
+                fontSize: 11.5,
+                fontWeight: FontWeight.w700,
+                color: color,
+                letterSpacing: 0.2)),
       ]),
     );
   }
@@ -3055,7 +3110,7 @@ class _AkHoverNavItemState extends State<_AkHoverNavItem> {
                         ),
                       ),
                     ),
-                    Icon(widget.page.icon, size: 17, color: activeColor),
+                    Icon(widget.page.icon, size: 16, color: activeColor),
                     const SizedBox(width: 8),
                     Expanded(
                       child: AnimatedSlide(
@@ -3067,6 +3122,20 @@ class _AkHoverNavItemState extends State<_AkHoverNavItem> {
                           textBaseline: TextBaseline.alphabetic,
                           children: [
                             Text(
+                              '0${widget.page.index + 1}',
+                              style: TextStyle(
+                                fontFamily: 'JetBrains Mono',
+                                fontFamilyFallback: Tokens.fontMonoFallback,
+                                fontSize: 9.5,
+                                fontWeight: FontWeight.w700,
+                                color: active
+                                    ? Tokens.cyan.withOpacity(0.9)
+                                    : Tokens.inkFaint.withOpacity(0.55),
+                                letterSpacing: 0.2,
+                              ),
+                            ),
+                            const SizedBox(width: 5),
+                            Text(
                               widget.page.label,
                               style: TextStyle(
                                 fontSize: 13,
@@ -3077,7 +3146,7 @@ class _AkHoverNavItemState extends State<_AkHoverNavItem> {
                                 letterSpacing: 0.3,
                               ),
                             ),
-                            const SizedBox(width: 6),
+                            const SizedBox(width: 5),
                             Flexible(
                               child: Text(
                                 widget.page.englishCode,
@@ -3100,22 +3169,26 @@ class _AkHoverNavItemState extends State<_AkHoverNavItem> {
                     if (widget.count != null)
                       Container(
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
+                            horizontal: 5, vertical: 2),
+                        decoration: ShapeDecoration(
                           color: active
                               ? Tokens.cyan.withOpacity(0.2)
                               : Tokens.surface,
-                          borderRadius: BorderRadius.circular(2),
-                          border: Border.all(
-                            color: active
-                                ? Tokens.cyan.withOpacity(0.5)
-                                : Tokens.hairline,
+                          shape: BeveledRectangleBorder(
+                            borderRadius: const BorderRadius.all(
+                                Radius.circular(Tokens.akCutSm)),
+                            side: BorderSide(
+                              color: active
+                                  ? Tokens.cyan.withOpacity(0.55)
+                                  : Tokens.hairline,
+                              width: 0.8,
+                            ),
                           ),
                         ),
                         child: Text(
                           widget.count!,
                           style: Tokens.number.copyWith(
-                            fontSize: 11,
+                            fontSize: 10.5,
                             color: active ? Tokens.cyan : Tokens.inkMuted,
                           ),
                         ),

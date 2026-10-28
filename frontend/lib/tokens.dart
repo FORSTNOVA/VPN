@@ -73,8 +73,11 @@ abstract final class Tokens {
   static const radiusControl = 2.0;
   static const radiusBadge = 2.0;
   static const barWidth = 4.0;                 // AKDS standard 4px accent bar
+  static const akCutSm = 3.5;                  // AKDS 45° chamfer cut small
+  static const akCutMd = 8.0;                  // AKDS 45° chamfer cut medium
+  static const akCutLg = 14.0;                 // AKDS 45° chamfer cut large
 
-  static const railWidth = 224.0;
+  static const railWidth = 220.0;
   static const contentMaxWidth = 880.0;
 
   static const fontFamily = 'Microsoft YaHei UI';
@@ -150,7 +153,9 @@ abstract final class Tokens {
 
   static ThemeData theme() {
     final base = ThemeData.dark(useMaterial3: true);
-    const shape = RoundedRectangleBorder(
+    const shape = BeveledRectangleBorder(
+        borderRadius: BorderRadius.all(Radius.circular(akCutSm)));
+    const roundedShape = RoundedRectangleBorder(
         borderRadius: BorderRadius.all(Radius.circular(radiusControl)));
     return base.copyWith(
       scaffoldBackgroundColor: background,
@@ -179,8 +184,10 @@ abstract final class Tokens {
           padding: const WidgetStatePropertyAll(
               EdgeInsets.symmetric(horizontal: 18, vertical: 14)),
           shape: const WidgetStatePropertyAll(shape),
+          side: WidgetStateProperty.resolveWith((states) =>
+              BorderSide(color: states.contains(WidgetState.disabled) ? Colors.transparent : cyan.withOpacity(0.4), width: 0.8)),
           textStyle: const WidgetStatePropertyAll(
-              TextStyle(fontSize: 13, fontWeight: FontWeight.w700, letterSpacing: 0.5)),
+              TextStyle(fontSize: 13, fontWeight: FontWeight.w700, letterSpacing: 0.6)),
         ),
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
@@ -188,7 +195,8 @@ abstract final class Tokens {
           backgroundColor: const WidgetStatePropertyAll(surface),
           foregroundColor: WidgetStateProperty.resolveWith((states) =>
               states.contains(WidgetState.disabled) ? inkFaint : ink),
-          side: const WidgetStatePropertyAll(BorderSide(color: hairline)),
+          side: WidgetStateProperty.resolveWith((states) =>
+              BorderSide(color: states.contains(WidgetState.hovered) ? cyan : hairline, width: 0.9)),
           padding: const WidgetStatePropertyAll(
               EdgeInsets.symmetric(horizontal: 16, vertical: 13)),
           shape: const WidgetStatePropertyAll(shape),
@@ -202,8 +210,8 @@ abstract final class Tokens {
               states.contains(WidgetState.disabled) ? inkFaint : cyan),
           textStyle: const WidgetStatePropertyAll(
               TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-          shape: const WidgetStatePropertyAll(RoundedRectangleBorder(
-              borderRadius: BorderRadius.all(Radius.circular(radiusBadge)))),
+          shape: const WidgetStatePropertyAll(BeveledRectangleBorder(
+              borderRadius: BorderRadius.all(Radius.circular(akCutSm)))),
         ),
       ),
       segmentedButtonTheme: SegmentedButtonThemeData(
@@ -212,7 +220,8 @@ abstract final class Tokens {
               states.contains(WidgetState.selected) ? cyanTint : surface),
           foregroundColor: WidgetStateProperty.resolveWith((states) =>
               states.contains(WidgetState.selected) ? cyan : inkMuted),
-          side: const WidgetStatePropertyAll(BorderSide(color: hairline)),
+          side: WidgetStateProperty.resolveWith((states) =>
+              BorderSide(color: states.contains(WidgetState.selected) ? cyan.withOpacity(0.6) : hairline)),
           textStyle: const WidgetStatePropertyAll(
               TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
           shape: const WidgetStatePropertyAll(shape),
@@ -242,9 +251,9 @@ abstract final class Tokens {
       dialogTheme: DialogThemeData(
         backgroundColor: surfaceElevated,
         surfaceTintColor: Colors.transparent,
-        shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(radiusPanel),
-            side: const BorderSide(color: hairline)),
+        shape: BeveledRectangleBorder(
+            borderRadius: BorderRadius.circular(akCutMd),
+            side: const BorderSide(color: hairlineBright, width: 1.0)),
         titleTextStyle: section,
         contentTextStyle: body,
       ),
@@ -252,8 +261,8 @@ abstract final class Tokens {
         backgroundColor: surfaceElevated,
         contentTextStyle: const TextStyle(fontSize: 13, color: ink),
         behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(radiusControl),
+        shape: BeveledRectangleBorder(
+            borderRadius: BorderRadius.circular(akCutSm),
             side: const BorderSide(color: cyan, width: 1)),
       ),
       progressIndicatorTheme:
