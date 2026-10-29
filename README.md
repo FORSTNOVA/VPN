@@ -2,6 +2,8 @@
 
 This repository implements the SmartVPN Windows and Android client described in `SmartVPN_Windows_Android_开发文档.docx`, including shared Go scheduling logic, Windows TUN, and Android VpnService.
 
+Current release: **v0.1.1** — [Windows portable package](https://github.com/FORSTNOVA/VPN/releases/download/v0.1.1/SmartVPN-0.1.1-portable.zip) and [Android ARM64 APK](https://github.com/FORSTNOVA/VPN/releases/download/v0.1.1/SmartVPN-0.1.1-android.apk). The [release page](https://github.com/FORSTNOVA/VPN/releases/tag/v0.1.1) contains both assets.
+
 ## Current scope
 
 - Flutter Windows UI source for subscription URL, Mihomo executable, connect/disconnect, status, and latency of the active node.
@@ -39,7 +41,7 @@ TUN mode covers the whole device only through Mihomo's own TUN inbound; it is no
 
 ## Android
 
-The Android half is the same Go service, linked into the application instead of started beside it, and the same Flutter pages. What differs is what the platform insists on.
+The Android half is the same Go service, linked into the application instead of started beside it, and the same Flutter pages. What differs is what the platform insists on. The current v0.1.1 ARM64 APK is available from the [GitHub release](https://github.com/FORSTNOVA/VPN/releases/tag/v0.1.1); it uses the existing debug-signing configuration for sideloading.
 
 - The service is a library inside the app, not a process. Since Android 10 an app may not execute anything in its private directory, and the only executables it has are the native libraries the installer unpacked; the kernel is compiled in as well, so there is nothing to exec and nothing to fetch at run time. `android.ps1` builds that library for the device's architecture first and the package around it second — `flutter build apk` alone produces a package that installs and then fails at the first call.
 - The kernel is built with `-tags cmfa,with_gvisor`, and neither tag is optional. Without `cmfa` the kernel builds its own Android routing rules when its TUN starts, which means reading the system's package list — a file no ordinary app may open. The listener then fails, the interface it was given has nobody reading it, and every application on the device loses its network while the window reports a connection. With it, the kernel leaves routing to the VpnService that made the tunnel, which is where routing belongs. `with_gvisor` is needed because the generated tunnel uses the gvisor stack and `cmfa` drops it, which shows up as the kernel refusing to start the listener and saying so.
@@ -54,6 +56,12 @@ The Android half is the same Go service, linked into the application instead of 
 - The tunnel is described by the system and read on demand: the interface, the routes on it and the resolver it points at. The system fills a tunnel in over more than one step, so a description taken once, when it is established, can say there are no routes while the tunnel is carrying everything.
 - Per-application routing is not implemented, which is the design document's own warning: the VpnService decides which applications are inside the tunnel, but giving different applications different nodes inside it needs a per-connection owner that this app does not have.
 - The pages are the desktop ones, made to fit a phone: below 700 logical pixels the rail becomes a drawer, the control rows that would not fit move their buttons to the next line, the region and node rows put their latency and badges under the name instead of beside it — a name squeezed to three characters is the one thing on the row the reader needs — and a dialog is as wide as it was designed to be or as the screen is, whichever is smaller. A test renders every page at phone width and fails on an overflow; the rows that only exist with data, which a harness without a local service cannot produce, were checked on a device.
+
+## Delivery status
+
+- **M1–M3 Windows:** system proxy, health and same-region switching, Windows TUN, and route/DNS checks are implemented.
+- **M4 Android:** VpnService, the embedded Go service, and the shared Flutter UI are implemented. The ARM64 release APK and connection path have been verified; a complete background, network-switching, and region-lock acceptance matrix remains to be recorded.
+- **M5 release candidate:** log sanitization, licence review, performance baselines, and both v0.1.1 packages are available. M5 is not signed off until the same rule samples pass on Windows and Android.
 
 ## Desktop pet
 
@@ -132,10 +140,10 @@ The runner is compiled with `/utf-8`. It carries the Chinese text of the tray me
 
 ## Portable package
 
-`Terminal → Run Task → SmartVPN: Package portable zip` (or `powershell -ExecutionPolicy Bypass -File package.ps1`) builds both halves and writes `dist\SmartVPN-<version>-portable.zip`, about 37 MB. Unzipping it produces one folder that runs where it is unpacked:
+`Terminal → Run Task → SmartVPN: Package portable zip` (or `powershell -ExecutionPolicy Bypass -File package.ps1`) builds both halves and writes `dist\SmartVPN-<version>-portable.zip`, 39.6 MB. Unzipping it produces one folder that runs where it is unpacked:
 
 ```
-SmartVPN-0.1.0\
+SmartVPN-0.1.1\
   smartvpn_windows.exe            the window
   flutter_windows.dll, data\      what the Flutter runner itself needs
   native_assets.json              what that runner reads at startup
