@@ -196,7 +196,9 @@ void main() {
       expect(summary.lockedRegion, '');
     });
 
-    test('carries the note about a region that measured dead but still carries traffic', () {
+    test(
+        'carries the note about a region that measured dead but still carries traffic',
+        () {
       // The page shows this instead of a block: traffic flows, so the sweep's
       // verdict was the thing that was wrong.
       final summary = HealthSummary.fromJson(const {
@@ -432,8 +434,8 @@ void main() {
     });
 
     test('treats an unavailable reading as a reason, not an error', () {
-      final snapshot =
-          TrafficSnapshot.fromJson(const {'available': false, 'reason': '内核未运行'});
+      final snapshot = TrafficSnapshot.fromJson(
+          const {'available': false, 'reason': '内核未运行'});
       expect(snapshot.available, isFalse);
       expect(snapshot.reason, '内核未运行');
       expect(snapshot.connections, isEmpty);
@@ -515,12 +517,14 @@ void main() {
           const {'id': 'a', 'label': 'B', 'lastError': '网络不可达'});
       expect(entry.hasFailed, isTrue);
       expect(subscriptionDetail(entry), contains('网络不可达'));
-      expect(subscriptionDetail(SavedSubscription.fromJson(const {
-        'id': 'a',
-        'label': 'B',
-        'nodeCount': 3,
-        'updatedAt': 0,
-      })), contains('尚未拉取'));
+      expect(
+          subscriptionDetail(SavedSubscription.fromJson(const {
+            'id': 'a',
+            'label': 'B',
+            'nodeCount': 3,
+            'updatedAt': 0,
+          })),
+          contains('尚未拉取'));
     });
 
     test('reads enabled, prefix and userInfo', () {
@@ -580,7 +584,9 @@ void main() {
   group('profile location', () {
     test('names the directory and says when the copy is portable', () {
       expect(profileLabel(home: '', portable: false), '—');
-      expect(profileLabel(home: r'C:\Users\me\AppData\Roaming\SmartVPN', portable: false),
+      expect(
+          profileLabel(
+              home: r'C:\Users\me\AppData\Roaming\SmartVPN', portable: false),
           r'C:\Users\me\AppData\Roaming\SmartVPN');
       final portable = profileLabel(home: r'E:\SmartVPN-data', portable: true);
       expect(portable, contains(r'E:\SmartVPN-data'));
@@ -594,7 +600,8 @@ void main() {
         'available': true,
         'entries': 9616,
         'updatedAt': '2026-09-26T01:20:00+08:00',
-        'source': 'https://cdn.jsdelivr.net/gh/gaoyifan/china-operator-ip@ip-lists/',
+        'source':
+            'https://cdn.jsdelivr.net/gh/gaoyifan/china-operator-ip@ip-lists/',
         'active': true,
       });
       expect(china.available, isTrue);
@@ -613,7 +620,8 @@ void main() {
       expect(chinaDirectLabel(const ChinaDirect.empty()), contains('还没有获取'));
     });
 
-    test('says when a list is ready but not yet in the running configuration', () {
+    test('says when a list is ready but not yet in the running configuration',
+        () {
       final china = ChinaDirect.fromJson(const {
         'available': true,
         'entries': 9616,
@@ -631,8 +639,7 @@ void main() {
     });
 
     test('says a refresh is running, and marks a copy as one', () {
-      expect(
-          chinaDirectLabel(ChinaDirect.fromJson(const {'refreshing': true})),
+      expect(chinaDirectLabel(ChinaDirect.fromJson(const {'refreshing': true})),
           contains('正在获取'));
       final marking = const ChinaDirect.empty().asRefreshing();
       expect(marking.refreshing, isTrue);
@@ -666,7 +673,12 @@ void main() {
         'matchesExit': false,
       },
       'udp': {
-        'relay': {'target': '1.1.1.1:53', 'reachable': true, 'latencyMs': 178, 'answer': '93.184.216.34'},
+        'relay': {
+          'target': '1.1.1.1:53',
+          'reachable': true,
+          'latencyMs': 178,
+          'answer': '93.184.216.34'
+        },
         'mapped': '203.0.113.7:54321',
         'matchesExit': true,
       },
@@ -683,7 +695,13 @@ void main() {
         'dnsLeak': true,
       },
       'sites': [
-        {'name': 'Google', 'state': 'ok', 'detail': '站点已响应', 'httpCode': 204, 'latencyMs': 210},
+        {
+          'name': 'Google',
+          'state': 'ok',
+          'detail': '站点已响应',
+          'httpCode': 204,
+          'latencyMs': 210
+        },
         {'name': 'ChatGPT', 'state': 'error', 'detail': '连接超时'},
       ],
     };
@@ -721,9 +739,12 @@ void main() {
     test('names the exit and who runs it', () {
       final egress = DiagnoseReport.fromJson(report).egress;
       expect(egressLocationLabel(egress), 'Tokyo · Japan');
-      expect(egressOperatorLabel(egress), 'AS2497 · IIJ · Internet Initiative Japan');
-      expect(egressAddressLabel(address: egress.ipv4, fallback: ''), '203.0.113.7');
-      expect(egressAddressLabel(address: '', fallback: '出口 IP 查询失败'), '出口 IP 查询失败');
+      expect(egressOperatorLabel(egress),
+          'AS2497 · IIJ · Internet Initiative Japan');
+      expect(egressAddressLabel(address: egress.ipv4, fallback: ''),
+          '203.0.113.7');
+      expect(egressAddressLabel(address: '', fallback: '出口 IP 查询失败'),
+          '出口 IP 查询失败');
       expect(egressAddressLabel(address: '', fallback: ''), '未取得');
     });
 
@@ -734,7 +755,11 @@ void main() {
       expect(dnsVerdictLabel(const DnsFacts.empty()), '未测出');
       expect(
           dnsVerdictLabel(const DnsFacts(
-              resolver: '1.1.1.1', geo: '', country: 'JP', matchesExit: true, error: '')),
+              resolver: '1.1.1.1',
+              geo: '',
+              country: 'JP',
+              matchesExit: true,
+              error: '')),
           '在出口所在地解析');
     });
 
@@ -793,8 +818,18 @@ void main() {
         'enabled': true,
         'intervalSec': 120,
         'targets': [
-          {'label': 'Google', 'url': 'https://www.google.com/generate_204', 'builtin': true, 'enabled': true},
-          {'label': 'Mine', 'url': 'https://example.com/', 'builtin': false, 'enabled': false},
+          {
+            'label': 'Google',
+            'url': 'https://www.google.com/generate_204',
+            'builtin': true,
+            'enabled': true
+          },
+          {
+            'label': 'Mine',
+            'url': 'https://example.com/',
+            'builtin': false,
+            'enabled': false
+          },
         ],
       });
       expect(checks.enabled, isTrue);
@@ -804,7 +839,8 @@ void main() {
       final sent = checks.toJson();
       expect(sent['enabled'], isTrue);
       final targets = sent['targets'] as List<dynamic>;
-      expect((targets.first as Map<String, dynamic>).containsKey('builtin'), isFalse,
+      expect((targets.first as Map<String, dynamic>).containsKey('builtin'),
+          isFalse,
           reason: 'whether a target is built in is the service\'s judgement');
     });
 
@@ -838,7 +874,10 @@ void main() {
     });
 
     test('summarises the last round', () {
-      PathStatus build({bool running = false, List<String> failures = const [], String at = ''}) =>
+      PathStatus build(
+              {bool running = false,
+              List<String> failures = const [],
+              String at = ''}) =>
           PathStatus(
               at: at,
               running: running,
@@ -855,7 +894,8 @@ void main() {
     });
 
     test('says what it did about a failing round', () {
-      PathStatus build(List<String> switched, List<String> failures) => PathStatus(
+      PathStatus build(List<String> switched, List<String> failures) =>
+          PathStatus(
             at: 'x',
             running: false,
             activeNode: '',
@@ -867,7 +907,8 @@ void main() {
       expect(pathSwitchLabel(build(const [], const ['YouTube'])), isEmpty);
       expect(pathSwitchLabel(build(const ['日本V1 A'], const [])),
           '因不通已切换到 日本V1 A，复检通过');
-      expect(pathSwitchLabel(build(const ['日本V1 A', '日本V3 B'], const ['YouTube'])),
+      expect(
+          pathSwitchLabel(build(const ['日本V1 A', '日本V3 B'], const ['YouTube'])),
           '已依次试过 日本V1 A、日本V3 B，仍未通过');
     });
 
@@ -947,8 +988,7 @@ void main() {
     test('groups by measured region and keeps unverified last', () {
       final groups = groupNodes(
           nodes: nodes, regions: regions, grouping: NodeGrouping.region);
-      expect(groups.map((group) => group.label).toList(),
-          ['JP', 'SG', '未验证']);
+      expect(groups.map((group) => group.label).toList(), ['JP', 'SG', '未验证']);
       expect(groups.first.nodes.map((item) => item.name).toList(),
           ['jp-a', 'jp-中转-b']);
       expect(groups.last.nodes.single.name, 'unverified-a');
@@ -1040,8 +1080,7 @@ void main() {
       expect(label(), '未连接');
       expect(label(connected: true, proxyEnabled: true), '已连接 · 系统代理');
       expect(label(connected: true), '内核运行中，系统代理未启用');
-      expect(
-          label(connected: true, mode: 'tun', tunActive: true),
+      expect(label(connected: true, mode: 'tun', tunActive: true),
           '已连接 · TUN 全设备');
       expect(label(connected: true, mode: 'tun'), '内核运行中，TUN 未就绪');
     });
@@ -1105,16 +1144,20 @@ void main() {
 
       expect(find.text('SmartVPN'), findsOneWidget);
       expect(find.text('未连接'), findsWidgets);
-      for (final label in ['连接', '流量', '节点', '地区与健康', '检测', '订阅与内核']) {
-        expect(navItem(label), findsOneWidget, reason: '$label must be in the rail');
+      for (final label in ['总览', '流量', '线路', '保护策略', '工具', '订阅']) {
+        expect(navItem(label), findsOneWidget,
+            reason: '$label must be in the rail');
       }
 
       // The connection page owns the power control and the route readout.
-      expect(find.text('代理模式'), findsOneWidget);
-      expect(find.text('系统代理'), findsOneWidget);
+      expect(find.text('代理模式与分流'), findsOneWidget);
+      await tester.ensureVisible(find.byType(ExpansionTile).first);
+      await tester.tap(find.byType(ExpansionTile).first);
+      await tester.pumpAndSettle();
+      expect(find.text('系统代理'), findsWidgets);
       expect(find.text('TUN 全设备'), findsOneWidget);
       expect(find.text('本机'), findsOneWidget);
-      expect(find.widgetWithText(FilledButton, '连接'), findsOneWidget);
+      expect(find.widgetWithText(FilledButton, '启动代理连接'), findsOneWidget);
       // The connection page does not show the TUN panel in system-proxy mode.
       expect(find.text('wintun.dll'), findsNothing);
     });
@@ -1122,18 +1165,18 @@ void main() {
     testWidgets('every sub-page renders its own controls', (tester) async {
       await pumpApp(tester);
 
-      await tester.tap(navItem('节点'));
+      await tester.tap(navItem('线路'));
       await tester.pumpAndSettle();
       expect(find.text('选择模式'), findsOneWidget);
       expect(find.text('测试延迟'), findsOneWidget);
       expect(find.text('搜索节点名称'), findsOneWidget);
       expect(find.text('添加节点'), findsOneWidget);
-      expect(find.textContaining('还没有可选节点'), findsOneWidget);
+      expect(find.textContaining('尚未检索到可选节点'), findsOneWidget);
       // The grouping switch offers both categories.
       expect(find.text('按地区'), findsOneWidget);
       expect(find.text('按线路'), findsOneWidget);
 
-      await tester.tap(navItem('地区与健康'));
+      await tester.tap(navItem('保护策略'));
       await tester.pumpAndSettle();
       expect(find.text('地区锁定'), findsOneWidget);
       expect(find.text('锁定地区候选'), findsOneWidget);
@@ -1143,7 +1186,7 @@ void main() {
       final patrol = find.widgetWithText(TextButton, '立即巡检');
       expect(tester.widget<TextButton>(patrol).onPressed, isNull);
 
-      await tester.tap(navItem('检测'));
+      await tester.tap(navItem('工具'));
       await tester.pumpAndSettle();
       expect(find.text('开始检测'), findsOneWidget);
       expect(find.text('复制报告'), findsOneWidget);
@@ -1170,21 +1213,24 @@ void main() {
 
       await tester.tap(navItem('流量'));
       await tester.pumpAndSettle();
-      expect(find.text('流量与连接'), findsOneWidget);
-      expect(find.textContaining('还没有流量数据'), findsOneWidget);
+      expect(find.text('实时连接监控'), findsOneWidget);
+      expect(find.textContaining('暂无活跃流量数据'), findsOneWidget);
       // Monitoring needs a running kernel, so both controls are disabled offline.
       for (final label in ['暂停', '刷新']) {
-        final button = find.widgetWithText(OutlinedButton, label);
+        final button = find.widgetWithText(OutlinedButton, label).last;
         expect(tester.widget<OutlinedButton>(button).onPressed, isNull);
       }
 
-      await tester.tap(navItem('订阅与内核'));
+      await tester.tap(navItem('订阅'));
       await tester.pumpAndSettle();
       expect(find.text('订阅地址'), findsOneWidget);
+      await tester.ensureVisible(find.byType(ExpansionTile));
+      await tester.tap(find.byType(ExpansionTile));
+      await tester.pumpAndSettle();
       expect(find.text('Mihomo 程序路径'), findsOneWidget);
       // The path is the service's to decide, and the field says so rather than
       // guessing a directory of its own.
-      expect(find.textContaining('留空则用配置目录'), findsOneWidget);
+      expect(find.textContaining('留空则使用配置目录'), findsOneWidget);
       // Offline the service has not reported a profile yet.
       expect(find.text('配置目录'), findsOneWidget);
       expect(find.text('订阅诊断'), findsOneWidget);
@@ -1196,7 +1242,7 @@ void main() {
     testWidgets('adding a node asks for a link and reports a refusal',
         (tester) async {
       await pumpApp(tester);
-      await tester.tap(navItem('节点'));
+      await tester.tap(navItem('线路'));
       await tester.pumpAndSettle();
 
       await tester.tap(find.text('添加节点'));
@@ -1208,8 +1254,7 @@ void main() {
       // has to say so rather than pretend the node was added.
       final linkField = find.ancestor(
           of: find.text('节点链接'), matching: find.byType(TextField));
-      await tester.enterText(
-          linkField, 'trojan://secret@tj.example.com:443#T');
+      await tester.enterText(linkField, 'trojan://secret@tj.example.com:443#T');
       await tester.tap(find.text('解析'));
       await tester.pumpAndSettle();
       expect(find.textContaining('本地服务尚未启动'), findsOneWidget);
@@ -1221,8 +1266,8 @@ void main() {
       // Stand in for the runner: record what the app asks it to do.
       const channel = MethodChannel('smartvpn/lifecycle');
       final calls = <MethodCall>[];
-      tester.binding.defaultBinaryMessenger
-          .setMockMethodCallHandler(channel, (call) async {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(channel,
+          (call) async {
         calls.add(call);
         return null;
       });
@@ -1295,7 +1340,7 @@ void main() {
       expect(find.text('SmartVPN'), findsOneWidget);
       expect(find.text('本机'), findsOneWidget);
 
-      for (final label in ['节点', '流量', '地区与健康', '检测', '订阅与内核', '连接']) {
+      for (final label in ['线路', '流量', '保护策略', '工具', '订阅', '总览']) {
         await tester.tap(navItem(label));
         await tester.pumpAndSettle();
         expect(find.text(label), findsWidgets);
@@ -1316,13 +1361,17 @@ void main() {
 
       await pumpApp(tester);
       expect(find.text('SmartVPN'), findsOneWidget);
-      // The rail is a drawer here, which is the whole point of the width.
-      expect(find.byIcon(Icons.menu), findsOneWidget);
+      expect(find.byType(NavigationBar), findsOneWidget);
 
-      for (final label in ['流量', '节点', '地区与健康', '检测', '订阅与内核', '连接']) {
-        await tester.tap(find.byIcon(Icons.menu));
-        await tester.pumpAndSettle();
-        await tester.tap(navItem(label));
+      for (final label in ['流量', '线路', '保护策略', '工具', '订阅', '总览']) {
+        if (label == '保护策略' || label == '工具') {
+          await tester.tap(find.text('更多'));
+          await tester.pumpAndSettle();
+          await tester.tap(find.text(label).last);
+        } else {
+          await tester.tap(find.descendant(
+              of: find.byType(NavigationBar), matching: find.text(label)));
+        }
         await tester.pumpAndSettle();
         expect(find.text(label), findsWidgets);
       }
@@ -1335,7 +1384,7 @@ void main() {
       addTearDown(tester.view.resetDevicePixelRatio);
 
       await pumpApp(tester);
-      for (final label in ['流量', '节点', '地区与健康', '检测', '订阅与内核', '连接']) {
+      for (final label in ['流量', '线路', '保护策略', '工具', '订阅', '总览']) {
         await tester.tap(navItem(label));
         await tester.pumpAndSettle();
         expect(find.text(label), findsWidgets);
@@ -1362,4 +1411,3 @@ void main() {
     });
   });
 }
-

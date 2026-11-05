@@ -93,7 +93,13 @@ Write-Host '== package =='
 Push-Location $frontend
 try {
   $mode = if ($Release) { '--release' } else { '--debug' }
-  & (Join-Path $tools 'flutter\bin\flutter.bat') build apk $mode
+  $targetPlatforms = ($Abi | ForEach-Object {
+    switch ($_) {
+      'arm64-v8a' { 'android-arm64' }
+      'x86_64' { 'android-x64' }
+    }
+  }) -join ','
+  & (Join-Path $tools 'flutter\bin\flutter.bat') build apk $mode "--target-platform=$targetPlatforms"
   if ($LASTEXITCODE -ne 0) { throw 'the Flutter build failed' }
 } finally {
   Pop-Location

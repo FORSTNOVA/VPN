@@ -92,7 +92,9 @@ type app struct {
 	lockedNode   string
 	elevated     bool
 	// The previous counter reading, which turns two totals into a rate.
-	lastTraffic trafficSample
+	lastTraffic          trafficSample
+	trafficHistoryCancel chan struct{}
+	trafficHistoryError  string
 	// The nodes pasted by hand, which live in their own provider file.
 	manualNodes []manualNode
 	// The saved subscriptions; the active one is settings.SubscriptionURL.
@@ -345,6 +347,7 @@ func (a *app) routes(token string) *http.ServeMux {
 	mux.HandleFunc("POST /api/path-checks/run", a.authorize(token, a.runPathChecks))
 	mux.HandleFunc("POST /api/path-checks/recovery/cancel", a.authorize(token, a.cancelPathRecovery))
 	mux.HandleFunc("GET /api/traffic", a.authorize(token, a.traffic))
+	mux.HandleFunc("GET /api/traffic/history", a.authorize(token, a.trafficHistory))
 	mux.HandleFunc("GET /api/nodes/manual", a.authorize(token, a.listManualNodes))
 	mux.HandleFunc("POST /api/nodes/manual", a.authorize(token, a.addManualNode))
 	mux.HandleFunc("DELETE /api/nodes/manual", a.authorize(token, a.deleteManualNode))

@@ -741,8 +741,10 @@ class DiagnoseReport {
         temporary: value['temporary'] as bool? ?? false,
         egress: EgressFacts.fromJson(
             value['egress'] as Map<String, dynamic>? ?? const {}),
-        dns: DnsFacts.fromJson(value['dns'] as Map<String, dynamic>? ?? const {}),
-        udp: UdpFacts.fromJson(value['udp'] as Map<String, dynamic>? ?? const {}),
+        dns: DnsFacts.fromJson(
+            value['dns'] as Map<String, dynamic>? ?? const {}),
+        udp: UdpFacts.fromJson(
+            value['udp'] as Map<String, dynamic>? ?? const {}),
         quality: IpQualityFacts.fromJson(
             value['quality'] as Map<String, dynamic>? ?? const {}),
         sites: (value['sites'] as List<dynamic>? ?? const [])
@@ -791,7 +793,8 @@ class SpeedTestResult {
 
 /// What the exit rows say. The verdicts are the service's; this only puts them
 /// into words.
-String egressAddressLabel({required String address, required String fallback}) =>
+String egressAddressLabel(
+        {required String address, required String fallback}) =>
     address.isEmpty ? (fallback.isEmpty ? '未取得' : fallback) : address;
 
 /// Where the exit address is, and who runs it. The two are separate rows on the
@@ -1532,4 +1535,209 @@ String exitAddressLabel({required String ipv4, required String ipv4Error}) {
   if (ipv4.isNotEmpty) return ipv4;
   if (ipv4Error.isNotEmpty) return '未取得';
   return '—';
+}
+
+// ---------------------------------------------------------------------------
+// Traffic History models (GET /api/traffic/history)
+// ---------------------------------------------------------------------------
+
+enum TrafficHistoryPeriod {
+  hour('hour', '小时'),
+  day('day', '日'),
+  month('month', '月'),
+  year('year', '年');
+
+  const TrafficHistoryPeriod(this.wireName, this.label);
+  final String wireName;
+  final String label;
+
+  static TrafficHistoryPeriod fromWire(String? value) {
+    return switch (value) {
+      'hour' => TrafficHistoryPeriod.hour,
+      'month' => TrafficHistoryPeriod.month,
+      'year' => TrafficHistoryPeriod.year,
+      _ => TrafficHistoryPeriod.day,
+    };
+  }
+}
+
+enum TrafficHistoryGroup {
+  app('app', '应用汇总'),
+  connection('connection', '连接明细');
+
+  const TrafficHistoryGroup(this.wireName, this.label);
+  final String wireName;
+  final String label;
+
+  static TrafficHistoryGroup fromWire(String? value) {
+    return switch (value) {
+      'connection' => TrafficHistoryGroup.connection,
+      _ => TrafficHistoryGroup.app,
+    };
+  }
+}
+
+class TrafficHistoryRow {
+  const TrafficHistoryRow({
+    required this.id,
+    required this.app,
+    required this.appKey,
+    required this.target,
+    required this.network,
+    required this.chain,
+    required this.upload,
+    required this.download,
+    required this.connections,
+    required this.firstSeen,
+    required this.lastSeen,
+  });
+
+  final String id;
+  final String app;
+  final String appKey;
+  final String target;
+  final String network;
+  final String chain;
+  final int upload;
+  final int download;
+  final int connections;
+  final int firstSeen;
+  final int lastSeen;
+
+  int get totalBytes => upload + download;
+
+  String get displayAppName {
+    final trimmed = app.trim();
+    if (trimmed.isEmpty ||
+        trimmed.toUpperCase() == 'UNKNOWN' ||
+        trimmed == '未识别应用') {
+      return '未识别应用';
+    }
+    return trimmed;
+  }
+
+  bool get isUnknownApp => displayAppName == '未识别应用';
+
+  factory TrafficHistoryRow.fromJson(Map<String, dynamic> json) =>
+      TrafficHistoryRow(
+        id: json['id']?.toString() ?? '',
+        app: json['app'] as String? ?? '',
+        appKey: json['appKey'] as String? ?? '',
+        target: json['target'] as String? ?? '',
+        network: json['network'] as String? ?? '',
+        chain: json['chain'] as String? ?? '',
+        upload: (json['upload'] as num?)?.toInt() ?? 0,
+        download: (json['download'] as num?)?.toInt() ?? 0,
+        connections: (json['connections'] as num?)?.toInt() ?? 0,
+        firstSeen: (json['firstSeen'] as num?)?.toInt() ?? 0,
+        lastSeen: (json['lastSeen'] as num?)?.toInt() ?? 0,
+      );
+}
+
+class TrafficHistoryResponse {
+  const TrafficHistoryResponse({
+    required this.period,
+    required this.date,
+    required this.group,
+    required this.timezone,
+    required this.uploadTotal,
+    required this.downloadTotal,
+    required this.connectionCount,
+    required this.rowCount,
+    required this.offset,
+    required this.limit,
+    required this.hasMore,
+    required this.rows,
+    this.samplingError,
+  });
+
+  final TrafficHistoryPeriod period;
+  final String date;
+  final TrafficHistoryGroup group;
+  final String timezone;
+  final int uploadTotal;
+  final int downloadTotal;
+  final int connectionCount;
+  final int rowCount;
+  final int offset;
+  final int limit;
+  final bool hasMore;
+  final List<TrafficHistoryRow> rows;
+  final String? samplingError;
+
+  int get totalBytes => uploadTotal + downloadTotal;
+
+  factory TrafficHistoryResponse.fromJson(Map<String, dynamic> json) {
+    final periodStr = json['period'] as String? ?? 'hour';
+    final groupStr = json['group'] as String? ?? 'app';
+    return TrafficHistoryResponse(
+      period: TrafficHistoryPeriod.fromWire(periodStr),
+      date: json['date'] as String? ?? '',
+      group: TrafficHistoryGroup.fromWire(groupStr),
+      timezone: json['timezone'] as String? ?? '',
+      uploadTotal: (json['uploadTotal'] as num?)?.toInt() ?? 0,
+      downloadTotal: (json['downloadTotal'] as num?)?.toInt() ?? 0,
+      connectionCount: (json['connectionCount'] as num?)?.toInt() ?? 0,
+      rowCount: (json['rowCount'] as num?)?.toInt() ?? 0,
+      offset: (json['offset'] as num?)?.toInt() ?? 0,
+      limit: (json['limit'] as num?)?.toInt() ?? 100,
+      hasMore: json['hasMore'] as bool? ?? false,
+      rows: (json['rows'] as List<dynamic>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(TrafficHistoryRow.fromJson)
+          .toList(growable: false),
+      samplingError: json['samplingError'] as String?,
+    );
+  }
+}
+
+/// Formats a local date and hour into the wire parameter expected by the API:
+/// - hour: '2026-11-05T10'
+/// - day: '2026-11-05'
+/// - month: '2026-11'
+/// - year: '2026'
+String formatTrafficHistoryDate({
+  required TrafficHistoryPeriod period,
+  required DateTime date,
+  int hour = 0,
+}) {
+  String two(int v) => v.toString().padLeft(2, '0');
+  final y = date.year.toString().padLeft(4, '0');
+  final m = two(date.month);
+  final d = two(date.day);
+  final h = two(hour.clamp(0, 23));
+  return switch (period) {
+    TrafficHistoryPeriod.hour => '$y-$m-${d}T$h',
+    TrafficHistoryPeriod.day => '$y-$m-$d',
+    TrafficHistoryPeriod.month => '$y-$m',
+    TrafficHistoryPeriod.year => y,
+  };
+}
+
+/// Builds the relative path and query string for the traffic history endpoint.
+String buildTrafficHistoryRoute({
+  required TrafficHistoryPeriod period,
+  required String date,
+  required TrafficHistoryGroup group,
+  String? appKey,
+  int offset = 0,
+  int limit = 100,
+}) {
+  final query = <String, String>{
+    'period': period.wireName,
+    'date': date,
+    'group': group.wireName,
+    if (appKey != null && appKey.isNotEmpty) 'app': appKey,
+    'offset': offset.toString(),
+    'limit': limit.toString(),
+  };
+  return Uri(path: '/api/traffic/history', queryParameters: query).toString();
+}
+
+/// Formats unix seconds into user-facing timestamp string.
+String formatHistoryTimestamp(int unixSeconds) {
+  if (unixSeconds <= 0) return '—';
+  final dt = DateTime.fromMillisecondsSinceEpoch(unixSeconds * 1000).toLocal();
+  String two(int v) => v.toString().padLeft(2, '0');
+  return '${dt.year}-${two(dt.month)}-${two(dt.day)} ${two(dt.hour)}:${two(dt.minute)}:${two(dt.second)}';
 }

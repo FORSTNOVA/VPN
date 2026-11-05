@@ -1,55 +1,40 @@
-import 'dart:ui';
 import 'package:flutter/material.dart';
 
-/// Industrial Sci-Fi & Arknights PRTS Design System Tokens (AKDS).
-/// Features high-contrast dark tactical surfaces, electric blue & neon cyan accents,
-/// crisp industrial typography, and sharp chamfered geometry.
+/// Industrial Sci-Fi & Arknights Rhodes Island Operations Terminal Design Tokens (AKDS).
+/// Features a near-black charcoal canvas, ivory typography, industrial yellow primary accents,
+/// restrained telemetry cyan, crisp typographic hierarchy, and sharp cut-corner geometry.
 abstract final class Tokens {
-  // AKDS Official Primitives (from mooncellwiki PRTS Design)
+  // AKDS Official Primitives
   static const akGray0 = Color(0xFFFFFFFF);
   static const akGray50 = Color(0xFFF5F5F5);
-  static const akGray800 = Color(0xFF313131);  // In-game standard button
+  static const akGray800 = Color(0xFF313131);
   static const akGray850 = Color(0xFF272727);
-  static const akGray900 = Color(0xFF1D1F20);  // Site panel
-  static const akGray950 = Color(0xFF181818);  // In-game deep canvas
+  static const akGray900 = Color(0xFF1D1F20);
+  static const akGray950 = Color(0xFF14161A);
   static const akGray1000 = Color(0xFF000000);
 
-  static const akCyan200 = Color(0xFF7EE5FF);
-  static const akCyan400 = Color(0xFF22BBFF);
-  static const akCyan500 = Color(0xFF18D1FF);  // ★ AKDS site brand accent #18d1ff
-  static const akBlue400 = Color(0xFF00B0FF);
-  static const akBlue500 = Color(0xFF0098DC);  // ★ In-game UI blue #0098dc
-  static const akBlue600 = Color(0xFF0075A9);  // ★ In-game toggle-on #0075a9
-  static const akYellow500 = Color(0xFFFFD800); // ★ In-game yellow #ffd800
-  static const akRed600 = Color(0xFFC82A36);   // ★ In-game NEW mark #c82a36
-  static const akRed700 = Color(0xFFA40000);   // ★ In-game BREAKING NEWS
-  static const akRed800 = Color(0xFF711111);   // ★ In-game confirm button
-  static const akGreen400 = Color(0xFF4FFAA5); // ★ Active status green
-  static const akGreen500 = Color(0xFF2FAC78);
-  static const akOrange500 = Color(0xFFF49800);
+  // Rhodes Island Industrial Yellow (Primary Action & Industrial Accent)
+  static const yellow = Color(0xFFFFD800);
+  static const yellowHover = Color(0xFFFFE23A);
+  static const yellowDark = Color(0xFFD6B200);
+  static const yellowTint = Color(0x24FFD800);
+  static const yellowGlow = Color(0x38FFD800);
+  static const akYellow500 = yellow;
 
-  // AKDS Tactical Dark Theme Palette (Night / Terminal Mode)
-  static const background = Color(0xFF101216); // Deep Arknights canvas
-  static const rail = Color(0xFF16191F);       // Tactical sidebar
-  static const surface = Color(0xFF1D2128);    // Industrial panel surface
-  static const surfaceElevated = Color(0xFF242A34);
-  static const hairline = Color(0xFF333B47);   // Precision border line
-  static const hairlineBright = Color(0xFF495465); // Highlight border
-
-  // Text ink colors
-  static const ink = Color(0xFFF2F6FA);        // High contrast primary text
-  static const inkMuted = Color(0xFF90A1B5);   // Secondary technical labels
-  static const inkFaint = Color(0xFF5A6B80);   // Subdued metadata & markings
-
-  // Signature Arknights PRTS Neon Cyan & Tactical Blue
-  static const cyan = akCyan500;               // Official PRTS Cyan #18D1FF
+  // Restrained Telemetry Cyan & Tactical Blue (Exclusively for routes & telemetry)
+  static const cyan = Color(0xFF18D1FF);
   static const cyanNeon = Color(0xFF42E4FF);
   static const cyanGlow = Color(0x3818D1FF);
   static const cyanTint = Color(0x1F18D1FF);
+  static const akCyan500 = cyan;
+  static const akCyan400 = Color(0xFF22BBFF);
+  static const akCyan200 = Color(0xFF7EE5FF);
 
-  static const blue = akBlue500;               // Tactical Action Blue #0098DC
-  static const blueBright = Color(0xFF00AAFC); // High-contrast interactive blue
+  static const blue = Color(0xFF0098DC);
+  static const blueBright = Color(0xFF00AAFC);
   static const blueGlow = Color(0x380098DC);
+  static const akBlue500 = blue;
+  static const akBlue400 = Color(0xFF00B0FF);
 
   // Backward-compatible aliases for existing references
   static const jade = cyan;
@@ -57,34 +42,47 @@ abstract final class Tokens {
   static const jadeTint = cyanTint;
 
   // Signal & Status Colours
-  static const ok = akGreen400;                // Terminal active green #4FFAA5
+  static const ok = Color(0xFF4FFAA5);
   static const okTint = Color(0x224FFAA5);
-  static const warn = akYellow500;             // In-game warning amber #FFD800
-  static const warnTint = Color(0x28FFD800);
-  static const bad = akRed600;                 // Originium alert red #C82A36
+  static const warn = yellow;
+  static const warnTint = yellowTint;
+  static const bad = Color(0xFFC82A36);
   static const badTint = Color(0x28C82A36);
-  static const idle = Color(0xFF6E8094);       // Standby grey
+  static const idle = Color(0xFF6E8094);
   static const idleTint = Color(0x206E8094);
   static const recovery = akBlue400;
 
-  // Geometry - AKDS strict rectangular sharp look with subtle chamfer
-  static const radiusPanel = 4.0;
+  // AKDS Tactical Dark Theme Palette (Operations Terminal)
+  static const background =
+      Color(0xFF121418); // Deep charcoal operations canvas
+  static const rail = Color(0xFF171A21); // Tactical sidebar / bottom nav
+  static const surface = Color(0xFF1C212A); // Operations panel surface
+  static const surfaceElevated = Color(0xFF242B36); // Elevated tactical card
+  static const hairline = Color(0xFF303846); // Precision technical line
+  static const hairlineBright = Color(0xFF465264); // Highlight technical line
+
+  // Ivory & Muted Typography
+  static const ink = Color(0xFFF6F7FA); // High-contrast ivory text
+  static const inkMuted = Color(0xFF9CA9B8); // Secondary technical labels
+  static const inkFaint = Color(0xFF5D6B7D); // Subdued technical markings
+
+  // Geometry - AKDS strict rectangular sharp look with subtle 45° chamfers
+  static const radiusPanel = 3.0;
   static const mobileBreakpoint = 700.0;
   static const radiusControl = 2.0;
   static const radiusBadge = 2.0;
-  static const barWidth = 4.0;                 // AKDS standard 4px accent bar
-  static const akCutSm = 3.5;                  // AKDS 45° chamfer cut small
-  static const akCutMd = 8.0;                  // AKDS 45° chamfer cut medium
-  static const akCutLg = 14.0;                 // AKDS 45° chamfer cut large
+  static const barWidth = 3.5; // Standard tactical 3.5px accent bar
+  static const akCutSm = 3.0; // 45° chamfer cut small
+  static const akCutMd = 6.0; // 45° chamfer cut medium
+  static const akCutLg = 10.0; // 45° chamfer cut large
 
-  static const railWidth = 220.0;
-  static const contentMaxWidth = 880.0;
+  static const railWidth = 210.0;
+  static const contentMaxWidth = 920.0;
 
   static const fontFamily = 'Microsoft YaHei UI';
   static const fontFamilyFallback = <String>[
     'Bender',
     'JetBrains Mono',
-    'Oswald',
     'Chakra Petch',
     'Segoe UI',
     'Roboto',
@@ -98,47 +96,66 @@ abstract final class Tokens {
   ];
 
   static const pageTitle = TextStyle(
-      fontSize: 19, fontWeight: FontWeight.w700, color: ink, height: 1.3, letterSpacing: 0.5);
+      fontSize: 18,
+      fontWeight: FontWeight.w800,
+      color: ink,
+      height: 1.25,
+      letterSpacing: 0.6);
   static const section = TextStyle(
-      fontSize: 13.5, fontWeight: FontWeight.w700, color: ink, height: 1.3, letterSpacing: 0.4);
-  static const body = TextStyle(fontSize: 13, color: ink, height: 1.55);
-  static const small = TextStyle(fontSize: 12, color: inkMuted, height: 1.5);
-  static const hint = TextStyle(fontSize: 11.5, color: inkFaint, height: 1.5, letterSpacing: 0.3);
+      fontSize: 13.5,
+      fontWeight: FontWeight.w700,
+      color: ink,
+      height: 1.3,
+      letterSpacing: 0.4);
+  static const body = TextStyle(
+      fontFamily: fontFamily,
+      fontFamilyFallback: fontFamilyFallback,
+      fontSize: 13,
+      color: ink,
+      height: 1.55);
+  static const small = TextStyle(
+      fontFamily: fontFamily,
+      fontFamilyFallback: fontFamilyFallback,
+      fontSize: 12,
+      color: inkMuted,
+      height: 1.5);
+  static const hint = TextStyle(
+      fontSize: 11.5, color: inkFaint, height: 1.45, letterSpacing: 0.2);
 
-  // AKDS Signature Typography Tokens
+  // Technical PRTS Typography Tokens
   static const akDisplay = TextStyle(
       fontSize: 22,
-      fontWeight: FontWeight.w800,
+      fontWeight: FontWeight.w900,
       color: ink,
       letterSpacing: 0.8,
       fontFamilyFallback: fontFamilyFallback);
   static const akOverline = TextStyle(
-      fontSize: 10,
-      fontWeight: FontWeight.w700,
-      color: inkMuted,
-      letterSpacing: 1.4,
-      fontFamilyFallback: fontFamilyFallback);
-  static const akBilingualEn = TextStyle(
       fontSize: 9.5,
       fontWeight: FontWeight.w700,
-      color: cyan,
-      letterSpacing: 1.2,
+      color: inkMuted,
+      letterSpacing: 1.5,
+      fontFamilyFallback: fontFamilyFallback);
+  static const akBilingualEn = TextStyle(
+      fontSize: 9.0,
+      fontWeight: FontWeight.w700,
+      color: yellow,
+      letterSpacing: 1.1,
       fontFamilyFallback: fontFamilyFallback);
   static const akCodeId = TextStyle(
       fontSize: 11,
       fontWeight: FontWeight.w700,
       color: cyan,
-      letterSpacing: 1.0,
+      letterSpacing: 0.8,
       fontFamily: 'Consolas',
       fontFamilyFallback: fontMonoFallback);
 
-  /// Tabular figures keep a column of changing numbers from shifting.
+  /// Tabular figures keep columns of changing numbers from shifting.
   static const _tabular = [FontFeature.tabularFigures()];
   static const number = TextStyle(
       fontSize: 12.5,
       fontWeight: FontWeight.w600,
       color: ink,
-      letterSpacing: 0.5,
+      letterSpacing: 0.4,
       fontFamily: 'Consolas',
       fontFamilyFallback: fontMonoFallback,
       fontFeatures: _tabular);
@@ -155,15 +172,18 @@ abstract final class Tokens {
     final base = ThemeData.dark(useMaterial3: true);
     const shape = BeveledRectangleBorder(
         borderRadius: BorderRadius.all(Radius.circular(akCutSm)));
-    const roundedShape = RoundedRectangleBorder(
-        borderRadius: BorderRadius.all(Radius.circular(radiusControl)));
+
     return base.copyWith(
       scaffoldBackgroundColor: background,
       colorScheme: const ColorScheme.dark(
-        primary: blueBright,
+        primary: yellow,
+        onPrimary: Color(0xFF111317),
         secondary: cyan,
+        onSecondary: Color(0xFF111317),
         surface: surface,
+        onSurface: ink,
         error: bad,
+        onError: Colors.white,
       ),
       textTheme: base.textTheme.apply(
         fontFamily: fontFamily,
@@ -177,17 +197,27 @@ abstract final class Tokens {
       filledButtonTheme: FilledButtonThemeData(
         style: ButtonStyle(
           backgroundColor: WidgetStateProperty.resolveWith((states) =>
-              states.contains(WidgetState.disabled) ? idleTint : blue),
+              states.contains(WidgetState.disabled) ? idleTint : yellow),
           foregroundColor: WidgetStateProperty.resolveWith((states) =>
-              states.contains(WidgetState.disabled) ? inkFaint : Colors.white),
+              states.contains(WidgetState.disabled)
+                  ? inkFaint
+                  : const Color(0xFF111317)),
           elevation: const WidgetStatePropertyAll(0),
           padding: const WidgetStatePropertyAll(
-              EdgeInsets.symmetric(horizontal: 18, vertical: 14)),
+              EdgeInsets.symmetric(horizontal: 18, vertical: 13)),
+          minimumSize: const WidgetStatePropertyAll(Size(48, 48)),
           shape: const WidgetStatePropertyAll(shape),
-          side: WidgetStateProperty.resolveWith((states) =>
-              BorderSide(color: states.contains(WidgetState.disabled) ? Colors.transparent : cyan.withOpacity(0.4), width: 0.8)),
-          textStyle: const WidgetStatePropertyAll(
-              TextStyle(fontSize: 13, fontWeight: FontWeight.w700, letterSpacing: 0.6)),
+          side: WidgetStateProperty.resolveWith((states) => BorderSide(
+              color: states.contains(WidgetState.disabled)
+                  ? Colors.transparent
+                  : yellowDark,
+              width: 0.9)),
+          textStyle: const WidgetStatePropertyAll(TextStyle(
+              fontFamily: fontFamily,
+              fontFamilyFallback: fontFamilyFallback,
+              fontSize: 13,
+              fontWeight: FontWeight.w800,
+              letterSpacing: 0.6)),
         ),
       ),
       outlinedButtonTheme: OutlinedButtonThemeData(
@@ -195,35 +225,52 @@ abstract final class Tokens {
           backgroundColor: const WidgetStatePropertyAll(surface),
           foregroundColor: WidgetStateProperty.resolveWith((states) =>
               states.contains(WidgetState.disabled) ? inkFaint : ink),
-          side: WidgetStateProperty.resolveWith((states) =>
-              BorderSide(color: states.contains(WidgetState.hovered) ? cyan : hairline, width: 0.9)),
+          side: WidgetStateProperty.resolveWith((states) => BorderSide(
+              color: states.contains(WidgetState.hovered)
+                  ? yellow
+                  : hairlineBright,
+              width: 0.9)),
           padding: const WidgetStatePropertyAll(
-              EdgeInsets.symmetric(horizontal: 16, vertical: 13)),
+              EdgeInsets.symmetric(horizontal: 16, vertical: 12)),
+          minimumSize: const WidgetStatePropertyAll(Size(48, 48)),
           shape: const WidgetStatePropertyAll(shape),
-          textStyle: const WidgetStatePropertyAll(
-              TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+          textStyle: const WidgetStatePropertyAll(TextStyle(
+              fontFamily: fontFamily,
+              fontFamilyFallback: fontFamilyFallback,
+              fontSize: 13,
+              fontWeight: FontWeight.w600)),
         ),
       ),
       textButtonTheme: TextButtonThemeData(
         style: ButtonStyle(
           foregroundColor: WidgetStateProperty.resolveWith((states) =>
-              states.contains(WidgetState.disabled) ? inkFaint : cyan),
-          textStyle: const WidgetStatePropertyAll(
-              TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-          shape: const WidgetStatePropertyAll(BeveledRectangleBorder(
-              borderRadius: BorderRadius.all(Radius.circular(akCutSm)))),
+              states.contains(WidgetState.disabled) ? inkFaint : yellow),
+          textStyle: const WidgetStatePropertyAll(TextStyle(
+              fontFamily: fontFamily,
+              fontFamilyFallback: fontFamilyFallback,
+              fontSize: 13,
+              fontWeight: FontWeight.w700)),
+          padding: const WidgetStatePropertyAll(
+              EdgeInsets.symmetric(horizontal: 12, vertical: 10)),
+          minimumSize: const WidgetStatePropertyAll(Size(48, 48)),
+          shape: const WidgetStatePropertyAll(shape),
         ),
       ),
       segmentedButtonTheme: SegmentedButtonThemeData(
         style: ButtonStyle(
           backgroundColor: WidgetStateProperty.resolveWith((states) =>
-              states.contains(WidgetState.selected) ? cyanTint : surface),
+              states.contains(WidgetState.selected) ? yellowTint : surface),
           foregroundColor: WidgetStateProperty.resolveWith((states) =>
-              states.contains(WidgetState.selected) ? cyan : inkMuted),
-          side: WidgetStateProperty.resolveWith((states) =>
-              BorderSide(color: states.contains(WidgetState.selected) ? cyan.withOpacity(0.6) : hairline)),
-          textStyle: const WidgetStatePropertyAll(
-              TextStyle(fontSize: 12.5, fontWeight: FontWeight.w600)),
+              states.contains(WidgetState.selected) ? yellow : inkMuted),
+          side: WidgetStateProperty.resolveWith((states) => BorderSide(
+              color: states.contains(WidgetState.selected)
+                  ? yellow.withValues(alpha: 0.65)
+                  : hairline)),
+          textStyle: const WidgetStatePropertyAll(TextStyle(
+              fontFamily: fontFamily,
+              fontFamilyFallback: fontFamilyFallback,
+              fontSize: 12.5,
+              fontWeight: FontWeight.w700)),
           shape: const WidgetStatePropertyAll(shape),
         ),
       ),
@@ -241,10 +288,10 @@ abstract final class Tokens {
             borderSide: const BorderSide(color: hairline)),
         focusedBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(radiusControl),
-            borderSide: const BorderSide(color: cyan, width: 1.5)),
+            borderSide: const BorderSide(color: yellow, width: 1.5)),
         labelStyle: small,
         floatingLabelStyle: const TextStyle(
-            fontSize: 12, color: cyan, fontWeight: FontWeight.w600),
+            fontSize: 12, color: yellow, fontWeight: FontWeight.w700),
         hintStyle: hint,
         prefixIconColor: inkFaint,
       ),
@@ -259,14 +306,18 @@ abstract final class Tokens {
       ),
       snackBarTheme: SnackBarThemeData(
         backgroundColor: surfaceElevated,
-        contentTextStyle: const TextStyle(fontSize: 13, color: ink),
+        contentTextStyle: const TextStyle(
+            fontFamily: fontFamily,
+            fontFamilyFallback: fontFamilyFallback,
+            fontSize: 13,
+            color: ink),
         behavior: SnackBarBehavior.floating,
         shape: BeveledRectangleBorder(
             borderRadius: BorderRadius.circular(akCutSm),
-            side: const BorderSide(color: cyan, width: 1)),
+            side: const BorderSide(color: yellow, width: 1)),
       ),
       progressIndicatorTheme:
-          const ProgressIndicatorThemeData(color: cyan, linearMinHeight: 3),
+          const ProgressIndicatorThemeData(color: yellow, linearMinHeight: 3),
     );
   }
 }

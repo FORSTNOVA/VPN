@@ -51,6 +51,7 @@ type kernelMetadata struct {
 	DestinationPort flexString `json:"destinationPort"`
 	Process         string     `json:"process"`
 	ProcessPath     string     `json:"processPath"`
+	UID             flexString `json:"uid"`
 }
 
 // flexString reads a value the kernel may send either quoted or bare. The kernel

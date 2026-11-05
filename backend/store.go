@@ -102,7 +102,7 @@ func openStore(path string) (*store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	if _, err := db.Exec(storeSchema); err != nil {
+	if _, err := db.Exec(storeSchema + trafficHistorySchema); err != nil {
 		_ = db.Close()
 		return nil, err
 	}

@@ -119,12 +119,17 @@ func (a *app) startMihomoLocked() error {
 		_ = a.stopMihomoLocked()
 		return errors.New("subscription returned no selectable nodes; check the subscription and network")
 	}
+	a.startTrafficHistoryLocked()
 	return nil
 }
 
 // stopMihomoLocked ends the kernel and leaves nothing of the configuration in
 // place, so a later run cannot mistake a stale file for a live one.
 func (a *app) stopMihomoLocked() error {
+	if a.trafficHistoryCancel != nil {
+		a.collectTrafficHistoryLocked()
+		a.stopTrafficHistoryLocked()
+	}
 	if a.kernel == nil {
 		return nil
 	}
@@ -149,6 +154,7 @@ func (a *app) kernelExited(which kernelRunner) {
 	if a.kernel != which {
 		return
 	}
+	a.stopTrafficHistoryLocked()
 	a.kernel = nil
 	a.chinaDirectActive = false
 	a.removeConfigLocked()

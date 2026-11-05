@@ -1,52 +1,125 @@
 part of '../main.dart';
 
-/// The landing page. Its job is to answer one question at a glance: where is my
-/// traffic going right now, and is anything protecting it.
+/// The Rhodes Island Operations Terminal Overview (总览).
+/// Answers at a glance: connection state, route flow, real-time telemetry,
+/// and core proxy/routing mode controls.
 extension _ConnectPage on _HomePageState {
   Widget _connectPage() {
     final tunMode = _connectionMode == 'tun';
-    return _PageBody(children: [
-      _PathSurface(
-        stateLabel: protectionStateLabel(
-          connected: _connected,
-          blocked: _blocked,
-          mode: _connectionMode,
-          tunActive: _tunActive,
-          proxyEnabled: _proxyEnabled,
-        ),
-        nodeLabel: _connected
-            ? (_activeNode.isEmpty ? '正在选择节点…' : _activeNode)
-            : (_selectedNode ?? '自动选择'),
-        regionLabel: _activeRegion.isNotEmpty
-            ? _activeRegion
-            : (_lockedRegion.isNotEmpty ? '锁定 $_lockedRegion' : '未锁定'),
-        connected: _protectedNow,
-        stats: [
-          ('出口',
-              exitAddressLabel(
-                  ipv4: _diagnose?.egress.ipv4 ?? '',
-                  ipv4Error: _diagnose?.egress.error ?? '')),
-          ('延迟', _latency == null ? '—' : '$_latency ms'),
-          ('锁定地区', _lockedRegion.isEmpty ? '未锁定' : _lockedRegion),
-          ('候选节点', '$_poolSize'),
-        ],
-      ),
-      const SizedBox(height: 14),
-      _PowerSwitchHero(
+    final hasNoNodes = _nodes.isEmpty && _savedSubscriptions.isEmpty;
+
+    final route = _PathSurface(
+      stateLabel: protectionStateLabel(
         connected: _connected,
-        busy: _busy,
-        port: _port,
-        latency: _latency,
-        onToggle: _toggleConnection,
-        onMeasure: _measureLatency,
-        statusDetail: protectionStateDetail(
-          connected: _connected,
-          blocked: _blocked,
-          mode: _connectionMode,
-          tunActive: _tunActive,
-          proxyEnabled: _proxyEnabled,
-        ),
+        blocked: _blocked,
+        mode: _connectionMode,
+        tunActive: _tunActive,
+        proxyEnabled: _proxyEnabled,
       ),
+      nodeLabel: _connected
+          ? (_activeNode.isEmpty ? '正在选择节点…' : _activeNode)
+          : (_selectedNode ?? '自动选择'),
+      regionLabel: _activeRegion.isNotEmpty
+          ? _activeRegion
+          : (_lockedRegion.isNotEmpty ? '锁定 $_lockedRegion' : '未锁定'),
+      connected: _protectedNow,
+      onTapNode: () => _goTo(_AppPage.nodes),
+      stats: [
+        (
+          '出口',
+          exitAddressLabel(
+              ipv4: _diagnose?.egress.ipv4 ?? '',
+              ipv4Error: _diagnose?.egress.error ?? '')
+        ),
+        ('延迟', _latency == null ? '—' : '$_latency ms'),
+        ('锁定地区', _lockedRegion.isEmpty ? '未锁定' : _lockedRegion),
+        ('候选节点', '$_poolSize'),
+      ],
+    );
+    final command = _PowerSwitchHero(
+      connected: _connected,
+      busy: _busy,
+      port: _port,
+      latency: _latency,
+      onToggle: _toggleConnection,
+      onMeasure: _measureLatency,
+      statusDetail: protectionStateDetail(
+        connected: _connected,
+        blocked: _blocked,
+        mode: _connectionMode,
+        tunActive: _tunActive,
+        proxyEnabled: _proxyEnabled,
+      ),
+    );
+    return _PageBody(children: [
+      LayoutBuilder(builder: (context, constraints) {
+        if (constraints.maxWidth < 760) {
+          return Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [command, const SizedBox(height: 16), route]);
+        }
+        return Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Expanded(flex: 5, child: command),
+          const SizedBox(width: 16),
+          Expanded(flex: 6, child: route),
+        ]);
+      }),
+
+      // 3. Compact Real Telemetry Row (Shown when kernel is active or telemetry available)
+      if (_connected && _traffic.available) ...[
+        const SizedBox(height: 14),
+        _Panel(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          child: Row(
+            children: [
+              Expanded(
+                child: _Stats(items: [
+                  ('上行速率', rateLabel(_traffic.uploadRate)),
+                  ('下行速率', rateLabel(_traffic.downloadRate)),
+                  ('本次上行', byteLabel(_traffic.uploadTotal)),
+                  ('本次下行', byteLabel(_traffic.downloadTotal)),
+                  ('当前连接', '${_traffic.connectionCount}'),
+                ]),
+              ),
+              IconButton(
+                tooltip: '查看连接明细',
+                icon: const Icon(Icons.arrow_forward_rounded, size: 16),
+                onPressed: () => _goTo(_AppPage.traffic),
+              ),
+            ],
+          ),
+        ),
+      ],
+
+      // 4. Actionable First-run Empty State (When no nodes or subscriptions are configured)
+      if (hasNoNodes) ...[
+        const SizedBox(height: 14),
+        _Panel(
+          padding: const EdgeInsets.all(20),
+          child: _EmptyState(
+            illustration: ClipRRect(
+              borderRadius: BorderRadius.circular(Tokens.radiusBadge),
+              child: Image.asset(
+                'assets/amiya_chibi.png',
+                height: 52,
+                fit: BoxFit.contain,
+                errorBuilder: (_, __, ___) => const Icon(
+                  Icons.hub_outlined,
+                  size: 48,
+                  color: Tokens.yellow,
+                ),
+              ),
+            ),
+            text: '终端就绪 · 尚未配置节点或订阅。\n导入订阅链接或添加自定义节点后即可开始守护网络。',
+            actionLabel: '导入订阅链接',
+            onAction: () => _goTo(_AppPage.subscription),
+            secondaryActionLabel: '添加自定义节点',
+            onSecondaryAction: () => unawaited(_showAddNodeDialog()),
+          ),
+        ),
+      ],
+
+      // 5. System Notices (Blocked, Proxy tampered, Sweep note)
       if (_blocked) ...[
         const SizedBox(height: 14),
         _Notice(
@@ -55,20 +128,17 @@ extension _ConnectPage on _HomePageState {
               'SmartVPN 正在等待同地区节点恢复，不会跨地区直连。',
           action: TextButton(
             onPressed: () => _goTo(_AppPage.region),
-            child: const Text('查看地区'),
+            child: const Text('查看保护策略'),
           ),
         ),
       ] else if (_health?.sweepNote.isNotEmpty ?? false) ...[
-        // The region measured as dead while traffic still flowed, which is a
-        // measurement problem rather than a dead region. Saying so is what keeps
-        // the health readout from looking like a contradiction.
         const SizedBox(height: 14),
         _Notice(
           kind: _NoticeKind.warn,
           text: _health!.sweepNote,
           action: TextButton(
             onPressed: () => _goTo(_AppPage.region),
-            child: const Text('查看地区'),
+            child: const Text('查看保护策略'),
           ),
         ),
       ],
@@ -78,80 +148,89 @@ extension _ConnectPage on _HomePageState {
         const SizedBox(height: 14),
         _Notice(
           kind: _NoticeKind.warn,
-          text: 'Windows 系统代理已关闭或被其他程序修改，浏览器可能没有经过 SmartVPN。',
+          text: 'Windows 系统代理已关闭或被其他程序修改，浏览器可能未经过 SmartVPN。',
           action: TextButton(
             onPressed: _busy ? null : _reapplyProxy,
             child: const Text('重新启用'),
           ),
         ),
       ],
-      const SizedBox(height: 26),
-      const _SectionHeader(title: '代理模式'),
+
+      const SizedBox(height: 22),
+
+      // 6. Purposeful Core Configuration Sections
       _Panel(
-        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          if (Platform.isAndroid)
-            // One way to carry traffic, and the shape of it is the platform's
-            // decision rather than a setting: a VpnService the system runs and
-            // the user authorises, through which everything goes. Offering a
-            // choice between modes here would be offering one that does not
-            // exist.
-            const Text('连接由系统的 VPN 服务承载：授权之后，全部应用的流量都会经过 SmartVPN。',
-                style: Tokens.small)
-          else ...[
-            SizedBox(
-              width: 320,
-              child: SegmentedButton<String>(
-                segments: const [
-                  ButtonSegment(
-                      value: 'system-proxy',
-                      label: Text('系统代理'),
-                      icon: Icon(Icons.language_rounded, size: 16)),
-                  ButtonSegment(
-                      value: 'tun',
-                      label: Text('TUN 全设备'),
-                      icon: Icon(Icons.vpn_lock_rounded, size: 16)),
-                ],
-                selected: {_connectionMode},
-                onSelectionChanged: _busy || _connected
-                    ? null
-                    : (selection) =>
-                        unawaited(_setConnectionMode(selection.first)),
-              ),
-            ),
-            const SizedBox(height: 12),
-            Text(
-              tunMode
-                  ? 'TUN 由内核创建虚拟网卡接管默认路由，不使用系统代理的程序也会进入隧道。'
-                  : '系统代理只覆盖遵循 Windows 代理设置的程序，其余程序不受影响。',
-              style: Tokens.small,
-            ),
-          ],
-          const SizedBox(height: 14),
-          const Divider(),
-          const SizedBox(height: 10),
-          _chinaDirectRow(),
-          if (!Platform.isAndroid && tunMode) ...[
-            const SizedBox(height: 14),
-            _tunReadiness(),
-          ],
-        ]),
+        padding: EdgeInsets.zero,
+        child: ExpansionTile(
+            title: const Text('代理模式与分流'),
+            subtitle: Text(_connectionMode == 'tun' ? 'TUN 全设备' : '系统代理'),
+            childrenPadding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
+            expandedCrossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              if (Platform.isAndroid)
+                const Text(
+                  '连接由系统的 VPN 服务承载：授权之后，全部应用的流量都会经过 SmartVPN。',
+                  style: Tokens.small,
+                )
+              else ...[
+                SizedBox(
+                  width: 320,
+                  child: SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(
+                        value: 'system-proxy',
+                        label: Text('系统代理'),
+                        icon: Icon(Icons.language_rounded, size: 16),
+                      ),
+                      ButtonSegment(
+                        value: 'tun',
+                        label: Text('TUN 全设备'),
+                        icon: Icon(Icons.vpn_lock_rounded, size: 16),
+                      ),
+                    ],
+                    selected: {_connectionMode},
+                    onSelectionChanged: _busy || _connected
+                        ? null
+                        : (selection) =>
+                            unawaited(_setConnectionMode(selection.first)),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  tunMode
+                      ? 'TUN 由内核创建虚拟网卡接管系统默认路由，不遵循系统代理的命令行及后台程序也会进入隧道。'
+                      : '系统代理仅覆盖遵循 Windows 代理设置的浏览器及应用程序，其余流量直连不受影响。',
+                  style: Tokens.small,
+                ),
+              ],
+              const SizedBox(height: 14),
+              const Divider(),
+              const SizedBox(height: 12),
+              _chinaDirectRow(),
+              if (!Platform.isAndroid && tunMode) ...[
+                const SizedBox(height: 14),
+                _tunReadiness(),
+              ],
+            ]),
       ),
     ]);
   }
 
   /// The country's own addresses going direct is what keeps a domestic site off
   /// the node. Without the list, every address a subscription does not name is
-  /// carried abroad, which is what a page that will not load looks like.
+  /// carried abroad.
   Widget _chinaDirectRow() {
     final china = _chinaDirect;
     final settled = china.available && china.active;
     return Row(children: [
       Icon(
-        settled ? Icons.check_circle_outline_rounded : Icons.info_outline_rounded,
+        settled
+            ? Icons.check_circle_outline_rounded
+            : Icons.info_outline_rounded,
         size: 16,
         color: settled ? Tokens.ok : Tokens.warn,
       ),
-      const SizedBox(width: 8),
+      const SizedBox(width: 10),
       Expanded(
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(chinaDirectLabel(china), style: Tokens.small),
@@ -163,24 +242,23 @@ extension _ConnectPage on _HomePageState {
             ),
         ]),
       ),
-      TextButton(
+      OutlinedButton(
         onPressed: _busy || china.refreshing
             ? null
             : () => unawaited(_refreshChinaDirect()),
         child: Text(china.refreshing
             ? '获取中…'
-            : (china.available ? '更新列表' : '获取列表')),
+            : (china.available ? '更新直连列表' : '获取直连列表')),
       ),
     ]);
   }
 
-  /// TUN needs an administrator token and wintun.dll; say exactly which one is
-  /// missing and put the fix next to it.
+  /// TUN needs an administrator token and wintun.dll.
   Widget _tunReadiness() {
     if (_tunAvailable) {
       return const _Notice(
         kind: _NoticeKind.ok,
-        text: '管理员权限与 wintun.dll 均已就绪，可以连接。',
+        text: '管理员权限与 wintun.dll 均已就绪，TUN 模式可以正常连接。',
       );
     }
     final needsElevation = !_elevated;
@@ -188,20 +266,20 @@ extension _ConnectPage on _HomePageState {
     return _Notice(
       kind: _NoticeKind.warn,
       text: 'TUN 尚不可用：${_tunReason.isEmpty ? '前置条件未满足' : _tunReason}。',
-      action: Wrap(spacing: 4, children: [
+      action: Wrap(spacing: 8, runSpacing: 6, children: [
         if (needsWintun)
-          TextButton(
+          FilledButton.tonal(
             onPressed: _busy ? null : _downloadWintun,
             child: const Text('下载 wintun.dll'),
           ),
         if (needsElevation)
-          TextButton(
+          FilledButton.tonal(
             onPressed: _busy ? null : _relaunchElevated,
             child: const Text('以管理员身份重启'),
           ),
         TextButton(
           onPressed: () => _goTo(_AppPage.subscription),
-          child: const Text('内核设置'),
+          child: const Text('内核高级设置'),
         ),
       ]),
     );

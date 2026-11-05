@@ -16,6 +16,7 @@
 [CmdletBinding()]
 param(
   [string]$OutputDir = '',
+  [string]$ReleaseDir = '',
   [switch]$SkipBuild,
   [switch]$AllowMissingKernel
 )
@@ -27,6 +28,10 @@ $frontend = Join-Path $root 'frontend'
 $backend = Join-Path $root 'backend'
 $tools = Join-Path $root '.tools'
 $release = Join-Path $frontend 'build\windows\x64\runner\Release'
+if ($ReleaseDir) {
+  if (-not $SkipBuild) { throw '-ReleaseDir requires -SkipBuild (an already built release)' }
+  $release = (Resolve-Path -LiteralPath $ReleaseDir).Path
+}
 $dataDir = Join-Path $env:APPDATA 'SmartVPN'
 
 $version = '0.0.0'
@@ -61,8 +66,8 @@ if (-not $SkipBuild) {
   }
 }
 
-$stage = Join-Path $env:TEMP ('smartvpn-package\' + "SmartVPN-$version")
-if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+$packageRoot = Join-Path $root ('.stage\package-' + [guid]::NewGuid().ToString('N'))
+$stage = Join-Path $packageRoot "SmartVPN-$version"
 New-Item -ItemType Directory -Path $stage | Out-Null
 
 Write-Host '== staging =='
@@ -71,9 +76,8 @@ foreach ($name in 'smartvpn_windows.exe', 'flutter_windows.dll', 'data', 'native
   Copy-Item (Join-Path $release $name) $stage -Recurse
 }
 # The local service, and the helper it shells out to for the Windows proxy.
-foreach ($name in 'smartvpn-service-current.exe', 'proxy.ps1') {
-  Copy-Item (Join-Path $release $name) $stage
-}
+Copy-Item (Join-Path $release 'smartvpn-service-current.exe') $stage
+Copy-Item (Join-Path $backend 'proxy.ps1') $stage
 
 $missing = @()
 foreach ($name in 'mihomo.exe', 'wintun.dll') {
@@ -147,7 +151,12 @@ if (Test-Path $zip) { Remove-Item $zip -Force }
 
 Write-Host '== compressing =='
 Compress-Archive -Path $stage -DestinationPath $zip -CompressionLevel Optimal -Force
-Remove-Item $stage -Recurse -Force
+$resolvedPackageRoot = (Resolve-Path -LiteralPath $packageRoot).Path
+$allowedStageRoot = [IO.Path]::GetFullPath((Join-Path $root '.stage')) + [IO.Path]::DirectorySeparatorChar
+if (-not $resolvedPackageRoot.StartsWith($allowedStageRoot, [StringComparison]::OrdinalIgnoreCase)) {
+  throw "Refusing cleanup outside .stage: $resolvedPackageRoot"
+}
+Remove-Item -LiteralPath $resolvedPackageRoot -Recurse -Force
 
 $size = [math]::Round((Get-Item $zip).Length / 1MB, 1)
 Write-Host ''

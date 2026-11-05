@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -20,35 +21,36 @@ part 'ui/widgets.dart';
 
 void main() => runApp(const SmartVpnApp());
 
-/// The sub-pages of the rail, in the order they are offered.
-enum _AppPage { connect, traffic, nodes, region, checks, subscription }
+/// The sub-pages of the rail, in the order they are offered:
+/// 总览, 线路, 订阅, 流量, 保护策略, 工具.
+enum _AppPage { connect, nodes, subscription, traffic, region, checks }
 
 extension on _AppPage {
   String get label => switch (this) {
-        _AppPage.connect => '连接',
+        _AppPage.connect => '总览',
+        _AppPage.nodes => '线路',
+        _AppPage.subscription => '订阅',
         _AppPage.traffic => '流量',
-        _AppPage.nodes => '节点',
-        _AppPage.region => '地区与健康',
-        _AppPage.checks => '检测',
-        _AppPage.subscription => '订阅与内核',
+        _AppPage.region => '保护策略',
+        _AppPage.checks => '工具',
       };
 
   String get englishCode => switch (this) {
-        _AppPage.connect => 'CONNECT_HUB',
-        _AppPage.traffic => 'TRAFFIC_MONITOR',
-        _AppPage.nodes => 'NODE_MATRIX',
-        _AppPage.region => 'REGION_HEALTH',
-        _AppPage.checks => 'DIAGNOSTIC_SUITE',
-        _AppPage.subscription => 'KERNEL_SUITE',
+        _AppPage.connect => 'OVERVIEW',
+        _AppPage.nodes => 'ROUTE_MATRIX',
+        _AppPage.subscription => 'SUBSCRIPTIONS',
+        _AppPage.traffic => 'TELEMETRY',
+        _AppPage.region => 'PROTECTION',
+        _AppPage.checks => 'DIAGNOSTICS',
       };
 
   IconData get icon => switch (this) {
-        _AppPage.connect => Icons.power_settings_new_rounded,
+        _AppPage.connect => Icons.dashboard_rounded,
+        _AppPage.nodes => Icons.alt_route_rounded,
+        _AppPage.subscription => Icons.cloud_sync_rounded,
         _AppPage.traffic => Icons.monitor_heart_outlined,
-        _AppPage.nodes => Icons.dns_rounded,
-        _AppPage.region => Icons.public_rounded,
-        _AppPage.checks => Icons.fact_check_outlined,
-        _AppPage.subscription => Icons.tune_rounded,
+        _AppPage.region => Icons.security_rounded,
+        _AppPage.checks => Icons.construction_rounded,
       };
 }
 
@@ -155,6 +157,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Timer? _trafficTimer;
   bool _trafficPaused = false;
   bool _trafficLoading = false;
+  TrafficHistoryPeriod _historyPeriod = TrafficHistoryPeriod.hour;
+  DateTime _historyDate = DateTime.now();
+  int _historyHour = DateTime.now().hour;
+  TrafficHistoryGroup _historyGroup = TrafficHistoryGroup.app;
+  String? _historyFilterAppKey;
+  String? _historyFilterAppName;
+  int _historyOffset = 0;
+  static const int _historyLimit = 100;
+  TrafficHistoryResponse? _historyData;
+  bool _historyLoading = false;
+  String? _historyError;
+  int _historyRequestSeq = 0;
   DateTime? _desktopPetTrafficAt;
   int? _desktopPetUploadTotal;
   int? _desktopPetDownloadTotal;
@@ -713,6 +727,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _port = bootstrap['port'] as int;
     _token = bootstrap['token'] as String;
     await _loadState();
+    if (_page == _AppPage.traffic) {
+      unawaited(_loadTrafficHistory());
+    }
     _stateTimer = Timer.periodic(
         const Duration(seconds: 15), (_) => unawaited(_pollConnectionState()));
   }
@@ -897,6 +914,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _refresh(() => _page = page);
     unawaited(_loadTun());
     _syncTrafficPoll();
+    if (page == _AppPage.traffic) {
+      unawaited(_loadTrafficHistory());
+    }
     if (page == _AppPage.subscription) {
       unawaited(_loadSubscriptions());
     }
@@ -912,9 +932,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// sampled while the page that shows it is open and stopped everywhere else.
   void _syncTrafficPoll() {
     final petNeedsRates = Platform.isWindows && _desktopPetEnabled;
-    final wanted =
-        ((_page == _AppPage.traffic && !_trafficPaused) || petNeedsRates) &&
-            _port != null;
+    final wanted = (_page == _AppPage.connect ||
+            (_page == _AppPage.traffic && !_trafficPaused) ||
+            petNeedsRates) &&
+        _port != null;
     if (!wanted) {
       _trafficTimer?.cancel();
       _trafficTimer = null;
@@ -1478,8 +1499,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   onPressed: () async {
                     await _request('POST', '/api/path-checks/recovery/cancel');
                     dialogOpen = false;
-                    if (dialogContext.mounted)
+                    if (dialogContext.mounted) {
                       Navigator.of(dialogContext).pop();
+                    }
                     await _loadPathChecks();
                   },
                   child: const Text('取消自动检测'),
@@ -1488,8 +1510,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   onPressed: () async {
                     await _request('POST', '/api/path-checks/run');
                     dialogOpen = false;
-                    if (dialogContext.mounted)
+                    if (dialogContext.mounted) {
                       Navigator.of(dialogContext).pop();
+                    }
                     await _loadPathChecks();
                   },
                   child: const Text('立即检测'),
@@ -1573,41 +1596,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
     } finally {
       if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  Future<void> _renameSubscription(SavedSubscription entry) async {
-    final controller = TextEditingController(text: entry.label);
-    final label = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('给这个订阅改名'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          decoration: const InputDecoration(labelText: '名称'),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.of(context).pop(),
-              child: const Text('取消')),
-          TextButton(
-              onPressed: () => Navigator.of(context).pop(controller.text),
-              child: const Text('保存')),
-        ],
-      ),
-    );
-    controller.dispose();
-    final trimmed = (label ?? '').trim();
-    if (trimmed.isEmpty || trimmed == entry.label) return;
-    try {
-      await _request('PUT', '/api/subscriptions',
-          body: {'id': entry.id, 'label': trimmed});
-      await _loadSubscriptions();
-    } catch (e) {
-      if (mounted) {
-        setState(() => _error = e.toString().replaceFirst('Exception: ', ''));
-      }
     }
   }
 
@@ -2521,10 +2509,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    // A narrow window is a phone, and the rail is a layout for something wider:
-    // it takes a fixed width that a phone does not have, and what would be left
-    // for the page is not enough to draw in. The pages are the same either way —
-    // what changes is where the list of them lives.
     final narrow = MediaQuery.sizeOf(context).width < Tokens.mobileBreakpoint;
     return Scaffold(
       appBar: narrow
@@ -2536,9 +2520,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Container(
-                    width: Tokens.barWidth,
+                    width: 3.5,
                     height: 14,
-                    color: Tokens.cyan,
+                    color: Tokens.yellow,
                   ),
                   const SizedBox(width: 8),
                   const Text('SmartVPN',
@@ -2548,51 +2532,254 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           letterSpacing: 0.3)),
                   const SizedBox(width: 6),
                   Text('// PRTS',
-                      style: Tokens.akBilingualEn.copyWith(
-                          fontSize: 10, color: Tokens.cyan)),
+                      style: Tokens.akBilingualEn
+                          .copyWith(fontSize: 10, color: Tokens.yellow)),
                 ],
               ),
               bottom: PreferredSize(
-                preferredSize: const Size.fromHeight(2),
-                child: _AkStripes(
-                  height: 2,
+                preferredSize: const Size.fromHeight(1.5),
+                child: Container(
+                  height: 1.5,
                   color: _connected
-                      ? Tokens.cyan.withOpacity(0.5)
-                      : Tokens.hairlineBright,
-                  background: Colors.transparent,
+                      ? Tokens.yellow.withValues(alpha: 0.5)
+                      : Tokens.hairline,
                 ),
               ),
               actions: [
                 Padding(
-                    padding: const EdgeInsets.only(right: 12),
-                    child: _statusBadge()),
+                  padding: const EdgeInsets.only(right: 12),
+                  child: _statusBadge(),
+                ),
               ],
             )
           : null,
-      drawer: narrow
-          ? Drawer(
-              backgroundColor: Tokens.rail,
-              child: SafeArea(child: _rail(inDrawer: true)),
-            )
-          : null,
+      bottomNavigationBar: narrow ? _buildMobileBottomBar() : null,
       body: SafeArea(
-        child: Stack(
-          children: [
-            narrow
-                ? _detail()
-                : Row(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                        _rail(inDrawer: false),
-                        Expanded(child: _detail()),
-                      ]),
-          ],
+        child: narrow
+            ? _detail()
+            : Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _rail(),
+                  Expanded(child: _detail()),
+                ],
+              ),
+      ),
+    );
+  }
+
+  Widget _buildMobileBottomBar() {
+    final activeIndex = switch (_page) {
+      _AppPage.connect => 0,
+      _AppPage.nodes => 1,
+      _AppPage.subscription => 2,
+      _AppPage.traffic => 3,
+      _AppPage.region || _AppPage.checks => 4,
+    };
+
+    return Container(
+      decoration: const BoxDecoration(
+        color: Tokens.rail,
+        border: Border(top: BorderSide(color: Tokens.hairline, width: 1)),
+      ),
+      child: NavigationBar(
+        selectedIndex: activeIndex,
+        height: 62,
+        backgroundColor: Colors.transparent,
+        indicatorColor: Tokens.yellow.withValues(alpha: 0.18),
+        onDestinationSelected: (index) {
+          switch (index) {
+            case 0:
+              _goTo(_AppPage.connect);
+              break;
+            case 1:
+              _goTo(_AppPage.nodes);
+              break;
+            case 2:
+              _goTo(_AppPage.subscription);
+              break;
+            case 3:
+              _goTo(_AppPage.traffic);
+              break;
+            case 4:
+              _showMobileMoreSheet();
+              break;
+          }
+        },
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.power_settings_new_rounded, size: 20),
+            selectedIcon: Icon(Icons.power_settings_new_rounded,
+                size: 20, color: Tokens.yellow),
+            label: '总览',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.hub_outlined, size: 20),
+            selectedIcon:
+                Icon(Icons.hub_rounded, size: 20, color: Tokens.yellow),
+            label: '线路',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.cloud_download_outlined, size: 20),
+            selectedIcon: Icon(Icons.cloud_download_rounded,
+                size: 20, color: Tokens.yellow),
+            label: '订阅',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.show_chart_rounded, size: 20),
+            selectedIcon:
+                Icon(Icons.show_chart_rounded, size: 20, color: Tokens.yellow),
+            label: '流量',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.more_horiz_rounded, size: 20),
+            selectedIcon:
+                Icon(Icons.more_horiz_rounded, size: 20, color: Tokens.yellow),
+            label: '更多',
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _showMobileMoreSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Tokens.surfaceElevated,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (context) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 16),
+                  decoration: BoxDecoration(
+                    color: Tokens.hairlineBright,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              Row(
+                children: [
+                  Container(width: 3, height: 14, color: Tokens.yellow),
+                  const SizedBox(width: 8),
+                  const Text('更多功能与扩展',
+                      style:
+                          TextStyle(fontSize: 15, fontWeight: FontWeight.w700)),
+                  const Spacer(),
+                  const Text('PRTS // EXTENSIONS', style: Tokens.akBilingualEn),
+                ],
+              ),
+              const SizedBox(height: 14),
+              ListTile(
+                dense: true,
+                leading: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Tokens.surface,
+                    borderRadius: BorderRadius.circular(Tokens.radiusBadge),
+                    border: Border.all(color: Tokens.hairline),
+                  ),
+                  child: const Icon(Icons.security_rounded,
+                      size: 18, color: Tokens.yellow),
+                ),
+                title: const Text('保护策略',
+                    style:
+                        TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                subtitle: Text(
+                  _lockedRegion.isEmpty
+                      ? '地区锁定与健康池管理'
+                      : '已锁定 $_lockedRegion (候选池: $_poolSize)',
+                  style: Tokens.hint,
+                ),
+                trailing: const Icon(Icons.chevron_right_rounded, size: 18),
+                onTap: () {
+                  Navigator.pop(context);
+                  _goTo(_AppPage.region);
+                },
+              ),
+              ListTile(
+                dense: true,
+                leading: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Tokens.surface,
+                    borderRadius: BorderRadius.circular(Tokens.radiusBadge),
+                    border: Border.all(color: Tokens.hairline),
+                  ),
+                  child: const Icon(Icons.build_circle_outlined,
+                      size: 18, color: Tokens.cyan),
+                ),
+                title: const Text('工具',
+                    style:
+                        TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                subtitle: const Text('网络诊断、定向巡检与测速', style: Tokens.hint),
+                trailing: const Icon(Icons.chevron_right_rounded, size: 18),
+                onTap: () {
+                  Navigator.pop(context);
+                  _goTo(_AppPage.checks);
+                },
+              ),
+              if (Platform.isWindows) ...[
+                const Divider(height: 18),
+                SwitchListTile(
+                  dense: true,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 4),
+                  secondary: Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: Tokens.surface,
+                      borderRadius: BorderRadius.circular(Tokens.radiusBadge),
+                      border: Border.all(color: Tokens.hairline),
+                    ),
+                    child: Icon(
+                      _desktopPetEnabled
+                          ? Icons.pets_rounded
+                          : Icons.pets_outlined,
+                      size: 18,
+                      color:
+                          _desktopPetEnabled ? Tokens.yellow : Tokens.inkMuted,
+                    ),
+                  ),
+                  title: const Text('阿米娅桌面助手',
+                      style:
+                          TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                  subtitle: Text(_desktopPetEnabled ? '已在桌面常驻' : '已关闭桌面显示',
+                      style: Tokens.hint),
+                  value: _desktopPetEnabled,
+                  onChanged: (val) {
+                    _configureDesktopPet(enabled: val);
+                    Navigator.pop(context);
+                  },
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(left: 4),
+                  child: TextButton.icon(
+                    onPressed: () {
+                      Navigator.pop(context);
+                      _showDesktopPetSettings();
+                    },
+                    icon: const Icon(Icons.tune_rounded, size: 16),
+                    label: const Text('桌宠缩放与行为设置'),
+                  ),
+                ),
+              ],
+            ],
+          ),
         ),
       ),
     );
   }
 
-  Widget _rail({required bool inDrawer}) => LayoutBuilder(
+  Widget _rail() => LayoutBuilder(
         builder: (context, constraints) => Container(
           width: Tokens.railWidth,
           decoration: const BoxDecoration(
@@ -2607,21 +2794,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     Padding(
-                      padding: const EdgeInsets.fromLTRB(18, 16, 18, 12),
+                      padding: const EdgeInsets.fromLTRB(16, 16, 16, 12),
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Text('// RHODES ISLAND · PRTS',
-                              style: Tokens.akOverline
-                                  .copyWith(fontSize: 9, letterSpacing: 1.2)),
-                          const SizedBox(height: 6),
                           Row(
                             children: [
                               Container(
-                                width: Tokens.barWidth,
-                                height: 15,
+                                width: 3.5,
+                                height: 16,
                                 decoration: BoxDecoration(
-                                  color: Tokens.cyan,
+                                  color: Tokens.yellow,
                                   borderRadius: BorderRadius.circular(1.0),
                                 ),
                               ),
@@ -2629,33 +2812,57 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               const Expanded(
                                 child: Text('SmartVPN',
                                     style: TextStyle(
-                                        fontSize: 15,
-                                        fontWeight: FontWeight.w700,
-                                        letterSpacing: 0.4)),
+                                        fontSize: 16,
+                                        fontWeight: FontWeight.w800,
+                                        letterSpacing: 0.5)),
                               ),
+                              Text('// PRTS',
+                                  style: Tokens.akBilingualEn.copyWith(
+                                      fontSize: 10, color: Tokens.yellow)),
                             ],
                           ),
-                          const SizedBox(height: 6),
-                          Row(children: [
-                            _StatusDot(
-                                color: _blocked
-                                    ? Tokens.bad
-                                    : (_protectedNow ? Tokens.ok : Tokens.inkFaint)),
-                            const SizedBox(width: 8),
-                            Text(_railStateLabel(), style: Tokens.hint),
-                          ]),
+                          const SizedBox(height: 10),
+                          Container(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 9, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: Tokens.surface,
+                              borderRadius:
+                                  BorderRadius.circular(Tokens.radiusBadge),
+                              border: Border.all(color: Tokens.hairline),
+                            ),
+                            child: Row(children: [
+                              _StatusDot(
+                                  color: _blocked
+                                      ? Tokens.bad
+                                      : (_protectedNow
+                                          ? Tokens.ok
+                                          : (_connected
+                                              ? Tokens.warn
+                                              : Tokens.inkFaint))),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  _railStateLabel(),
+                                  style: const TextStyle(
+                                      fontSize: 11.5,
+                                      fontWeight: FontWeight.w600),
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ]),
+                          ),
                         ],
                       ),
                     ),
-                    const Divider(),
-                    const SizedBox(height: 6),
-                    for (final page in _AppPage.values)
-                      _navItem(page, inDrawer: inDrawer),
+                    const Divider(height: 1),
+                    const SizedBox(height: 8),
+                    for (final page in _AppPage.values) _navItem(page),
                     const Spacer(),
                     if (Platform.isWindows)
                       Padding(
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 4),
+                            horizontal: 10, vertical: 4),
                         child: Row(children: [
                           Expanded(
                             child: InkWell(
@@ -2665,14 +2872,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                   BorderRadius.circular(Tokens.radiusBadge),
                               child: Container(
                                 padding: const EdgeInsets.symmetric(
-                                    horizontal: 10, vertical: 9),
+                                    horizontal: 8, vertical: 7),
                                 decoration: BoxDecoration(
                                   color: _desktopPetEnabled
-                                      ? Tokens.cyan.withValues(alpha: 0.08)
+                                      ? Tokens.yellow.withValues(alpha: 0.08)
                                       : Colors.transparent,
                                   border: Border.all(
                                     color: _desktopPetEnabled
-                                        ? Tokens.cyan.withValues(alpha: 0.5)
+                                        ? Tokens.yellow.withValues(alpha: 0.4)
                                         : Tokens.hairline,
                                     width: 0.8,
                                   ),
@@ -2684,24 +2891,24 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                     _desktopPetEnabled
                                         ? Icons.pets_rounded
                                         : Icons.pets_outlined,
-                                    size: 15,
+                                    size: 14,
                                     color: _desktopPetEnabled
-                                        ? Tokens.cyan
+                                        ? Tokens.yellow
                                         : Tokens.inkMuted,
                                   ),
-                                  const SizedBox(width: 8),
+                                  const SizedBox(width: 6),
                                   Expanded(
                                     child: Text(
                                       _desktopPetEnabled
-                                          ? '阿米娅桌宠 已开启'
-                                          : '阿米娅桌宠 已关闭',
+                                          ? '阿米娅桌宠 开启'
+                                          : '阿米娅桌宠 关闭',
                                       style: TextStyle(
                                         fontSize: 11,
                                         fontWeight: _desktopPetEnabled
                                             ? FontWeight.w700
                                             : FontWeight.w500,
                                         color: _desktopPetEnabled
-                                            ? Tokens.cyan
+                                            ? Tokens.yellow
                                             : Tokens.inkMuted,
                                       ),
                                     ),
@@ -2714,26 +2921,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                           IconButton(
                             tooltip: '桌宠设置',
                             onPressed: _showDesktopPetSettings,
-                            icon: const Icon(Icons.tune_rounded, size: 18),
+                            icon: const Icon(Icons.tune_rounded, size: 16),
                             visualDensity: VisualDensity.compact,
                           ),
                         ]),
                       ),
-                    const Divider(),
-                    _AkStripes(
-                      height: 2.5,
-                      color: _connected
-                          ? Tokens.cyan.withOpacity(0.5)
-                          : Tokens.hairlineBright,
-                      background: Colors.transparent,
-                    ),
+                    const Divider(height: 1),
                     Padding(
-                      padding: const EdgeInsets.fromLTRB(18, 12, 18, 14),
+                      padding: const EdgeInsets.fromLTRB(14, 10, 14, 12),
                       child: Text(
-                        _connected
-                            ? '内核运行中　127.0.0.1:$_mixedPort'
-                            : '内核未运行',
-                        style: Tokens.hint,
+                        _connected ? '内核运行中 · 127.0.0.1:$_mixedPort' : '内核待命',
+                        style: Tokens.hint.copyWith(fontSize: 10.5),
                       ),
                     ),
                   ],
@@ -2747,11 +2945,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String _railStateLabel() {
     if (_blocked) return '已阻断';
     if (_protectedNow) return '已连接';
-    if (_connected) return '内核运行中';
+    if (_connected) return '代理未生效';
     return '未连接';
   }
 
-  Widget _navItem(_AppPage page, {required bool inDrawer}) {
+  Widget _navItem(_AppPage page) {
     final count = switch (page) {
       _AppPage.nodes => _nodes.isEmpty ? null : '${_nodes.length}',
       _AppPage.region => _lockedRegion.isEmpty ? null : '$_poolSize',
@@ -2763,7 +2961,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       count: count,
       onTap: () {
         _goTo(page);
-        if (inDrawer) Navigator.of(context).pop();
       },
     );
   }
@@ -2797,13 +2994,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         ),
       ),
       const Divider(height: 1),
-      _AkStripes(
-        height: 1.5,
-        color: _connected
-            ? Tokens.cyan.withOpacity(0.4)
-            : Tokens.hairlineBright.withOpacity(0.3),
-        background: Colors.transparent,
-      ),
       if (_error != null)
         Padding(
           padding:
@@ -2842,16 +3032,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       (false, _, _) => ('未连接', Tokens.inkMuted, Tokens.idleTint),
       (true, true, _) => ('已阻断', Tokens.bad, Tokens.badTint),
       (true, false, true) => ('已连接', Tokens.ok, Tokens.okTint),
-      (true, false, false) => ('代理已关闭', Tokens.warn, Tokens.warnTint),
+      (true, false, false) => ('代理未生效', Tokens.warn, Tokens.warnTint),
     };
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: ShapeDecoration(
         color: tint,
         shape: BeveledRectangleBorder(
-          borderRadius:
-              const BorderRadius.all(Radius.circular(Tokens.akCutSm)),
-          side: BorderSide(color: color.withOpacity(0.4), width: 0.9),
+          borderRadius: const BorderRadius.all(Radius.circular(Tokens.akCutSm)),
+          side: BorderSide(color: color.withValues(alpha: 0.4), width: 0.9),
         ),
       ),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
@@ -2863,12 +3052,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             color: color,
           ),
         ),
-        const SizedBox(width: 7),
+        const SizedBox(width: 6),
         Text(label,
             style: TextStyle(
                 fontFamily: 'JetBrains Mono',
                 fontFamilyFallback: Tokens.fontMonoFallback,
-                fontSize: 11.5,
+                fontSize: 11,
                 fontWeight: FontWeight.w700,
                 color: color,
                 letterSpacing: 0.2)),
@@ -3003,21 +3192,12 @@ class _AkHoverNavItemState extends State<_AkHoverNavItem> {
 
   @override
   Widget build(BuildContext context) {
-    final active = widget.selected || _hovered;
-    final activeColor = widget.selected
-        ? Tokens.cyan
-        : (_hovered ? Tokens.cyanNeon : Tokens.inkMuted);
-    final watermarkText = switch (widget.page) {
-      _AppPage.connect => 'CONNECT',
-      _AppPage.traffic => 'TRAFFIC',
-      _AppPage.nodes => 'NODES',
-      _AppPage.region => 'REGIONS',
-      _AppPage.checks => 'DIAGNOSE',
-      _AppPage.subscription => 'PROFILES',
-    };
+    final primaryColor = widget.selected
+        ? Tokens.yellow
+        : (_hovered ? Tokens.yellow : Tokens.inkMuted);
 
     return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 2),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
       child: InkWell(
         onTap: widget.onTap,
         onHover: (hovered) {
@@ -3025,177 +3205,96 @@ class _AkHoverNavItemState extends State<_AkHoverNavItem> {
         },
         borderRadius: BorderRadius.circular(Tokens.radiusBadge),
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOutCubic,
-          clipBehavior: Clip.antiAlias,
+          duration: const Duration(milliseconds: 150),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
           decoration: BoxDecoration(
             color: widget.selected
-                ? Tokens.cyanTint
+                ? Tokens.yellowTint
                 : (_hovered
-                    ? Tokens.cyan.withOpacity(0.08)
+                    ? Tokens.yellow.withValues(alpha: 0.06)
                     : Colors.transparent),
             border: Border(
               left: BorderSide(
                 color: widget.selected
-                    ? Tokens.cyan
+                    ? Tokens.yellow
                     : (_hovered
-                        ? Tokens.cyan.withOpacity(0.8)
+                        ? Tokens.yellow.withValues(alpha: 0.6)
                         : Colors.transparent),
-                width: Tokens.barWidth,
-              ),
-              bottom: BorderSide(
-                color: active
-                    ? Tokens.cyan.withOpacity(0.22)
-                    : Tokens.hairline.withOpacity(0.3),
-                width: 0.8,
+                width: 3.0,
               ),
             ),
+            borderRadius: BorderRadius.circular(Tokens.radiusBadge),
           ),
-          child: Stack(
+          child: Row(
             children: [
-              // Arknights giant watermark text in background (smooth fade & slide on hover)
-              Positioned(
-                right: -6,
-                bottom: -8,
-                child: IgnorePointer(
-                  child: AnimatedOpacity(
-                    duration: const Duration(milliseconds: 240),
-                    opacity: active ? (widget.selected ? 0.18 : 0.12) : 0.0,
-                    child: AnimatedSlide(
-                      duration: const Duration(milliseconds: 240),
-                      curve: Curves.easeOutCubic,
-                      offset: active ? Offset.zero : const Offset(0.15, 0),
-                      child: Text(
-                        watermarkText,
-                        style: TextStyle(
-                          fontFamily: 'Bender',
-                          fontFamilyFallback: Tokens.fontFamilyFallback,
-                          fontSize: 24,
-                          fontWeight: FontWeight.w900,
-                          letterSpacing: 2.0,
-                          color: Tokens.cyan,
-                        ),
-                      ),
-                    ),
-                  ),
+              Icon(widget.page.icon, size: 16, color: primaryColor),
+              const SizedBox(width: 8),
+              Text(
+                '0${widget.page.index + 1}',
+                style: TextStyle(
+                  fontFamily: 'JetBrains Mono',
+                  fontFamilyFallback: Tokens.fontMonoFallback,
+                  fontSize: 10,
+                  fontWeight: FontWeight.w700,
+                  color: widget.selected
+                      ? Tokens.yellow
+                      : Tokens.inkFaint.withValues(alpha: 0.7),
                 ),
               ),
-
-              // Foreground row
-              Padding(
-                padding: const EdgeInsets.fromLTRB(10, 9, 12, 9),
-                child: Row(
+              const SizedBox(width: 6),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
                   children: [
-                    // Floating glowing Rhodes Island Diamond indicator (◇)
-                    AnimatedOpacity(
-                      duration: const Duration(milliseconds: 180),
-                      opacity: active ? 1.0 : 0.0,
-                      child: Container(
-                        margin: const EdgeInsets.only(right: 6),
-                        child: Transform.rotate(
-                          angle: 0.785398, // 45 degrees
-                          child: Container(
-                            width: 6,
-                            height: 6,
-                            decoration: BoxDecoration(
-                              color: Tokens.cyan,
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Tokens.cyan.withOpacity(0.8),
-                                  blurRadius: 6,
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
+                    Text(
+                      widget.page.label,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight:
+                            widget.selected ? FontWeight.w700 : FontWeight.w500,
+                        color: widget.selected ? Tokens.yellow : Tokens.ink,
                       ),
                     ),
-                    Icon(widget.page.icon, size: 16, color: activeColor),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: AnimatedSlide(
-                        duration: const Duration(milliseconds: 180),
-                        curve: Curves.easeOutCubic,
-                        offset: active ? const Offset(0.015, 0) : Offset.zero,
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.baseline,
-                          textBaseline: TextBaseline.alphabetic,
-                          children: [
-                            Text(
-                              '0${widget.page.index + 1}',
-                              style: TextStyle(
-                                fontFamily: 'JetBrains Mono',
-                                fontFamilyFallback: Tokens.fontMonoFallback,
-                                fontSize: 9.5,
-                                fontWeight: FontWeight.w700,
-                                color: active
-                                    ? Tokens.cyan.withOpacity(0.9)
-                                    : Tokens.inkFaint.withOpacity(0.55),
-                                letterSpacing: 0.2,
-                              ),
-                            ),
-                            const SizedBox(width: 5),
-                            Text(
-                              widget.page.label,
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight:
-                                    active ? FontWeight.w700 : FontWeight.w400,
-                                color:
-                                    widget.selected ? Tokens.cyan : Tokens.ink,
-                                letterSpacing: 0.3,
-                              ),
-                            ),
-                            const SizedBox(width: 5),
-                            Flexible(
-                              child: Text(
-                                widget.page.englishCode,
-                                overflow: TextOverflow.ellipsis,
-                                style: Tokens.akBilingualEn.copyWith(
-                                  fontSize: 8.5,
-                                  color: active
-                                      ? Tokens.cyan.withOpacity(0.85)
-                                      : Tokens.inkFaint.withOpacity(0.6),
-                                  fontWeight: active
-                                      ? FontWeight.w700
-                                      : FontWeight.w500,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
+                    Text(
+                      widget.page.englishCode,
+                      style: Tokens.akBilingualEn.copyWith(
+                        fontSize: 8.5,
+                        color: widget.selected
+                            ? Tokens.yellow.withValues(alpha: 0.8)
+                            : Tokens.inkFaint,
                       ),
                     ),
-                    if (widget.count != null)
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 5, vertical: 2),
-                        decoration: ShapeDecoration(
-                          color: active
-                              ? Tokens.cyan.withOpacity(0.2)
-                              : Tokens.surface,
-                          shape: BeveledRectangleBorder(
-                            borderRadius: const BorderRadius.all(
-                                Radius.circular(Tokens.akCutSm)),
-                            side: BorderSide(
-                              color: active
-                                  ? Tokens.cyan.withOpacity(0.55)
-                                  : Tokens.hairline,
-                              width: 0.8,
-                            ),
-                          ),
-                        ),
-                        child: Text(
-                          widget.count!,
-                          style: Tokens.number.copyWith(
-                            fontSize: 10.5,
-                            color: active ? Tokens.cyan : Tokens.inkMuted,
-                          ),
-                        ),
-                      ),
                   ],
                 ),
               ),
+              if (widget.count != null)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                  decoration: ShapeDecoration(
+                    color: widget.selected
+                        ? Tokens.yellow.withValues(alpha: 0.2)
+                        : Tokens.surface,
+                    shape: BeveledRectangleBorder(
+                      borderRadius: const BorderRadius.all(
+                          Radius.circular(Tokens.akCutSm)),
+                      side: BorderSide(
+                        color: widget.selected
+                            ? Tokens.yellow.withValues(alpha: 0.5)
+                            : Tokens.hairline,
+                        width: 0.8,
+                      ),
+                    ),
+                  ),
+                  child: Text(
+                    widget.count!,
+                    style: Tokens.number.copyWith(
+                      fontSize: 10,
+                      color: widget.selected ? Tokens.yellow : Tokens.inkMuted,
+                    ),
+                  ),
+                ),
             ],
           ),
         ),
