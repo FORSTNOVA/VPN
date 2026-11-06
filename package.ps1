@@ -72,8 +72,13 @@ New-Item -ItemType Directory -Path $stage | Out-Null
 
 Write-Host '== staging =='
 # The window, the Flutter runtime and the data folder it reads at startup.
-foreach ($name in 'smartvpn_windows.exe', 'flutter_windows.dll', 'data', 'native_assets.json') {
+foreach ($name in 'smartvpn_windows.exe', 'flutter_windows.dll', 'data') {
   Copy-Item (Join-Path $release $name) $stage -Recurse
+}
+# Older Flutter builds emitted a top-level native-assets manifest. Current
+# builds keep theirs inside data/flutter_assets; do not require a stale copy.
+if (Test-Path -LiteralPath (Join-Path $release 'native_assets.json')) {
+  Copy-Item -LiteralPath (Join-Path $release 'native_assets.json') -Destination $stage
 }
 # The local service, and the helper it shells out to for the Windows proxy.
 Copy-Item (Join-Path $release 'smartvpn-service-current.exe') $stage
@@ -161,6 +166,6 @@ Remove-Item -LiteralPath $resolvedPackageRoot -Recurse -Force
 $size = [math]::Round((Get-Item $zip).Length / 1MB, 1)
 Write-Host ''
 Write-Host "package: $zip ($size MB)"
-Write-Host 'contents: smartvpn_windows.exe, flutter_windows.dll, data\, native_assets.json,'
+Write-Host 'contents: smartvpn_windows.exe, flutter_windows.dll, data\,'
 Write-Host '          smartvpn-service-current.exe,'
 Write-Host '          proxy.ps1, mihomo.exe, wintun.dll, portable.txt, 使用说明.txt, LICENSES\'

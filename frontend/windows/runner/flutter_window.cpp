@@ -221,24 +221,6 @@ bool IsPetFullscreen(HWND foreground) {
          window_rect.bottom >= bounds.bottom - tolerance;
 }
 
-void DrawRoundedRect(Gdiplus::Graphics& graphics, const Gdiplus::RectF& rect,
-                     float radius, Gdiplus::Color fill,
-                     Gdiplus::Color border) {
-  using namespace Gdiplus;
-  GraphicsPath path;
-  const float diameter = radius * 2;
-  path.AddArc(rect.X, rect.Y, diameter, diameter, 180, 90);
-  path.AddArc(rect.GetRight() - diameter, rect.Y, diameter, diameter, 270, 90);
-  path.AddArc(rect.GetRight() - diameter, rect.GetBottom() - diameter,
-              diameter, diameter, 0, 90);
-  path.AddArc(rect.X, rect.GetBottom() - diameter, diameter, diameter, 90, 90);
-  path.CloseFigure();
-  SolidBrush brush(fill);
-  Pen pen(border, 1.0f);
-  graphics.FillPath(&brush, &path);
-  graphics.DrawPath(&pen, &path);
-}
-
 // The Flutter side sends UTF-8; the shell wants UTF-16.
 std::wstring Widen(const std::string& value) {
   if (value.empty()) {
@@ -267,6 +249,10 @@ bool FlutterWindow::CreatePetWindow() {
   pet_scale_ = std::clamp(static_cast<float>(ReadPetDword(L"ScalePercent", 100)) / 100.0f, 0.6f, 1.8f);
   pet_compact_width_ = std::clamp<int>(ReadPetDword(L"CompactWidth", 360), 260, 560);
   pet_compact_height_ = std::clamp<int>(ReadPetDword(L"CompactHeight", 82), 68, 160);
+  normal_x_ = static_cast<int>(ReadPetDword(L"NormalX", static_cast<DWORD>(-1)));
+  normal_y_ = static_cast<int>(ReadPetDword(L"NormalY", static_cast<DWORD>(-1)));
+  normal_position_saved_ = ReadPetDword(L"NormalPositionSaved",
+      normal_x_ != -1 && normal_y_ != -1 ? 1 : 0) != 0;
 
   Gdiplus::GdiplusStartupInput startup_input;
   if (Gdiplus::GdiplusStartup(&gdiplus_token_, &startup_input, nullptr) !=
@@ -276,24 +262,32 @@ bool FlutterWindow::CreatePetWindow() {
     wchar_t executable[MAX_PATH]{};
     GetModuleFileNameW(nullptr, executable, MAX_PATH);
     const auto exe_dir = std::filesystem::path(executable).parent_path();
+    // Search relative / bundle paths; 2x2 sprite atlas takes priority, chibi is fallback
     std::vector<std::filesystem::path> candidates = {
+        exe_dir / L"data" / L"flutter_assets" / L"assets" / L"amiya_pet_atlas.png",
+        exe_dir / L"assets" / L"amiya_pet_atlas.png",
+        std::filesystem::current_path() / L"assets" / L"amiya_pet_atlas.png",
+        std::filesystem::current_path() / L"frontend" / L"assets" / L"amiya_pet_atlas.png",
         exe_dir / L"data" / L"flutter_assets" / L"assets" / L"amiya_chibi.png",
         exe_dir / L"assets" / L"amiya_chibi.png",
         std::filesystem::current_path() / L"assets" / L"amiya_chibi.png",
         std::filesystem::current_path() / L"frontend" / L"assets" / L"amiya_chibi.png",
-        L"d:\\codebuddythink\\vpn\\frontend\\assets\\amiya_chibi.png",
     };
     for (const auto& candidate : candidates) {
       std::error_code ec;
       if (std::filesystem::exists(candidate, ec)) {
         pet_image_ = std::make_unique<Gdiplus::Image>(candidate.c_str());
-        if (pet_image_->GetLastStatus() == Gdiplus::Ok) break;
+        if (pet_image_->GetLastStatus() == Gdiplus::Ok) {
+          pet_image_is_atlas_ = candidate.filename() == L"amiya_pet_atlas.png";
+          break;
+        }
         pet_image_.reset();
       }
     }
   }
 
   WNDCLASSW window_class{};
+  window_class.style = CS_DBLCLKS;  // Support double clicks without modal delay
   window_class.hInstance = GetModuleHandleW(nullptr);
   window_class.lpfnWndProc = PetWindowProc;
   window_class.lpszClassName = kPetWindowClass;
@@ -309,11 +303,14 @@ bool FlutterWindow::CreatePetWindow() {
       0, 0, GetPetFullWidth(), GetPetFullHeight(), nullptr, nullptr,
       GetModuleHandleW(nullptr), this);
   if (!pet_window_) return false;
-  SetTimer(pet_window_, kPetFullscreenTimer, 500, nullptr);
-  SetTimer(pet_window_, kPetAnimationTimer, 33, nullptr);
-  UpdatePetPlacement();
-  PaintPet();
-  if (pet_enabled_) ShowWindow(pet_window_, SW_SHOWNOACTIVATE);
+
+  if (pet_enabled_) {
+    SetTimer(pet_window_, kPetFullscreenTimer, 500, nullptr);
+    SetTimer(pet_window_, kPetAnimationTimer, 40, nullptr);
+    UpdatePetPlacement();
+    PaintPet();
+    ShowWindow(pet_window_, SW_SHOWNOACTIVATE);
+  }
   return true;
 }
 
@@ -332,6 +329,7 @@ void FlutterWindow::DestroyPetWindow() {
 }
 
 void FlutterWindow::ConfigurePet(bool enabled, float scale, int width, int height, bool auto_mini) {
+  const bool old_enabled = pet_enabled_;
   pet_enabled_ = enabled;
   pet_scale_ = std::clamp(scale, 0.6f, 1.8f);
   pet_compact_width_ = std::clamp(width, 260, 560);
@@ -345,63 +343,77 @@ void FlutterWindow::ConfigurePet(bool enabled, float scale, int width, int heigh
   if (!pet_window_) return;
   if (pet_enabled_) {
     ShowWindow(pet_window_, SW_SHOWNOACTIVATE);
+    if (!old_enabled) {
+      SetTimer(pet_window_, kPetFullscreenTimer, 500, nullptr);
+      SetTimer(pet_window_, kPetAnimationTimer, pet_compact_ ? 125 : 40, nullptr);
+    }
     UpdatePetPlacement();
     PaintPet();
   } else {
+    // Completely halt timers when disabled so no background CPU is consumed
+    KillTimer(pet_window_, kPetFullscreenTimer);
+    KillTimer(pet_window_, kPetAnimationTimer);
     ShowWindow(pet_window_, SW_HIDE);
   }
 }
 
 void FlutterWindow::UpdatePetPlacement() {
-  if (!pet_window_ || !pet_enabled_) return;
+  if (!pet_window_ || !pet_enabled_ || is_pointer_down_ || is_dragging_) return;
   HWND foreground = GetForegroundWindow();
   DWORD foreground_pid = 0;
   if (foreground) GetWindowThreadProcessId(foreground, &foreground_pid);
-  const bool is_other_fullscreen = foreground_pid != GetCurrentProcessId() &&
-                                   IsPetFullscreen(foreground);
-  const bool should_be_compact = pet_auto_mini_on_fullscreen_ && is_other_fullscreen;
-  const bool compact_changed = (pet_compact_ != should_be_compact);
-  pet_compact_ = should_be_compact;
-
-  HMONITOR monitor = foreground_pid != GetCurrentProcessId() && pet_compact_
-                         ? MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST)
-                         : MonitorFromWindow(GetHandle(), MONITOR_DEFAULTTONEAREST);
+  const bool compact = pet_auto_mini_on_fullscreen_ &&
+      foreground_pid != GetCurrentProcessId() && IsPetFullscreen(foreground);
+  const bool mode_changed = pet_compact_ != compact;
+  RECT current{};
+  GetWindowRect(pet_window_, &current);
+  if (mode_changed && compact && pet_placed_) {
+    normal_x_ = current.left;
+    normal_y_ = current.top;
+    normal_position_saved_ = true;
+  }
+  HMONITOR monitor;
+  if (compact) {
+    monitor = MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST);
+  } else if (normal_position_saved_) {
+    monitor = MonitorFromPoint(POINT{normal_x_, normal_y_}, MONITOR_DEFAULTTONEAREST);
+  } else {
+    monitor = MonitorFromWindow(GetHandle(), MONITOR_DEFAULTTONEAREST);
+  }
   MONITORINFO info{sizeof(info)};
   if (!GetMonitorInfoW(monitor, &info)) return;
   const RECT bounds = info.rcWork;
-  const int width = pet_compact_ ? pet_compact_width_ : GetPetFullWidth();
-  const int height = pet_compact_ ? pet_compact_height_ : GetPetFullHeight();
-  const int x = std::max<LONG>(bounds.left, bounds.right - width - 14);
-  const int y = std::max<LONG>(bounds.top, bounds.top + 14);
-
-  RECT current_rect{};
-  GetWindowRect(pet_window_, &current_rect);
-  const int current_w = current_rect.right - current_rect.left;
-  const int current_h = current_rect.bottom - current_rect.top;
-  const bool size_changed = (current_w != width || current_h != height);
-
-  if (compact_changed || !pet_placed_) {
-    pet_placed_ = true;
-    SetWindowPos(pet_window_, HWND_TOPMOST, x, y, width, height,
-                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
-  } else if (size_changed) {
-    int new_x = current_rect.left;
-    int new_y = current_rect.top;
-    if (new_x + width > bounds.right) {
-      new_x = std::max<LONG>(bounds.left, bounds.right - width - 10);
+  const int width = compact ? pet_compact_width_ : GetPetFullWidth();
+  const int height = compact ? pet_compact_height_ : GetPetFullHeight();
+  const bool size_changed = current.right-current.left != width || current.bottom-current.top != height;
+  int x = current.left;
+  int y = current.top;
+  if (compact) {
+    if (mode_changed || !pet_placed_ || size_changed ||
+        MonitorFromWindow(pet_window_, MONITOR_DEFAULTTONEAREST) != monitor) {
+      x = bounds.right - width - 14;
+      y = bounds.top + 14;
     }
-    if (new_y + height > bounds.bottom) {
-      new_y = std::max<LONG>(bounds.top, bounds.bottom - height - 10);
-    }
-    if (new_x < bounds.left) new_x = bounds.left + 10;
-    if (new_y < bounds.top) new_y = bounds.top + 10;
-    SetWindowPos(pet_window_, HWND_TOPMOST, new_x, new_y, width, height,
-                 SWP_NOACTIVATE | SWP_SHOWWINDOW);
-  } else {
-    SetWindowPos(pet_window_, HWND_TOPMOST, 0, 0, width, height,
-                 SWP_NOMOVE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+  } else if (mode_changed || !pet_placed_) {
+    x = normal_position_saved_ ? normal_x_ : bounds.right-width-20;
+    y = normal_position_saved_ ? normal_y_ : bounds.bottom-height-40;
   }
-  PaintPet();
+  x = std::clamp(x, static_cast<int>(bounds.left), std::max<int>(bounds.left, bounds.right-width));
+  y = std::clamp(y, static_cast<int>(bounds.top), std::max<int>(bounds.top, bounds.bottom-height));
+  if (!compact) {
+    normal_x_=x; normal_y_=y; normal_position_saved_=true;
+  }
+  pet_compact_=compact;
+  if (mode_changed) {
+    hover_progress_=0.0f; pet_hovered_=false; pet_hover_until_=0;
+    pet_mouse_tracking_=false;
+    SetTimer(pet_window_, kPetAnimationTimer, compact ? 125 : 40, nullptr);
+  }
+  if (mode_changed || !pet_placed_ || size_changed || x!=current.left || y!=current.top) {
+    SetWindowPos(pet_window_, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    PaintPet();
+  }
+  pet_placed_=true;
 }
 
 void FlutterWindow::SetPetSpeech(const std::wstring& text, uint64_t duration_ms) {
@@ -411,34 +423,97 @@ void FlutterWindow::SetPetSpeech(const std::wstring& text, uint64_t duration_ms)
 }
 
 void FlutterWindow::TriggerPetClick() {
-  pet_squash_ = 1.0f;
+  const uint64_t now = GetTickCount64();
+  wave_end_tick_ = now + 1200;  // Frame 2 cheerful wave ~1.2s on intentional click
   pet_poke_count_++;
+
   static const wchar_t* kQuotes[] = {
-      L"博士，工作辛苦了，也要注意休息哦！",
-      L"PRTS 网络链路正常，阿米娅正在为您警戒~",
-      L"呜哇… 博士突然戳我，吓了一跳！(⁄ ⁄•⁄ω⁄•⁄ ⁄)",
-      L"右键可以帮您快速测速、切节点和开关连接哦！",
-      L"不管前路如何，阿米娅都会一直陪着博士的。",
-      L"检测到高速数据流，罗德岛网络加速中！✨",
-      L"阿米娅的耳朵很灵敏的，有任何网络波动我都能察觉！",
-      L"博士，今天的任务完成得怎么样？需要阿米娅帮忙吗？",
+      L"博士，阿米娅在这里。",
+      L"需要我时，轻轻点一下就好。",
+      L"移入鼠标，就能查看当前链路。",
+      L"右键可切换节点或进行测速诊断哦。",
+      L"工作辛苦了，博士也要注意休息。",
+      L"今天也一起把工作做好吧，博士。",
   };
   constexpr size_t num_quotes = sizeof(kQuotes) / sizeof(kQuotes[0]);
-  SetPetSpeech(kQuotes[pet_poke_count_ % num_quotes], 3800);
+  SetPetSpeech(kQuotes[(pet_poke_count_ - 1) % num_quotes], 2800);
 }
 
 void FlutterWindow::UpdatePetAnimation() {
-  if (!pet_window_ || !pet_enabled_) return;
-  if (pet_squash_ > 0.01f) {
-    pet_squash_ *= 0.85f;
+  if (!pet_window_ || !pet_enabled_ || !IsWindowVisible(pet_window_)) return;
+
+  if (pet_anim_start_tick_ == 0) pet_anim_start_tick_ = GetTickCount64();
+  const uint64_t now = GetTickCount64();
+
+  // 1. Smooth hover card expansion/collapse
+  const float target_hover = (pet_hovered_ || now < pet_hover_until_) ? 1.0f : 0.0f;
+  if (std::abs(hover_progress_ - target_hover) > 0.01f) {
+    hover_progress_ += (target_hover - hover_progress_) * 0.25f;
   } else {
-    pet_squash_ = 0.0f;
+    hover_progress_ = target_hover;
   }
+
+  // 2. Sprite frame sequencing:
+  // Frame 2: cheerful wave (~1.2s on click)
+  // Frame 3: attentive tablet (when hover telemetry panel is active)
+  // Frame 1: periodic blink (~140ms every 5.5s)
+  // Frame 0: neutral idle
+  if (now < wave_end_tick_) {
+    current_frame_ = 2;
+  } else if (pet_hovered_ || hover_progress_ > 0.5f) {
+    current_frame_ = 3;
+  } else {
+    const uint64_t blink_cycle = (now - pet_anim_start_tick_) % 5500;
+    if (blink_cycle < 140) {
+      current_frame_ = 1;
+    } else {
+      current_frame_ = 0;
+    }
+  }
+
+  // 3. Gentle breathing motion (< 2px)
+  breathe_offset_y_ = sinf(static_cast<float>(now - pet_anim_start_tick_) / 1000.0f * 2.2f) * 1.5f;
+
+  // 4. Speech timer expiration
+  if (pet_speech_end_tick_ > 0 && now >= pet_speech_end_tick_) {
+    pet_speech_end_tick_ = 0;
+    pet_speech_text_.clear();
+  }
+
   PaintPet();
 }
 
+DesktopPetViewState FlutterWindow::BuildPetViewState() const {
+  DesktopPetViewState state;
+  state.is_compact = pet_compact_;
+  state.image_is_atlas = pet_image_is_atlas_;
+  state.scale = pet_scale_;
+  state.connected = pet_connected_;
+  state.status = pet_status_;
+  state.active_node = pet_active_node_;
+  state.mode = pet_mode_;
+  state.download_rate = pet_download_rate_;
+  state.upload_rate = pet_upload_rate_;
+
+  state.hover_progress = hover_progress_;
+  state.is_hovered = pet_hovered_;
+  state.current_frame = current_frame_;
+  state.breathe_offset_y = breathe_offset_y_;
+
+  state.speech_text = pet_speech_text_;
+  const uint64_t now = GetTickCount64();
+  if (now < pet_speech_end_tick_ && !pet_speech_text_.empty()) {
+    const float time_left = static_cast<float>(pet_speech_end_tick_ - now) / 1000.0f;
+    state.speech_opacity = std::clamp(time_left * 2.5f, 0.0f, 1.0f);
+  } else {
+    state.speech_opacity = 0.0f;
+  }
+  state.anim_time_ms = now - pet_anim_start_tick_;
+  return state;
+}
+
 void FlutterWindow::PaintPet() {
-  if (!pet_window_) return;
+  if (!pet_window_ || !pet_enabled_) return;
   using namespace Gdiplus;
   RECT client{};
   GetClientRect(pet_window_, &client);
@@ -468,266 +543,8 @@ void FlutterWindow::PaintPet() {
   {
     Bitmap gdi_bitmap(width, height, width * 4, PixelFormat32bppPARGB, static_cast<BYTE*>(bits));
     Graphics graphics(&gdi_bitmap);
-    graphics.SetSmoothingMode(SmoothingModeAntiAlias);
-    graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
-    graphics.SetTextRenderingHint(TextRenderingHintAntiAlias);
-    graphics.Clear(Color(0, 0, 0, 0));  // 100% transparent background
-
-    if (pet_anim_start_tick_ == 0) pet_anim_start_tick_ = GetTickCount64();
-    const float anim_time = static_cast<float>(GetTickCount64() - pet_anim_start_tick_) / 1000.0f;
-
-    if (pet_compact_) {
-      // Compact mini-widget mode (active when fullscreen app detected)
-      const RectF card(0.5f, 0.5f, static_cast<REAL>(width - 1),
-                       static_cast<REAL>(height - 1));
-      DrawRoundedRect(graphics, card, 12.0f,
-                      Color(245, 18, 24, 34), Color(255, 45, 175, 215));
-
-      // Active radar scanner light line across the top border
-      const float scan_phase = fmodf(anim_time * 0.7f, 1.0f);
-      const float scan_x = 14.0f + (width - 60.0f) * scan_phase;
-      LinearGradientBrush scan_brush(
-          PointF(scan_x, 0.0f), PointF(scan_x + 40.0f, 0.0f),
-          Color(0, 45, 175, 215), Color(255, 68, 228, 255));
-      Pen scan_pen(&scan_brush, 1.5f);
-      graphics.DrawLine(&scan_pen, scan_x, 1.0f, scan_x + 36.0f, 1.0f);
-
-      const REAL text_x = 16.0f;
-      const Color state_color = pet_connected_
-                                    ? Color(255, 60, 220, 150)
-                                    : (pet_status_.find(L"阻断") != std::wstring::npos
-                                           ? Color(255, 255, 80, 80)
-                                           : Color(255, 150, 165, 180));
-
-      const REAL mid_y = height / 2.0f;
-      const REAL line1_y = std::max<REAL>(10.0f, mid_y - 23.0f);
-      const REAL line2_y = std::max<REAL>(33.0f, mid_y + 3.0f);
-
-      // Radar sonar ping expanding ripple when connected
-      if (pet_connected_) {
-        const float ping = fmodf(anim_time * 8.0f, 12.0f);
-        const auto ping_alpha = static_cast<BYTE>(std::clamp(static_cast<int>(160 * (1.0f - ping / 12.0f)), 0, 255));
-        if (ping_alpha > 0) {
-          Pen ping_pen(Color(ping_alpha, 60, 220, 150), 1.2f);
-          graphics.DrawEllipse(&ping_pen, text_x - ping * 0.5f,
-                               line1_y + 4.0f - ping * 0.5f,
-                               8.0f + ping, 8.0f + ping);
-        }
-
-        const float pulse = (sinf(anim_time * 3.6f) + 1.0f) * 0.5f;
-        const auto ring_alpha = static_cast<BYTE>(std::clamp(static_cast<int>(50 + 130 * pulse), 0, 255));
-        const float ring_expand = 2.0f + pulse * 4.0f;
-        SolidBrush glow_brush(Color(ring_alpha, 60, 220, 150));
-        graphics.FillEllipse(&glow_brush, text_x - ring_expand * 0.5f,
-                             line1_y + 4.0f - ring_expand * 0.5f,
-                             8.0f + ring_expand, 8.0f + ring_expand);
-      }
-
-      // Core status dot
-      SolidBrush dot(state_color);
-      graphics.FillEllipse(&dot, text_x, line1_y + 4.0f, 8.0f, 8.0f);
-
-      Font status_font(L"Microsoft YaHei UI", 12.0f, FontStyleBold, UnitPixel);
-      Font tag_font(L"Microsoft YaHei UI", 9.0f, FontStyleRegular, UnitPixel);
-      Font rate_font(L"Microsoft YaHei UI", 11.0f, FontStyleBold, UnitPixel);
-      SolidBrush ink(Color(255, 240, 245, 250));
-      SolidBrush amber_brush(Color(255, 255, 185, 85));
-      SolidBrush muted_brush(Color(255, 140, 155, 170));
-
-      std::wstring display_status = pet_status_;
-      if (pet_connected_ && !pet_active_node_.empty()) {
-        display_status += L" · " + pet_active_node_;
-      }
-      graphics.DrawString(display_status.c_str(), -1, &status_font,
-                          PointF(text_x + 15.0f, line1_y), &ink);
-
-      graphics.DrawString(L"[PRTS MINI]", -1, &tag_font,
-                          PointF(width - 76.0f, line1_y + 2.0f), &muted_brush);
-
-      // Speed rates with subtle brightness pulse when downloading
-      const float dl_pulse = (sinf(anim_time * 4.0f) + 1.0f) * 0.5f;
-      const auto cyan_g = static_cast<BYTE>(std::clamp(static_cast<int>(200 + 35 * dl_pulse), 0, 255));
-      SolidBrush animated_cyan(Color(255, 68, cyan_g, 255));
-      graphics.DrawString(pet_download_rate_.c_str(), -1, &rate_font,
-                          PointF(text_x, line2_y), &animated_cyan);
-
-      const REAL upload_x = text_x + 115.0f;
-      graphics.DrawString(pet_upload_rate_.c_str(), -1, &rate_font,
-                          PointF(upload_x, line2_y), &amber_brush);
-    } else {
-      // Normal desktop mascot mode: 100% transparent background, NO speed display, pure Amiya pet!
-      const float ui_scale = static_cast<float>(width) / static_cast<float>(kPetBaseWidth);
-
-      // --- 1. Idle Gentle Breathing Bounce & Head Sway ---
-      const float breathe_y = sinf(anim_time * 2.3f) * (3.5f * ui_scale);
-      const float tilt_angle = sinf(anim_time * 1.6f) * 1.8f;
-
-      // --- 2. Click Squash & Stretch Reaction ---
-      const float squash_delta = sinf(pet_squash_ * 12.0f) * pet_squash_ * 0.09f;
-      const float scale_x = 1.0f + squash_delta;
-      const float scale_y = 1.0f - squash_delta;
-
-      // --- 3. Floating Cyber Sparkle / Energy Particles ---
-      const float p_speed = pet_connected_ ? 1.35f : 0.85f;
-      for (int i = 0; i < 6; ++i) {
-        const float t = anim_time * p_speed + static_cast<float>(i) * 1.1f;
-        const float px = (15.0f * ui_scale) + (190.0f * ui_scale) * (0.5f + 0.44f * sinf(t * 0.85f + static_cast<float>(i)));
-        const float py = (60.0f * ui_scale) + (180.0f * ui_scale) * (0.5f + 0.42f * cosf(t * 1.15f + static_cast<float>(i * 2)));
-        const auto p_alpha = static_cast<BYTE>(std::clamp(static_cast<int>(80.0f + 90.0f * sinf(t * 2.2f)), 0, 255));
-        if (p_alpha > 0) {
-          Color p_col = (i % 2 == 0) ? Color(p_alpha, 68, 228, 255) : Color(p_alpha, 255, 215, 95);
-          SolidBrush p_brush(p_col);
-          const float diamond_size = 3.0f * ui_scale;
-          PointF diamond_pts[4] = {
-              PointF(px, py - diamond_size),
-              PointF(px + diamond_size, py),
-              PointF(px, py + diamond_size),
-              PointF(px - diamond_size, py),
-          };
-          graphics.FillPolygon(&p_brush, diamond_pts, 4);
-        }
-      }
-
-      // --- 4. Rotating Holographic Rhodes Island Diamond Halo ---
-      {
-        GraphicsState halo_state = graphics.Save();
-        const float halo_cx = width / 2.0f;
-        const float halo_cy = (68.0f * ui_scale) + breathe_y * 0.4f;
-        graphics.TranslateTransform(halo_cx, halo_cy);
-        const float rot_speed = pet_hovered_ ? 90.0f : 42.0f;
-        graphics.RotateTransform(anim_time * rot_speed);
-
-        // Halo outer glow diamond
-        const float base_glow = (pet_hovered_ ? 11.0f : 9.0f) * ui_scale;
-        const float glow_size = base_glow + sinf(anim_time * 3.0f) * (1.8f * ui_scale);
-        const auto halo_alpha = static_cast<BYTE>(pet_hovered_ ? 140 : 90);
-        Pen halo_glow_pen(Color(halo_alpha, 24, 209, 255), 2.0f * ui_scale);
-        PointF halo_outer[4] = {
-            PointF(0.0f, -glow_size), PointF(glow_size, 0.0f),
-            PointF(0.0f, glow_size), PointF(-glow_size, 0.0f),
-        };
-        graphics.DrawPolygon(&halo_glow_pen, halo_outer, 4);
-
-        // Halo inner diamond
-        const float inner_size = 6.0f * ui_scale;
-        Pen halo_pen(Color(255, 68, 228, 255), 1.2f * ui_scale);
-        PointF halo_inner[4] = {
-            PointF(0.0f, -inner_size), PointF(inner_size, 0.0f),
-            PointF(0.0f, inner_size), PointF(-inner_size, 0.0f),
-        };
-        graphics.DrawPolygon(&halo_pen, halo_inner, 4);
-        graphics.Restore(halo_state);
-      }
-
-      // --- 5. Amiya Chibi Character with Breathing, Micro-Tilt & Squash ---
-      if (pet_image_) {
-        GraphicsState img_state = graphics.Save();
-        const REAL max_width = static_cast<REAL>(width - 16.0f * ui_scale);
-        const REAL max_height = static_cast<REAL>(height - 105.0f * ui_scale);
-        const REAL img_scale = std::min(max_width / pet_image_->GetWidth(),
-                                        max_height / pet_image_->GetHeight());
-        const REAL base_w = pet_image_->GetWidth() * img_scale;
-        const REAL base_h = pet_image_->GetHeight() * img_scale;
-        const REAL center_x = width / 2.0f;
-        const REAL bottom_y = height - (28.0f * ui_scale) + breathe_y;
-
-        graphics.TranslateTransform(center_x, bottom_y);
-        graphics.ScaleTransform(scale_x, scale_y);
-        graphics.RotateTransform(tilt_angle);
-
-        graphics.DrawImage(pet_image_.get(),
-                           -base_w / 2.0f, -base_h,
-                           base_w, base_h);
-        graphics.Restore(img_state);
-      }
-
-      // --- 6. Animated Interactive Speech Bubble (TOP HOVERING, NEVER BLOCKS AMIYA) ---
-      const uint64_t now = GetTickCount64();
-      if (now < pet_speech_end_tick_ && !pet_speech_text_.empty()) {
-        const float time_left = static_cast<float>(pet_speech_end_tick_ - now) / 1000.0f;
-        const float alpha_factor = std::min(1.0f, time_left * 2.5f);
-        const auto bubble_alpha = static_cast<BYTE>(std::clamp(static_cast<int>(245 * alpha_factor), 0, 255));
-        if (bubble_alpha > 10) {
-          const float bubble_w = width - 16.0f * ui_scale;
-          const float bubble_h = 44.0f * ui_scale;
-          const float bubble_x = 8.0f * ui_scale;
-          const float bubble_y = 6.0f * ui_scale + breathe_y * 0.3f;
-          const RectF bubble_rect(bubble_x, bubble_y, bubble_w, bubble_h);
-          DrawRoundedRect(graphics, bubble_rect, 8.0f * ui_scale,
-                          Color(bubble_alpha, 16, 22, 32),
-                          Color(bubble_alpha, 45, 185, 230));
-
-          // Downward-pointing tail pointing toward Amiya's head
-          SolidBrush tail_brush(Color(bubble_alpha, 16, 22, 32));
-          Pen tail_pen(Color(bubble_alpha, 45, 185, 230), 1.0f * ui_scale);
-          const float tail_top = bubble_rect.GetBottom();
-          const float tail_tip = tail_top + 7.0f * ui_scale;
-          const PointF tail[3] = {
-              PointF(width / 2.0f - 7.0f * ui_scale, tail_top - 0.5f),
-              PointF(width / 2.0f, tail_tip),
-              PointF(width / 2.0f + 7.0f * ui_scale, tail_top - 0.5f),
-          };
-          graphics.FillPolygon(&tail_brush, tail, 3);
-          graphics.DrawLine(&tail_pen, tail[0], tail[1]);
-          graphics.DrawLine(&tail_pen, tail[1], tail[2]);
-
-          const float font_size = std::clamp(9.5f * ui_scale, 8.0f, 15.0f);
-          Font speech_font(L"Microsoft YaHei UI", font_size, FontStyleRegular, UnitPixel);
-          SolidBrush speech_ink(Color(bubble_alpha, 240, 245, 252));
-          RectF text_box(bubble_rect.X + 6.0f * ui_scale, bubble_rect.Y + 4.0f * ui_scale,
-                         bubble_rect.Width - 12.0f * ui_scale, bubble_rect.Height - 8.0f * ui_scale);
-          StringFormat format;
-          format.SetAlignment(StringAlignmentCenter);
-          format.SetLineAlignment(StringAlignmentCenter);
-          graphics.DrawString(pet_speech_text_.c_str(), -1, &speech_font,
-                              text_box, &format, &speech_ink);
-        }
-      }
-
-      // --- 7. Minimal Floating Status Capsule Pill at Amiya's Feet (NO speed rates) ---
-      const Color state_color = pet_connected_
-                                    ? Color(255, 60, 220, 150)
-                                    : (pet_status_.find(L"阻断") != std::wstring::npos
-                                           ? Color(255, 255, 80, 80)
-                                           : Color(255, 150, 165, 180));
-
-      std::wstring status_text = pet_status_;
-      if (pet_connected_ && !pet_active_node_.empty()) {
-        status_text = pet_active_node_;
-      }
-
-      const float pill_font_size = std::clamp(9.5f * ui_scale, 8.0f, 14.0f);
-      Font pill_font(L"Microsoft YaHei UI", pill_font_size, FontStyleBold, UnitPixel);
-      RectF text_bounds;
-      graphics.MeasureString(status_text.c_str(), -1, &pill_font, PointF(0, 0), &text_bounds);
-
-      const float pill_w = std::clamp(text_bounds.Width + 26.0f * ui_scale, 70.0f * ui_scale, static_cast<REAL>(width - 16.0f * ui_scale));
-      const float pill_h = 20.0f * ui_scale;
-      const float pill_x = (width - pill_w) / 2.0f;
-      const float pill_y = height - pill_h - 4.0f * ui_scale;
-
-      const RectF pill_rect(pill_x, pill_y, pill_w, pill_h);
-      DrawRoundedRect(graphics, pill_rect, 10.0f * ui_scale,
-                      Color(180, 16, 22, 34), Color(160, 45, 185, 230));
-
-      if (pet_connected_) {
-        const float pulse = (sinf(anim_time * 3.2f) + 1.0f) * 0.5f;
-        const auto ring_alpha = static_cast<BYTE>(std::clamp(static_cast<int>(40 + 100 * pulse), 0, 255));
-        SolidBrush ring_brush(Color(ring_alpha, 60, 220, 150));
-        graphics.FillEllipse(&ring_brush, pill_x + 5.0f * ui_scale, pill_y + 4.0f * ui_scale, 12.0f * ui_scale, 12.0f * ui_scale);
-      }
-
-      SolidBrush dot(state_color);
-      graphics.FillEllipse(&dot, pill_x + 7.5f * ui_scale, pill_y + 6.5f * ui_scale, 7.0f * ui_scale, 7.0f * ui_scale);
-
-      SolidBrush pill_text_brush(Color(255, 235, 242, 248));
-      RectF pill_text_box(pill_x + 18.0f * ui_scale, pill_y + 1.0f * ui_scale, pill_w - 22.0f * ui_scale, pill_h - 2.0f * ui_scale);
-      StringFormat pill_format;
-      pill_format.SetAlignment(StringAlignmentNear);
-      pill_format.SetLineAlignment(StringAlignmentCenter);
-      pill_format.SetTrimming(StringTrimmingEllipsisCharacter);
-      graphics.DrawString(status_text.c_str(), -1, &pill_font, pill_text_box, &pill_format, &pill_text_brush);
-    }
+    DesktopPetViewState view_state = BuildPetViewState();
+    DrawDesktopPet(graphics, pet_image_.get(), width, height, view_state);
   }
 
   POINT pt_src{0, 0};
@@ -831,6 +648,7 @@ void FlutterWindow::ShowPetContextMenu(int x, int y) {
   } else if (command == static_cast<UINT>(PetMenuCommand::kOpenMainWindow)) {
     ShowFromTray();
   } else if (command == static_cast<UINT>(PetMenuCommand::kOpenPetSettings)) {
+    ShowFromTray();
     Invoke("openPetSettings");
   } else if (command == static_cast<UINT>(PetMenuCommand::kClosePet)) {
     ConfigurePet(false, pet_scale_, pet_compact_width_, pet_compact_height_, pet_auto_mini_on_fullscreen_);
@@ -874,22 +692,64 @@ LRESULT CALLBACK FlutterWindow::PetWindowProc(HWND window, UINT message,
       if (wparam == kPetFullscreenTimer) owner->UpdatePetPlacement();
       if (wparam == kPetAnimationTimer) owner->UpdatePetAnimation();
       return 0;
+
     case WM_MOUSEMOVE: {
+      if (owner->is_pointer_down_) {
+        POINT cur{};
+        GetCursorPos(&cur);
+        const int dx = cur.x - owner->drag_start_cursor_.x;
+        const int dy = cur.y - owner->drag_start_cursor_.y;
+        if (!owner->is_dragging_) {
+          const int threshold_x = GetSystemMetrics(SM_CXDRAG);
+          const int threshold_y = GetSystemMetrics(SM_CYDRAG);
+          if (std::abs(dx) >= threshold_x || std::abs(dy) >= threshold_y) {
+            owner->is_dragging_ = true;
+          }
+        }
+        if (owner->is_dragging_) {
+          int new_x = owner->drag_start_window_.x + dx;
+          int new_y = owner->drag_start_window_.y + dy;
+
+          HMONITOR mon = MonitorFromPoint(cur, MONITOR_DEFAULTTONEAREST);
+          MONITORINFO mi{sizeof(mi)};
+          if (GetMonitorInfoW(mon, &mi)) {
+            const RECT& bounds = mi.rcWork;
+            RECT wr{};
+            GetWindowRect(window, &wr);
+            const int w = wr.right - wr.left;
+            const int h = wr.bottom - wr.top;
+            if (new_x + w > bounds.right) new_x = bounds.right - w;
+            if (new_y + h > bounds.bottom) new_y = bounds.bottom - h;
+            if (new_x < bounds.left) new_x = bounds.left;
+            if (new_y < bounds.top) new_y = bounds.top;
+          }
+          SetWindowPos(window, HWND_TOPMOST, new_x, new_y, 0, 0,
+                       SWP_NOSIZE | SWP_NOACTIVATE);
+          if (!owner->pet_compact_) {
+            owner->normal_x_ = new_x;
+            owner->normal_y_ = new_y;
+            owner->normal_position_saved_ = true;
+          }
+        }
+        return 0;
+      }
+
       if (!owner->pet_mouse_tracking_) {
         TRACKMOUSEEVENT tme{sizeof(tme), TME_LEAVE, window, 0};
         TrackMouseEvent(&tme);
         owner->pet_mouse_tracking_ = true;
         owner->pet_hovered_ = true;
-        owner->PaintPet();
       }
       return 0;
     }
+
     case WM_MOUSELEAVE: {
       owner->pet_mouse_tracking_ = false;
       owner->pet_hovered_ = false;
-      owner->PaintPet();
+      owner->pet_hover_until_ = GetTickCount64() + 350;
       return 0;
     }
+
     case WM_PAINT: {
       PAINTSTRUCT paint{};
       BeginPaint(window, &paint);
@@ -897,30 +757,113 @@ LRESULT CALLBACK FlutterWindow::PetWindowProc(HWND window, UINT message,
       EndPaint(window, &paint);
       return 0;
     }
+
     case WM_ERASEBKGND:
       return 1;
+
     case WM_MOUSEACTIVATE:
       return MA_NOACTIVATE;
-    case WM_NCHITTEST:
-      return HTCLIENT;
+
+    case WM_NCHITTEST: {
+      if (owner->is_dragging_ || owner->is_pointer_down_ || owner->pet_compact_) {
+        return HTCLIENT;
+      }
+      POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
+      ScreenToClient(window, &pt);
+      RECT cr{};
+      GetClientRect(window, &cr);
+      const int w = cr.right - cr.left;
+      const int h = cr.bottom - cr.top;
+      if (pt.x < 0 || pt.x >= w || pt.y < 0 || pt.y >= h) {
+        return HTNOWHERE;
+      }
+
+      // Upper area (~100px) is interactive if hover card or speech is visible
+      const bool upper_active = (owner->hover_progress_ > 0.05f) ||
+                                (owner->pet_speech_end_tick_ > GetTickCount64());
+      const int upper_boundary = static_cast<int>(100.0f * (static_cast<float>(w) / FlutterWindow::kPetBaseWidth));
+      if (upper_active && pt.y < upper_boundary) {
+        return HTCLIENT;
+      }
+
+      // Character lower area
+      const int char_top = static_cast<int>(90.0f * (static_cast<float>(w) / FlutterWindow::kPetBaseWidth));
+      if (pt.y >= char_top) {
+        return HTCLIENT;
+      }
+
+      // Upper empty transparent pixels do not block desktop clicks when idle
+      return HTTRANSPARENT;
+    }
+
     case WM_LBUTTONDOWN: {
-      owner->TriggerPetClick();
-      ReleaseCapture();
-      SendMessage(window, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+      owner->is_pointer_down_ = true;
+      owner->is_dragging_ = false;
+      GetCursorPos(&owner->drag_start_cursor_);
+      RECT wr{};
+      GetWindowRect(window, &wr);
+      owner->drag_start_window_.x = wr.left;
+      owner->drag_start_window_.y = wr.top;
+      SetCapture(window);
       return 0;
     }
+
+    case WM_LBUTTONUP: {
+      if (owner->is_pointer_down_) {
+        const bool was_dragging = owner->is_dragging_;
+        owner->is_pointer_down_ = false;
+        owner->is_dragging_ = false;
+        ReleaseCapture();
+        if (was_dragging) {
+          if (!owner->pet_compact_) {
+            SavePetDword(L"NormalX", static_cast<DWORD>(owner->normal_x_));
+            SavePetDword(L"NormalY", static_cast<DWORD>(owner->normal_y_));
+            SavePetDword(L"NormalPositionSaved", 1);
+          }
+        } else {
+          // Intentional click release without drag -> trigger greeting
+          owner->TriggerPetClick();
+        }
+        return 0;
+      }
+      break;
+    }
+
+    case WM_CAPTURECHANGED:
+    case WM_CANCELMODE: {
+      owner->is_pointer_down_ = false;
+      owner->is_dragging_ = false;
+      if (message == WM_CANCELMODE && GetCapture() == window) ReleaseCapture();
+      return 0;
+    }
+
     case WM_LBUTTONDBLCLK: {
+      owner->is_pointer_down_ = false;
+      owner->is_dragging_ = false;
+      ReleaseCapture();
       owner->SetPetSpeech(L"正在为博士展开控制终端！", 2500);
       owner->ShowFromTray();
       return 0;
     }
+
     case WM_RBUTTONUP: {
+      if (owner->is_pointer_down_) {
+        owner->is_pointer_down_ = false;
+        owner->is_dragging_ = false;
+        ReleaseCapture();
+      }
       POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
       ClientToScreen(window, &pt);
       owner->ShowPetContextMenu(pt.x, pt.y);
       return 0;
     }
+
     case WM_CONTEXTMENU: {
+      if (owner->is_pointer_down_) {
+        owner->is_pointer_down_ = false;
+        owner->is_dragging_ = false;
+        ReleaseCapture();
+      }
       POINT pt{GET_X_LPARAM(lparam), GET_Y_LPARAM(lparam)};
       if (pt.x == -1 && pt.y == -1) {
         RECT r{};
@@ -1171,17 +1114,17 @@ void FlutterWindow::HandleLifecycleCall(
     }
 
     if (!old_connected && pet_connected_) {
-      std::wstring speech = L"博士！PRTS 安全链路已连通";
+      std::wstring speech = L"博士，连接已建立";
       if (!pet_active_node_.empty()) speech += L" [" + pet_active_node_ + L"]";
       speech += L"！";
-      SetPetSpeech(speech, 4500);
-      pet_squash_ = 0.6f;
+      SetPetSpeech(speech, 4000);
+      wave_end_tick_ = GetTickCount64() + 1200;
     } else if (old_connected && !pet_connected_) {
-      SetPetSpeech(L"网络链路已安全断开，阿米娅继续为您警戒！", 4000);
-      pet_squash_ = 0.4f;
+      SetPetSpeech(L"连接已断开，需要时再叫我。", 3500);
     } else if (pet_connected_ && !pet_active_node_.empty() && old_node != pet_active_node_) {
-      SetPetSpeech(L"已为博士切换至节点: " + pet_active_node_, 3500);
-      pet_squash_ = 0.5f;
+      std::wstring speech = L"已为博士切换至节点: " + pet_active_node_;
+      SetPetSpeech(speech, 3000);
+      wave_end_tick_ = GetTickCount64() + 1200;
     }
 
     if (pet_window_) PaintPet();

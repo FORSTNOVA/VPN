@@ -13,6 +13,7 @@
 
 #include <gdiplus.h>
 
+#include "desktop_pet_renderer.h"
 #include "tray_icon.h"
 #include "win32_window.h"
 
@@ -20,18 +21,18 @@
 // icon that keeps the window reachable once it has been hidden.
 class FlutterWindow : public Win32Window {
  public:
-  static constexpr int kPetBaseWidth = 220;
-  static constexpr int kPetBaseHeight = 320;
+  static constexpr int kPetBaseWidth = 280;
+  static constexpr int kPetBaseHeight = 410;
 
   // Creates a new FlutterWindow hosting a Flutter view running |project|.
   explicit FlutterWindow(const flutter::DartProject& project);
   virtual ~FlutterWindow();
 
   int GetPetFullWidth() const {
-    return std::clamp(static_cast<int>(kPetBaseWidth * pet_scale_), 120, 500);
+    return std::clamp(static_cast<int>(kPetBaseWidth * pet_scale_), 160, 560);
   }
   int GetPetFullHeight() const {
-    return std::clamp(static_cast<int>(kPetBaseHeight * pet_scale_), 180, 750);
+    return std::clamp(static_cast<int>(kPetBaseHeight * pet_scale_), 240, 800);
   }
 
  protected:
@@ -65,6 +66,7 @@ class FlutterWindow : public Win32Window {
   void SetPetSpeech(const std::wstring& text, uint64_t duration_ms = 4000);
   void PaintPet();
   void ShowPetContextMenu(int x, int y);
+  DesktopPetViewState BuildPetViewState() const;
   static LRESULT CALLBACK PetWindowProc(HWND window, UINT message,
                                         WPARAM wparam, LPARAM lparam) noexcept;
 
@@ -82,6 +84,7 @@ class FlutterWindow : public Win32Window {
   HWND pet_window_ = nullptr;
   ULONG_PTR gdiplus_token_ = 0;
   std::unique_ptr<Gdiplus::Image> pet_image_;
+  bool pet_image_is_atlas_ = false;
   bool pet_enabled_ = true;
   float pet_scale_ = 1.0f;
   bool pet_auto_mini_on_fullscreen_ = true;
@@ -97,15 +100,28 @@ class FlutterWindow : public Win32Window {
   std::wstring pet_download_rate_ = L"↓ 0 B/s";
   std::wstring pet_upload_rate_ = L"↑ 0 B/s";
 
-  // Animation system state
+  // Window placement and pre-fullscreen restoration
+  int normal_x_ = -1;
+  int normal_y_ = -1;
+  bool normal_position_saved_ = false;
+
+  // Input & drag tracking state (with system drag threshold)
+  bool is_pointer_down_ = false;
+  bool is_dragging_ = false;
+  POINT drag_start_cursor_{0, 0};
+  POINT drag_start_window_{0, 0};
+
+  // Animation & interactive state
   uint64_t pet_anim_start_tick_ = 0;
-  float pet_squash_ = 0.0f;
+  float hover_progress_ = 0.0f;
+  uint64_t wave_end_tick_ = 0;
+  int current_frame_ = 0;
+  float breathe_offset_y_ = 0.0f;
   std::wstring pet_speech_text_;
   uint64_t pet_speech_end_tick_ = 0;
   int pet_poke_count_ = 0;
-  bool pet_last_connected_ = false;
-  std::wstring pet_last_node_;
   bool pet_hovered_ = false;
+  uint64_t pet_hover_until_ = 0;
   bool pet_mouse_tracking_ = false;
 
   // A close request waits for the Flutter side to ask the user what to do, so

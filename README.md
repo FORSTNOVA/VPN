@@ -2,7 +2,7 @@
 
 This repository implements the SmartVPN Windows and Android client described in `SmartVPN_Windows_Android_开发文档.docx`, including shared Go scheduling logic, Windows TUN, and Android VpnService. The Word document is a design reference; this README and [CHANGELOG.md](CHANGELOG.md) describe the current implementation.
 
-Current release: **v0.2.0** — [Windows portable package](https://github.com/FORSTNOVA/VPN/releases/download/v0.2.0/SmartVPN-0.2.0-portable.zip) and [Android ARM64 APK](https://github.com/FORSTNOVA/VPN/releases/download/v0.2.0/SmartVPN-0.2.0-android.apk). The [release page](https://github.com/FORSTNOVA/VPN/releases/tag/v0.2.0) contains both assets.
+**Windows v0.2.1:** [Download the portable package](https://github.com/FORSTNOVA/VPN/releases/download/v0.2.1/SmartVPN-0.2.1-portable.zip) · [Release notes and checksum](https://github.com/FORSTNOVA/VPN/releases/tag/v0.2.1). This update redesigns the Amiya desktop pet. **Android:** [Download the v0.2.0 ARM64 APK](https://github.com/FORSTNOVA/VPN/releases/download/v0.2.0/SmartVPN-0.2.0-android.apk).
 
 ## Current scope
 
@@ -75,7 +75,7 @@ Recording starts with this version. These are observed bytes carried by the Smar
 ## Desktop pet
 
 On Windows, the Amiya chibi desktop pet (阿米娅 Q版桌宠) is a separate, borderless topmost window that stays visible on the desktop independently of the main application window.
-- **Amiya Chibi Art & Dragging**: Displays the high-resolution Amiya chibi sprite (`assets/amiya_chibi.png`) with live status and upload/download speeds. It can be dragged to any position across the desktop. Double-clicking restores the main window.
+- **Character-first companion**: The transparent `assets/amiya_pet_atlas.png` contains idle, blink, greeting and tablet poses. Idle mode shows Amiya with a tiny decorative diamond (cyan connected, gray disconnected, amber blocked), without a text status bar. Hovering reveals a cut-corner card above the character with the real node and upload/download rates. A deliberate click triggers a short greeting; dragging does not. Double-clicking restores the main window.
 - **Full VPN Operations**: Right-clicking the pet opens a native PRTS context menu to directly operate the VPN:
   - Toggle connection on/off (开关连接)
   - Switch proxy mode (系统代理 vs TUN 全设备代理)
