@@ -90,11 +90,12 @@ func (a *app) startMihomoLocked() error {
 		ControllerSecret:     a.ctrlSecret,
 		Rules:                subscriptionRules(profile),
 		TUN:                  a.connectionModeLocked() != modeSystemProxy,
+		StrictPrivacy:        a.settings.StrictPrivacy,
 		SubscriptionProvider: a.settings.SubscriptionURL != "",
 		ManualProvider:       len(a.manualNodes) > 0,
 		ChinaDirect:          a.chinaDirect.Available && a.chinaRuleSupported(),
 	}
-	a.chinaDirectActive = options.ChinaDirect
+	a.chinaDirectActive = options.ChinaDirect && !(options.TUN && options.StrictPrivacy)
 	if options.TUN {
 		options.ProxyServerDomains = mergeProxyServerDomains(
 			proxyServerDomains(profile), manualServerDomains(a.manualNodes))
@@ -118,6 +119,12 @@ func (a *app) startMihomoLocked() error {
 	if err := a.waitForNodes(20 * time.Second); err != nil {
 		_ = a.stopMihomoLocked()
 		return errors.New("subscription returned no selectable nodes; check the subscription and network")
+	}
+	if options.TUN && options.StrictPrivacy {
+		if err := a.verifyPrivacyTunnel(); err != nil {
+			_ = a.stopMihomoLocked()
+			return err
+		}
 	}
 	a.startTrafficHistoryLocked()
 	return nil

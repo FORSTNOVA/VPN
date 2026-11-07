@@ -221,8 +221,14 @@ func TestSkipDNSNameFollowsACompressionPointer(t *testing.T) {
 }
 
 func TestSOCKS5UDPEnvelopeRoundTrip(t *testing.T) {
-	destination := &net.UDPAddr{IP: net.ParseIP("1.1.1.1"), Port: 53}
-	header := socks5UDPHeader(destination)
+	header, err := socks5UDPHeader("1.1.1.1:53")
+	if err != nil {
+		t.Fatal(err)
+	}
+	domain, err := socks5UDPHeader("stun.invalid:19302")
+	if err != nil || len(domain) != 19 || domain[3] != 3 || string(domain[5:17]) != "stun.invalid" {
+		t.Fatalf("expected unresolved SOCKS hostname: %x, %v", domain, err)
+	}
 	if len(header) != 10 || header[3] != 0x01 {
 		t.Fatalf("unexpected header: %v", header)
 	}

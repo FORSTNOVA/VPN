@@ -110,6 +110,10 @@ func connectionModeSupported(mode string) bool { return mode == modeVPN }
 
 func defaultConnectionMode() string { return modeVPN }
 
+func (a *app) verifyPrivacyTunnel() error {
+	return a.tunUnavailableLocked()
+}
+
 // tunUnavailableLocked reports why the tunnel cannot be used, or nil when it can.
 func (a *app) tunUnavailableLocked() error {
 	authorized, fd, _, _, _ := tunnel.state()
@@ -131,7 +135,7 @@ func (a *app) tunUnavailableLocked() error {
 //
 // dns-hijack is kept: the system resolves through the tunnel, so the queries
 // arrive on this interface, and the kernel answers them from its own resolver.
-func tunConfigSection() string {
+func tunConfigSection(_ bool) string {
 	return fmt.Sprintf(`tun:
   enable: true
   stack: %s
@@ -140,6 +144,7 @@ func tunConfigSection() string {
   auto-detect-interface: false
   dns-hijack:
     - any:53
+    - tcp://any:53
   mtu: %d
 `, tunStack, tunnel.descriptor(), tunMTU)
 }

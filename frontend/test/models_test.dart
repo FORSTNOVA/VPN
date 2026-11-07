@@ -723,7 +723,7 @@ void main() {
       expect(parsed.quality.webrtcLeak, isFalse);
       expect(parsed.quality.dnsLeak, isTrue);
       expect(qualityRiskBadge(parsed.quality), '低风险 (良好)');
-      expect(webrtcVerdictBadge(parsed.udp, parsed.quality), '安全无泄露');
+      expect(udpVerdictLabel(const UdpFacts.empty()), '未测出');
       expect(parsed.sites, hasLength(2));
       expect(parsed.sites.first.httpCode, 204);
     });
@@ -750,17 +750,20 @@ void main() {
 
     test('states each verdict rather than leaving it to the page', () {
       final parsed = DiagnoseReport.fromJson(report);
-      expect(dnsVerdictLabel(parsed.dns), '在本地解析（未走出口）');
-      expect(udpVerdictLabel(parsed.udp), '与 TCP 出口一致');
-      expect(dnsVerdictLabel(const DnsFacts.empty()), '未测出');
       expect(
-          dnsVerdictLabel(const DnsFacts(
-              resolver: '1.1.1.1',
-              geo: '',
-              country: 'JP',
-              matchesExit: true,
-              error: '')),
-          '在出口所在地解析');
+          dnsVerdictLabel(parsed.dns, parsed.egress.countryCode), '解析器与出口不同国');
+      expect(udpVerdictLabel(parsed.udp), '与 TCP 出口一致');
+      expect(dnsVerdictLabel(const DnsFacts.empty(), ''), '未测出');
+      expect(
+          dnsVerdictLabel(
+              const DnsFacts(
+                  resolver: '1.1.1.1',
+                  geo: '',
+                  country: 'JP',
+                  matchesExit: true,
+                  error: ''),
+              'JP'),
+          '解析器与出口同国');
     });
 
     test('copies the same rows as text', () {
@@ -780,7 +783,7 @@ void main() {
       expect(text, contains('203.0.113.7'));
       expect(text, contains('Tokyo · Japan'));
       expect(text, contains('DNS 解析出口：223.5.5.5'));
-      expect(text, contains('在本地解析（未走出口）'));
+      expect(text, contains('解析器与出口不同国'));
       expect(text, contains('UDP 中继：可用 178 ms'));
       expect(text, contains('与 TCP 出口一致'));
       expect(text, contains('Google 可访问 210ms'));

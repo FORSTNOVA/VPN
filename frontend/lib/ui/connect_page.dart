@@ -199,14 +199,29 @@ extension _ConnectPage on _HomePageState {
                 Text(
                   tunMode
                       ? 'TUN 由内核创建虚拟网卡接管系统默认路由，不遵循系统代理的命令行及后台程序也会进入隧道。'
-                      : '系统代理仅覆盖遵循 Windows 代理设置的浏览器及应用程序，其余流量直连不受影响。',
+                      : '浏览器的 WebRTC 和 DNS 可能绕过系统代理。需要保护时，断开连接，选择「TUN 全设备」并开启防泄露。',
                   style: Tokens.small,
                 ),
               ],
               const SizedBox(height: 14),
               const Divider(),
               const SizedBox(height: 12),
-              _chinaDirectRow(),
+              if (tunMode || Platform.isAndroid)
+                SwitchListTile.adaptive(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('WebRTC 与 DNS 防泄露'),
+                  subtitle: const Text(
+                    '连接期间，国内外流量和普通 DNS 查询都经节点。节点不支持 UDP 时会阻断，部分通话可能无法接通。',
+                    style: Tokens.small,
+                  ),
+                  value: _strictPrivacy,
+                  onChanged: _busy || _connected
+                      ? null
+                      : (value) => unawaited(_setConnectionMode(_connectionMode,
+                          strictPrivacy: value)),
+                ),
+              if (!(tunMode || Platform.isAndroid) || !_strictPrivacy)
+                _chinaDirectRow(),
               if (!Platform.isAndroid && tunMode) ...[
                 const SizedBox(height: 14),
                 _tunReadiness(),

@@ -32,6 +32,7 @@ type settings struct {
 	LockedRegion    string `json:"lockedRegion,omitempty"`
 	LockedNode      string `json:"lockedNode,omitempty"`
 	ConnectionMode  string `json:"connectionMode,omitempty"`
+	StrictPrivacy   bool   `json:"strictPrivacy,omitempty"`
 	WintunPath      string `json:"wintunPath,omitempty"`
 	AutoMergeHours  int    `json:"autoMergeHours,omitempty"`
 	// The sites the path monitor checks, and how often.
@@ -438,6 +439,7 @@ func (a *app) state(w http.ResponseWriter, _ *http.Request) {
 		"health":         a.healthSnapshotLocked(),
 		"regionJob":      a.regionJobSnapshotLocked(),
 		"connectionMode": a.connectionModeLocked(),
+		"strictPrivacy":  a.settings.StrictPrivacy,
 		"wintunPath":     a.settings.WintunPath,
 		"elevated":       a.elevated,
 		"tunAvailable":   tunReasonText == "",
@@ -486,6 +488,7 @@ type settingsPatch struct {
 	MihomoPath      *string `json:"mihomoPath"`
 	WintunPath      *string `json:"wintunPath"`
 	ConnectionMode  *string `json:"connectionMode"`
+	StrictPrivacy   *bool   `json:"strictPrivacy"`
 }
 
 func (a *app) updateSettings(w http.ResponseWriter, r *http.Request) {
@@ -494,7 +497,12 @@ func (a *app) updateSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	next := a.settings
+	if patch.StrictPrivacy != nil {
+		next.StrictPrivacy = *patch.StrictPrivacy
+	}
 	if patch.ConnectionMode != nil {
 		mode := strings.TrimSpace(*patch.ConnectionMode)
 		// Which modes exist is the platform's answer, not this route's: the
@@ -533,8 +541,6 @@ func (a *app) updateSettings(w http.ResponseWriter, r *http.Request) {
 		next.MihomoPath = path
 	}
 
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.kernelRunningLocked() {
 		http.Error(w, "disconnect before changing settings", http.StatusConflict)
 		return
@@ -1387,6 +1393,7 @@ type configOptions struct {
 	ControllerSecret string
 	Rules            []string
 	TUN              bool
+	StrictPrivacy    bool
 	// Which providers the groups may draw nodes from. A machine that has only
 	// pasted nodes must not be handed a subscription file that does not exist.
 	SubscriptionProvider bool
@@ -1455,8 +1462,8 @@ func generatedConfig(options configOptions) string {
 	fmt.Fprintf(&config, "secret: %s\n", strconv.Quote(options.ControllerSecret))
 	config.WriteString("profile:\n  store-selected: true\n")
 	if options.TUN {
-		config.WriteString(tunConfigSection())
-		config.WriteString(dnsConfigSection(options.ProxyServerDomains))
+		config.WriteString(tunConfigSection(options.StrictPrivacy))
+		config.WriteString(dnsConfigSection(options.ProxyServerDomains, options.StrictPrivacy))
 	}
 	config.WriteString("proxy-providers:\n")
 	providers := make([]string, 0, 2)
@@ -1482,13 +1489,26 @@ func generatedConfig(options configOptions) string {
 	fmt.Fprintf(&config, "  - name: SmartVPNAuto\n    type: url-test\n    use:%s\n    url: https://www.youtube.com/generate_204\n    interval: %d\n    tolerance: 100\n", uses.String(), testIntervalSec)
 	fmt.Fprintf(&config, "  - name: SmartVPNFallback\n    type: fallback\n    use:%s\n    url: https://www.youtube.com/generate_204\n    interval: %d\n", uses.String(), testIntervalSec)
 	fmt.Fprintf(&config, "  - name: SmartVPN\n    type: select\n    use:%s\n    proxies:\n      - SmartVPNAuto\n      - SmartVPNFallback\n      - REJECT\n", uses.String())
-	if options.ChinaDirect {
+	privateTUN := options.TUN && options.StrictPrivacy
+	if options.ChinaDirect && !privateTUN {
 		config.WriteString("rule-providers:\n")
 		fmt.Fprintf(&config, "  %s:\n    type: file\n    behavior: ipcidr\n    format: text\n    path: %s\n",
 			chinaProviderName, strconv.Quote(filepath.Join("providers", chinaIPListFile)))
 	}
 	config.WriteString("rules:\n")
 	decided, proxied := splitRulesByTarget(options.Rules)
+	if privateTUN {
+		// Retain explicit blocks. Even if the selected node skips UDP rules,
+		// the final REJECT prevents Mihomo's implicit DIRECT fallback.
+		for _, rule := range decided {
+			if ruleTarget(rule) == "REJECT" {
+				fmt.Fprintf(&config, "  - %s\n", strconv.Quote(rule))
+			}
+		}
+		fmt.Fprintf(&config, "  - %s\n", strconv.Quote(quicRejectRule))
+		config.WriteString("  - MATCH,SmartVPN\n  - MATCH,REJECT\n")
+		return config.String()
+	}
 	for _, rule := range decided {
 		fmt.Fprintf(&config, "  - %s\n", strconv.Quote(rule))
 	}
@@ -1503,7 +1523,7 @@ func generatedConfig(options configOptions) string {
 	return config.String()
 }
 
-func dnsConfigSection(proxyServerFilters []string) string {
+func dnsConfigSection(proxyServerFilters []string, strict bool) string {
 	var filters strings.Builder
 	for _, entry := range proxyServerFilters {
 		fmt.Fprintf(&filters, "    - %s\n", strconv.Quote(entry))
@@ -1520,7 +1540,23 @@ func dnsConfigSection(proxyServerFilters []string) string {
     - "+.msftncsi.com"
     - "www.msftconnecttest.com"
     - "time.*.com"
-%s  proxy-server-nameserver:
+%s`, dnsListenLine, tunFakeIPv4Range, filters.String()) + dnsUpstreams(strict)
+}
+
+func dnsUpstreams(strict bool) string {
+	if strict {
+		// Node hostnames must resolve before the tunnel can carry DNS. Using IP
+		// endpoints avoids a separate system lookup of a resolver hostname.
+		return `  proxy-server-nameserver:
+    - https://223.5.5.5/dns-query
+  default-nameserver:
+    - https://223.5.5.5/dns-query
+  nameserver:
+    - "https://1.1.1.1/dns-query#SmartVPN"
+    - "https://8.8.8.8/dns-query#SmartVPN"
+`
+	}
+	return `  proxy-server-nameserver:
     - 223.5.5.5
     - 119.29.29.29
   default-nameserver:
@@ -1529,7 +1565,7 @@ func dnsConfigSection(proxyServerFilters []string) string {
   nameserver:
     - https://doh.pub/dns-query
     - https://dns.alidns.com/dns-query
-`, dnsListenLine, tunFakeIPv4Range, filters.String())
+`
 }
 
 func freeLoopbackPort() (int, error) {

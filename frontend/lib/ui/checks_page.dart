@@ -26,7 +26,7 @@ extension _ChecksPage on _HomePageState {
           ),
         ),
         const Text(
-          '单次检测完整检验：出口 IPv4/IPv6、归属地区与运营商、本机 DNS 真实解析器、'
+          '检查当前节点的出口地址、运营商、代理请求使用的 DNS 解析器、'
           'UDP 与 TCP 出口一致性，以及关键目标服务连通性。未连接时会临时启动内核进行探测。',
           style: Tokens.small,
         ),
@@ -149,32 +149,6 @@ extension _ChecksPage on _HomePageState {
               tint: Tokens.idleTint,
             ),
           ),
-          _KeyValueRow(
-            label: 'WebRTC 泄露检测',
-            value: quality.webrtcLeak
-                ? '存在泄露风险（STUN 探测到的 UDP 地址与 TCP 出口不一致）'
-                : '安全（STUN/WebRTC 探测与 TCP 出口一致）',
-            valueColor: quality.webrtcLeak ? Tokens.bad : Tokens.ok,
-            trailing: _Badge(
-              label: quality.webrtcLeak ? '泄露风险' : '安全无泄露',
-              color: quality.webrtcLeak ? Tokens.bad : Tokens.ok,
-              tint: quality.webrtcLeak ? Tokens.warnTint : Tokens.okTint,
-              showDot: true,
-            ),
-          ),
-          _KeyValueRow(
-            label: 'DNS 泄露检测',
-            value: quality.dnsLeak
-                ? '存在跨国/本地泄露风险（解析器归属地与出口国家不匹配）'
-                : '安全（DNS 解析器与出口同国，无跨国泄露）',
-            valueColor: quality.dnsLeak ? Tokens.warn : Tokens.ok,
-            trailing: _Badge(
-              label: quality.dnsLeak ? '可能泄露' : '安全无泄露',
-              color: quality.dnsLeak ? Tokens.warn : Tokens.ok,
-              tint: quality.dnsLeak ? Tokens.warnTint : Tokens.okTint,
-              showDot: true,
-            ),
-          ),
           if (quality.isProxy ||
               quality.isVpn ||
               quality.isTor ||
@@ -248,24 +222,11 @@ extension _ChecksPage on _HomePageState {
           ),
           _KeyValueRow(
             label: '判定结论',
-            value: dnsVerdictLabel(dns),
-            valueColor: !known
-                ? Tokens.inkMuted
-                : (dns.matchesExit ? Tokens.ok : Tokens.warn),
-            trailing: _Badge(
-              label: dnsVerdictBadge(dns),
-              color: !known
-                  ? Tokens.inkMuted
-                  : (dns.matchesExit ? Tokens.ok : Tokens.warn),
-              tint: !known
-                  ? Tokens.idleTint
-                  : (dns.matchesExit ? Tokens.okTint : Tokens.warnTint),
-              showDot: true,
-            ),
+            value: dnsVerdictLabel(dns, report.egress.countryCode),
           ),
           const SizedBox(height: 8),
           const Text(
-            '在出口所在地解析说明域名通过隧道远端代理解析；若显示在本地解析，则解析未经隧道。',
+            '此项只比较代理请求的解析器与出口归属地。判断浏览器是否使用了本地运营商 DNS，请在同一浏览器复测。',
             style: Tokens.hint,
           ),
         ]),
@@ -312,20 +273,12 @@ extension _ChecksPage on _HomePageState {
             valueColor: udp.mapped.isEmpty ? Tokens.warn : Tokens.cyan,
           ),
           _KeyValueRow(
-            label: 'WebRTC / STUN',
-            value: webrtcVerdictLabel(udp, report.quality),
-            valueColor: report.quality.webrtcLeak ? Tokens.bad : Tokens.ok,
-            trailing: _Badge(
-              label: webrtcVerdictBadge(udp, report.quality),
-              color: report.quality.webrtcLeak ? Tokens.bad : Tokens.ok,
-              tint: report.quality.webrtcLeak ? Tokens.warnTint : Tokens.okTint,
-              showDot: true,
-            ),
+            label: '节点 STUN 与 TCP 出口',
+            value: udpVerdictLabel(udp),
           ),
           const SizedBox(height: 8),
           const Text(
-            'UDP 出口为 STUN 看到的地址，与 TCP 出口一致说明数据包均在同一隧道内。'
-            'SmartVPN 会自动规避 UDP:443 阻塞并平滑降级至 TCP。',
+            'STUN 探测经节点的 SOCKS5 中继发送。浏览器 WebRTC 可能走另一条路径，请用网页测试与当前出口对照。',
             style: Tokens.hint,
           ),
         ]),

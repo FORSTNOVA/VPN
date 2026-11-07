@@ -819,19 +819,14 @@ String egressOperatorLabel(EgressFacts egress) {
 /// The DNS verdict says where names are resolved, not that something is broken:
 /// resolving at the exit is the tunneled answer, resolving locally is what the
 /// system proxy leaves in place.
-String dnsVerdictLabel(DnsFacts dns) {
-  if (dns.error.isNotEmpty) return '未测出';
-  if (dns.resolver.isEmpty) return '未测出';
-  return dns.matchesExit ? '在出口所在地解析' : '在本地解析（未走出口）';
-}
-
-String dnsVerdictBadge(DnsFacts dns) {
+String dnsVerdictLabel(DnsFacts dns, String exitCountry) {
   if (dns.error.isNotEmpty || dns.resolver.isEmpty) return '未测出';
-  return dns.matchesExit ? '与出口同地' : '本地解析';
+  if (dns.country.isEmpty || exitCountry.isEmpty) return '归属未知';
+  return dns.matchesExit ? '解析器与出口同国' : '解析器与出口不同国';
 }
 
 String udpVerdictLabel(UdpFacts udp) {
-  if (udp.error.isNotEmpty && udp.mapped.isEmpty) return '未测出';
+  if (udp.mapped.isEmpty) return '未测出';
   return udp.matchesExit ? '与 TCP 出口一致' : '与 TCP 出口不一致';
 }
 
@@ -844,17 +839,6 @@ Color qualityRiskColor(IpQualityFacts quality) {
   if (quality.fraudScore > 60) return Tokens.bad;
   if (quality.fraudScore > 25) return Tokens.warn;
   return Tokens.ok;
-}
-
-String webrtcVerdictLabel(UdpFacts udp, IpQualityFacts quality) {
-  if (udp.error.isNotEmpty && udp.mapped.isEmpty) return '未测出';
-  if (quality.webrtcLeak) return '存在 WebRTC 泄露（STUN 与 TCP 出口不一致）';
-  return '安全（STUN 与 TCP 出口一致）';
-}
-
-String webrtcVerdictBadge(UdpFacts udp, IpQualityFacts quality) {
-  if (udp.error.isNotEmpty && udp.mapped.isEmpty) return '未测出';
-  return quality.webrtcLeak ? '存在泄露' : '安全无泄露';
 }
 
 String speedLabel(double mbps) =>
@@ -879,11 +863,9 @@ String diagnoseReportText(DiagnoseReport report,
     '出口地区：${egressLocationLabel(report.egress)}　${egressOperatorLabel(report.egress)}',
     if (report.quality.ipType.isNotEmpty) ...[
       'IP 类型：${report.quality.ipType} · 欺诈分：${report.quality.fraudScore}/100（${report.quality.riskLevel}）',
-      'WebRTC 泄露：${report.quality.webrtcLeak ? '存在泄露风险' : '安全无泄露'}',
-      'DNS 泄露：${report.quality.dnsLeak ? '存在本地/跨国泄露' : '安全无泄露'}',
     ],
     'DNS 解析出口：${report.dns.resolver.isEmpty ? report.dns.error : '${report.dns.resolver}（${report.dns.geo.isEmpty ? '归属未知' : report.dns.geo}）'}'
-        '　${dnsVerdictLabel(report.dns)}',
+        '　${dnsVerdictLabel(report.dns, report.egress.countryCode)}',
     'UDP 中继：${report.udp.relay == null ? '未测出' : (report.udp.relay!.reachable ? '可用 ${report.udp.relay!.latencyMs} ms' : (report.udp.relay!.reason.isEmpty ? '不可用' : report.udp.relay!.reason))}',
     'UDP 出口：${report.udp.mapped.isEmpty ? report.udp.error : report.udp.mapped}'
         '　${udpVerdictLabel(report.udp)}',

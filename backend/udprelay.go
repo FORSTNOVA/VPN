@@ -80,7 +80,7 @@ func socksUDPExchange(proxyAddress, target string, payload []byte,
 		return nil, 0, err
 	}
 
-	destination, err := net.ResolveUDPAddr("udp", target)
+	header, err := socks5UDPHeader(target)
 	if err != nil {
 		return nil, 0, errors.New("探测目标地址无效")
 	}
@@ -93,7 +93,7 @@ func socksUDPExchange(proxyAddress, target string, payload []byte,
 		return nil, 0, errors.New("无法设置超时")
 	}
 
-	packet := append(socks5UDPHeader(destination), payload...)
+	packet := append(header, payload...)
 	start := time.Now()
 	if _, err := socket.Write(packet); err != nil {
 		return nil, 0, errors.New("UDP 报文发送失败")
@@ -192,16 +192,30 @@ func readSocksAddress(r io.Reader, atyp byte) (string, int, error) {
 }
 
 // socks5UDPHeader is the per-datagram envelope a SOCKS5 relay expects.
-func socks5UDPHeader(destination *net.UDPAddr) []byte {
+func socks5UDPHeader(target string) ([]byte, error) {
+	host, rawPort, err := net.SplitHostPort(target)
+	if err != nil {
+		return nil, err
+	}
+	port, err := strconv.ParseUint(rawPort, 10, 16)
+	if err != nil || port == 0 || host == "" || len(host) > 255 {
+		return nil, errors.New("探测目标地址无效")
+	}
+	ip := net.ParseIP(host)
 	header := []byte{0x00, 0x00, 0x00}
-	if ipv4 := destination.IP.To4(); ipv4 != nil {
+	if ipv4 := ip.To4(); ipv4 != nil {
 		header = append(header, 0x01)
 		header = append(header, ipv4...)
-	} else {
+	} else if ip != nil {
 		header = append(header, 0x04)
-		header = append(header, destination.IP.To16()...)
+		header = append(header, ip.To16()...)
+	} else {
+		// Send the hostname to the relay, so diagnostics do not issue a
+		// local DNS query before the STUN request enters the proxy.
+		header = append(header, 0x03, byte(len(host)))
+		header = append(header, host...)
 	}
-	return append(header, byte(destination.Port>>8), byte(destination.Port))
+	return append(header, byte(port>>8), byte(port)), nil
 }
 
 // socks5UDPPayload strips the envelope from a datagram the relay returned.

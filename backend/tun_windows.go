@@ -61,6 +61,30 @@ func connectionModeSupported(mode string) bool {
 
 func defaultConnectionMode() string { return modeSystemProxy }
 
+// Check the Windows routing decision without sending a probe outside the VPN.
+// The mixed proxy can start successfully even if TUN setup failed.
+func (a *app) verifyPrivacyTunnel() error {
+	adapter, err := net.InterfaceByName(tunInterfaceName)
+	if err != nil || adapter.Flags&net.FlagUp == 0 {
+		return errors.New("防泄露连接失败：SmartVPN 虚拟网卡未就绪")
+	}
+	var index uint32
+	if err := windows.GetBestInterfaceEx(&windows.SockaddrInet4{Addr: [4]byte{1, 1, 1, 1}}, &index); err != nil || index != uint32(adapter.Index) {
+		return errors.New("防泄露连接失败：IPv4 出口未进入 SmartVPN 网卡")
+	}
+	ipv6 := &windows.SockaddrInet6{}
+	copy(ipv6.Addr[:], net.ParseIP("2606:4700:4700::1111").To16())
+	err = windows.GetBestInterfaceEx(ipv6, &index)
+	if errors.Is(err, windows.ERROR_NETWORK_UNREACHABLE) || errors.Is(err, windows.ERROR_HOST_UNREACHABLE) ||
+		errors.Is(err, windows.ERROR_NOT_FOUND) || errors.Is(err, windows.ERROR_NOT_SUPPORTED) {
+		return nil // No route for IPv6 on this host.
+	}
+	if err != nil || index != uint32(adapter.Index) {
+		return errors.New("防泄露连接失败：无法确认 IPv6 出口由 SmartVPN 接管")
+	}
+	return nil
+}
+
 // dnsListenLine asks the kernel for a DNS server of its own on port 53, which
 // the TUN section's dns-hijack then answers from. It is a Windows-only line:
 // the port is privileged, and the platform this was written for is the one
@@ -490,15 +514,20 @@ func (a *app) dropTunnel() {}
 // tunConfigSection enables Mihomo's own TUN inbound. auto-route takes over the
 // default routes and dns-hijack sends every :53 query on the adapter to the
 // resolver configured below.
-func tunConfigSection() string {
+func tunConfigSection(strict bool) string {
+	strictRoute := ""
+	if strict {
+		strictRoute = "  strict-route: true\n"
+	}
 	return fmt.Sprintf(`tun:
   enable: true
   stack: %s
   device: %s
   auto-route: true
   auto-detect-interface: true
-  dns-hijack:
+%s  dns-hijack:
     - any:53
+    - tcp://any:53
   mtu: %d
-`, tunStack, tunInterfaceName, tunMTU)
+`, tunStack, tunInterfaceName, strictRoute, tunMTU)
 }

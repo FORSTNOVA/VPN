@@ -121,6 +121,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Map<String, NodeHealth> _nodeHealth = const {};
   Map<String, RegionInfo> _regionByName = const {};
   String _connectionMode = 'system-proxy';
+  bool _strictPrivacy = false;
   bool _elevated = false;
   bool _tunAvailable = false;
   String _tunReason = '';
@@ -659,6 +660,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _applyTunState(Map<String, dynamic> value) {
     _connectionMode = value['connectionMode'] as String? ?? 'system-proxy';
+    _strictPrivacy = value['strictPrivacy'] as bool? ?? false;
     _elevated = value['elevated'] as bool? ?? false;
     _tunAvailable = value['tunAvailable'] as bool? ?? false;
     _tunReason = value['tunReason'] as String? ?? '';
@@ -1851,18 +1853,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _setConnectionMode(String mode) async {
-    if (mode == _connectionMode) return;
+  Future<void> _setConnectionMode(String mode, {bool? strictPrivacy}) async {
+    if (mode == _connectionMode &&
+        (strictPrivacy == null || strictPrivacy == _strictPrivacy)) {
+      return;
+    }
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
       await _request('PUT', '/api/settings', body: {
-        'subscriptionUrl': _subscription.text.trim(),
-        'mihomoPath': _mihomo.text.trim(),
         'connectionMode': mode,
-        'wintunPath': _wintun.text.trim(),
+        if (strictPrivacy != null) 'strictPrivacy': strictPrivacy,
       });
       await _loadState();
     } catch (e) {

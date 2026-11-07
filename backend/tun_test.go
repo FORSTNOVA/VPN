@@ -7,7 +7,49 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
+
+func TestStrictPrivacyConfigBlocksDirectFallback(t *testing.T) {
+	options := configOptions{
+		TUN: true, StrictPrivacy: true, ChinaDirect: true,
+		Rules: []string{"DOMAIN,deny.test,REJECT", "DOMAIN,private.test,DIRECT"},
+	}
+	var cfg struct {
+		Tun struct {
+			Strict bool     `yaml:"strict-route"`
+			Hijack []string `yaml:"dns-hijack"`
+		}
+		DNS struct {
+			Servers   []string `yaml:"nameserver"`
+			Bootstrap []string `yaml:"proxy-server-nameserver"`
+		}
+		Rules []string
+	}
+	if err := yaml.Unmarshal([]byte(generatedConfig(options)), &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Tun.Strict || strings.Join(cfg.Tun.Hijack, ",") != "any:53,tcp://any:53" {
+		t.Fatalf("incomplete Windows DNS interception: %+v", cfg.Tun)
+	}
+	if len(cfg.DNS.Servers) == 0 || len(cfg.DNS.Bootstrap) == 0 {
+		t.Fatal("application and node bootstrap resolvers must both be present")
+	}
+	for _, server := range cfg.DNS.Servers {
+		if !strings.HasPrefix(server, "https://") || !strings.HasSuffix(server, "#SmartVPN") {
+			t.Fatalf("application DNS can bypass the node: %s", server)
+		}
+	}
+	if got := strings.Join(cfg.Rules, "\n"); got != "DOMAIN,deny.test,REJECT\n"+quicRejectRule+"\nMATCH,SmartVPN\nMATCH,REJECT" {
+		t.Fatalf("unexpected strict routing:\n%s", got)
+	}
+	options.TUN = false
+	config := generatedConfig(options)
+	if strings.Contains(config, "#SmartVPN") || !strings.Contains(config, "DOMAIN,private.test,DIRECT") {
+		t.Fatal("a remembered TUN preference must not alter system-proxy routing")
+	}
+}
 
 func TestIsFakeAddress(t *testing.T) {
 	fake := []string{"198.18.0.5", "198.18.255.254", "198.18.0.1"}
@@ -212,7 +254,7 @@ func TestProbeDomainIsFreshEveryTime(t *testing.T) {
 	// The probe zone must not be inside the fake-ip bypass list, otherwise the
 	// check would never see a fake address.
 	filters := proxyServerDomains([]byte("proxies:\n  - name: node\n    server: abc123.qos.onl\n"))
-	section := dnsConfigSection(filters)
+	section := dnsConfigSection(filters, false)
 	if strings.Contains(section, "smartvpn-probe") {
 		t.Fatal("the probe zone must not be excluded from fake-ip")
 	}

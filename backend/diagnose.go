@@ -472,18 +472,7 @@ func (a *app) diagnose(w http.ResponseWriter, _ *http.Request) {
 	// WebRTC / STUN 泄露检测：若 STUN 映射地址有效且与 TCP 出口不一致，标记为 WebRTC 泄露
 	report.Quality.WebRTCLeak = report.UDP.Mapped != "" && !report.UDP.MatchesExit
 	// DNS 跨国泄露检测：若 DNS 解析器非空且与出口国家不匹配，标记为 DNS 泄露
-	report.Quality.DNSLeak = report.DNS.Country != "" && !report.DNS.MatchesExit
-
-	if report.Quality.WebRTCLeak || report.Quality.DNSLeak {
-		if report.Quality.FraudScore < 50 {
-			report.Quality.FraudScore += 20
-			if report.Quality.FraudScore > 60 {
-				report.Quality.RiskLevel = "高风险 (存在泄露)"
-			} else {
-				report.Quality.RiskLevel = "中风险 (存在泄露)"
-			}
-		}
-	}
+	report.Quality.DNSLeak = report.DNS.Country != "" && report.Egress.CountryCode != "" && !report.DNS.MatchesExit
 
 	writeJSON(w, report)
 }
