@@ -56,24 +56,24 @@ func TestDomesticWebAndIndependentProtections(t *testing.T) {
 		for _, dns := range []bool{false, true} {
 			config := generatedConfig(configOptions{TUN: true, ChinaDirect: true,
 				trafficPolicy: trafficPolicy{DomesticWeb: true, WebRTCProtection: udp, DNSProtection: dns},
-				Rules: []string{"DOMAIN,deny.test,REJECT", "DOMAIN,any.test,DIRECT"}})
+				Rules:         []string{"DOMAIN,deny.test,REJECT", "DOMAIN,any.test,DIRECT"}})
 			var cfg struct{ Rules []string }
 			if err := yaml.Unmarshal([]byte(config), &cfg); err != nil {
 				t.Fatal(err)
 			}
-			web := "AND,((NETWORK,tcp),(DST-PORT,80/443),(RULE-SET," + chinaProviderName + ")),DIRECT"
-			expected := []string{"DOMAIN,deny.test,REJECT"}
-			if !udp {
-				expected = append(expected, quicRejectRule)
+			direct := "AND,((NETWORK,tcp),(RULE-SET," + chinaProviderName + ")),DIRECT"
+			joined := strings.Join(cfg.Rules, "\n")
+			for _, rule := range cfg.Rules {
+				if strings.HasSuffix(rule, ",DIRECT") && !strings.HasPrefix(rule, "AND,((NETWORK,tcp),") {
+					t.Fatalf("rule could send UDP direct: %s", rule)
+				}
 			}
-			expected = append(expected, web, "MATCH,SmartVPN")
-			if udp {
-				expected = append(expected, "MATCH,REJECT")
-			}
-			if strings.Join(cfg.Rules, "\n") != strings.Join(expected, "\n") ||
+			if cfg.Rules[0] != "DOMAIN,deny.test,REJECT" || !strings.Contains(joined, direct+"\nMATCH,SmartVPN") ||
+				strings.HasSuffix(joined, "MATCH,REJECT") != udp ||
 				strings.Contains(config, "dns-query#SmartVPN") != dns || strings.Contains(config, "strict-route: true") != dns {
 				t.Fatalf("unexpected domestic policy for UDP=%t DNS=%t", udp, dns)
 			}
+
 		}
 	}
 }

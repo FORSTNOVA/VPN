@@ -1542,7 +1542,7 @@ func generatedConfig(options configOptions) string {
 			fmt.Fprintf(&config, "  - %s\n", strconv.Quote(quicRejectRule))
 		}
 		if options.DomesticWeb && options.ChinaDirect {
-			fmt.Fprintf(&config, "  - %s\n", strconv.Quote("AND,((NETWORK,tcp),(DST-PORT,80/443),(RULE-SET,"+chinaProviderName+")),DIRECT"))
+			writeDomesticTCPRules(&config, options)
 		}
 		config.WriteString("  - MATCH,SmartVPN\n")
 		if options.WebRTCProtection {
@@ -1562,6 +1562,35 @@ func generatedConfig(options configOptions) string {
 	}
 	config.WriteString("  - MATCH,SmartVPN\n")
 	return config.String()
+}
+
+// A game login or a corporate service can use TCP on a port other than 443.
+// Keep direct rules TCP-only. Known domestic services can be matched by name
+// before an overseas resolver or CDN address determines the route.
+func writeDomesticTCPRules(config *strings.Builder, options configOptions) {
+	add := func(rule string) { fmt.Fprintf(config, "  - %s\n", strconv.Quote(rule)) }
+	if options.DNSProtection {
+		add("AND,((NETWORK,tcp),(DST-PORT,53/853)),SmartVPN")
+		// Common domestic encrypted resolvers also accept HTTPS on port 443.
+		for _, domain := range []string{"dns.alidns.com", "doh.pub"} {
+			add("DOMAIN-SUFFIX," + domain + ",SmartVPN")
+		}
+		for _, address := range []string{"223.5.5.5", "223.6.6.6", "120.53.53.53", "1.12.12.12"} {
+			add("IP-CIDR," + address + "/32,SmartVPN,no-resolve")
+		}
+	}
+	if options.WebRTCProtection {
+		add("AND,((NETWORK,tcp),(DST-PORT,3478/5349/19302)),SmartVPN")
+	}
+	for _, domain := range []string{"mihoyo.com", "biligame.com", "bilibili.com", "bilivideo.com", "bilivideo.cn", "hdslb.com", "biliimg.com", "gov.cn"} {
+		add("AND,((NETWORK,tcp),(DOMAIN-SUFFIX," + domain + ")),DIRECT")
+	}
+	// Only browsers should retry domestic HTTP/3 over TCP. A game can also
+	// use UDP:443 and must still be able to reach its UDP-capable node.
+	if options.WebRTCProtection && findProcessMode == "always" {
+		add("AND,((NETWORK,udp),(DST-PORT,443),(OR,((PROCESS-NAME,chrome.exe),(PROCESS-NAME,msedge.exe),(PROCESS-NAME,firefox.exe))),(RULE-SET," + chinaProviderName + ")),REJECT")
+	}
+	add("AND,((NETWORK,tcp),(RULE-SET," + chinaProviderName + ")),DIRECT")
 }
 
 func dnsConfigSection(proxyServerFilters []string, strict bool) string {

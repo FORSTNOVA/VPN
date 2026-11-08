@@ -213,7 +213,7 @@ extension _ConnectPage on _HomePageState {
                   contentPadding: EdgeInsets.zero,
                   title: const Text('国内加速'),
                   subtitle: const Text(
-                      '国内地址的 HTTP/HTTPS 网页直连。开启时同时启用两项保护，可分别调整。',
+                      '国内服务的 TCP 连接直连，包括网页和游戏端口。开启时同时启用两项保护，可分别调整。',
                       style: Tokens.small),
                   value: _domesticWeb,
                   onChanged: _busy || _connected

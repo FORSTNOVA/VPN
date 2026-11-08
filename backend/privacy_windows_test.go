@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,7 +29,7 @@ func TestPrivacyWithPackagedKernel(t *testing.T) {
 	if err := os.MkdirAll(providerDir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(providerDir, chinaIPListFile), []byte("127.0.0.0/8\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(providerDir, chinaIPListFile), []byte("127.0.0.1/32\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	node, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -96,6 +99,13 @@ func TestPrivacyWithPackagedKernel(t *testing.T) {
 		}
 		dnsAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(dnsPort))
 		local := strings.Replace(conf[:start]+conf[end:], "listen: :53", "listen: "+dnsAddress, 1)
+		// Put the named fixtures outside the test's domestic IP range. Only
+		// a domain rule can deliver their requests to the local gateway.
+		domains := []string{"sr.mihoyo.com", "bh3.mihoyo.com", "www.bilibili.com", "portal.example.gov.cn"}
+		local += "\nhosts:\n"
+		for _, domain := range domains {
+			local += "  " + domain + ": 127.0.0.2\n"
+		}
 		if err := os.WriteFile(path, []byte(local), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -134,6 +144,39 @@ func TestPrivacyWithPackagedKernel(t *testing.T) {
 				}
 			}
 			if protect {
+				game := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("game gateway")) }))
+				defer game.Close()
+				proxyURL, _ := url.Parse("http://" + address)
+				transport := &http.Transport{Proxy: http.ProxyURL(proxyURL)}
+				defer transport.CloseIdleConnections()
+				client := &http.Client{Transport: transport, Timeout: 3 * time.Second}
+				res, err := client.Get(game.URL)
+				if err != nil {
+					t.Fatalf("domestic nonstandard TCP port did not connect: %v", err)
+				}
+				body, err := io.ReadAll(res.Body)
+				res.Body.Close()
+				if err != nil || string(body) != "game gateway" {
+					t.Fatalf("game gateway unreachable: %d", res.StatusCode)
+				}
+				listener, err := net.Listen("tcp4", "127.0.0.2:0")
+				if err != nil {
+					t.Fatal(err)
+				}
+				server := &http.Server{Handler: game.Config.Handler}
+				go server.Serve(listener)
+				defer server.Close()
+				for _, domain := range domains {
+					res, err := client.Get("http://" + net.JoinHostPort(domain, strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)))
+					if err != nil {
+						t.Fatalf("domain routing failed for %s: %v", domain, err)
+					}
+					body, err := io.ReadAll(res.Body)
+					res.Body.Close()
+					if err != nil || string(body) != "game gateway" {
+						t.Fatalf("domain missed direct gateway: %s", domain)
+					}
+				}
 				c, err := net.Dial("udp4", dnsAddress)
 				if err != nil {
 					t.Fatal(err)
