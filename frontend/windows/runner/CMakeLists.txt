@@ -35,7 +35,7 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "NOMINMAX")
 # Add dependency libraries and include directories. Add any application-specific
 # dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
-target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib" "gdiplus.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib" "gdiplus.lib" "comdlg32.lib")
 # The runner carries Chinese text for the tray menu and its tooltip, and it is
 # saved as UTF-8. Without this, MSVC reads the sources in the machine's ANSI code
 # page (936 here) and the string literals come out mangled.

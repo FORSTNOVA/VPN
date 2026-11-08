@@ -1,3 +1,4 @@
+import 'ui/game_bypass_dialog.dart';
 import 'ui/desktop_pet_settings_dialog.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -121,6 +122,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Map<String, NodeHealth> _nodeHealth = const {};
   Map<String, RegionInfo> _regionByName = const {};
   String _connectionMode = 'system-proxy';
+  List<String> _gameBypass = [];
   bool _domesticWeb = false, _webRTCProtection = false, _dnsProtection = false;
   bool _elevated = false;
   bool _tunAvailable = false;
@@ -660,6 +662,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _applyTunState(Map<String, dynamic> value) {
     _connectionMode = value['connectionMode'] as String? ?? 'system-proxy';
+    _gameBypass =
+        (value['gameBypass'] as List?)?.whereType<String>().toList() ?? [];
     _domesticWeb = value['domesticWeb'] as bool? ?? false;
     _webRTCProtection = value['webRTCProtection'] as bool? ?? false;
     _dnsProtection = value['dnsProtection'] as bool? ?? false;
@@ -1856,11 +1860,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   }
 
   Future<void> _setConnectionMode(String mode,
-      {bool? domesticWeb, bool? webRTCProtection, bool? dnsProtection}) async {
+      {bool? domesticWeb,
+      bool? webRTCProtection,
+      bool? dnsProtection,
+      List<String>? gameBypass}) async {
     if (mode == _connectionMode &&
         domesticWeb == null &&
         webRTCProtection == null &&
-        dnsProtection == null) {
+        dnsProtection == null &&
+        gameBypass == null) {
       return;
     }
     setState(() {
@@ -1873,6 +1881,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (domesticWeb != null) 'domesticWeb': domesticWeb,
         if (webRTCProtection != null) 'webRTCProtection': webRTCProtection,
         if (dnsProtection != null) 'dnsProtection': dnsProtection,
+        if (gameBypass != null) 'gameBypass': gameBypass,
       });
       await _loadState();
     } catch (e) {

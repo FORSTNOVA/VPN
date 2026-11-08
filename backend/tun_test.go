@@ -78,6 +78,42 @@ func TestDomesticWebAndIndependentProtections(t *testing.T) {
 	}
 }
 
+func TestSplitDNSProtectsUnclassifiedNames(t *testing.T) {
+	var config struct {
+		DNS struct {
+			Servers  []string            `yaml:"nameserver"`
+			Policy   map[string][]string `yaml:"nameserver-policy"`
+			Fallback []string            `yaml:"fallback"`
+		}
+	}
+	if err := yaml.Unmarshal([]byte(dnsConfigSection(nil, true)), &config); err != nil {
+		t.Fatal(err)
+	}
+	if len(config.DNS.Servers) == 0 || len(config.DNS.Fallback) != 0 {
+		t.Fatal("unclassified names require a protected default without fallback")
+	}
+	for _, s := range config.DNS.Servers {
+		if !strings.HasPrefix(s, "https://") || !strings.HasSuffix(s, "#SmartVPN") {
+			t.Fatalf("unprotected default resolver: %s", s)
+		}
+	}
+	for _, key := range []string{"+.cn", "+.baidu.com", "+.hdslb.com"} {
+		if len(config.DNS.Policy[key]) == 0 {
+			t.Fatalf("missing domestic policy for %s", key)
+		}
+	}
+	for key, servers := range config.DNS.Policy {
+		if !strings.HasPrefix(key, "+.") || strings.ContainsAny(key[2:], "*+:/") || key == "+.com" || key == "+.net" || key == "+.org" {
+			t.Fatalf("overbroad policy %q", key)
+		}
+		for _, s := range servers {
+			if !strings.HasPrefix(s, "https://") || !strings.HasSuffix(s, "#DIRECT") {
+				t.Fatalf("unexpected domestic resolver %q", s)
+			}
+		}
+	}
+}
+
 func TestIsFakeAddress(t *testing.T) {
 	fake := []string{"198.18.0.5", "198.18.255.254", "198.18.0.1"}
 	for _, address := range fake {

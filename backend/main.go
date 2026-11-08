@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -25,9 +26,10 @@ import (
 )
 
 type trafficPolicy struct {
-	DomesticWeb      bool `json:"domesticWeb"`
-	WebRTCProtection bool `json:"webRTCProtection"`
-	DNSProtection    bool `json:"dnsProtection"`
+	GameBypass       []string `json:"gameBypass,omitempty"`
+	DomesticWeb      bool     `json:"domesticWeb"`
+	WebRTCProtection bool     `json:"webRTCProtection"`
+	DNSProtection    bool     `json:"dnsProtection"`
 }
 
 func (p trafficPolicy) active() bool {
@@ -452,6 +454,7 @@ func (a *app) state(w http.ResponseWriter, _ *http.Request) {
 		"connectionMode":   a.connectionModeLocked(),
 		"strictPrivacy":    a.settings.WebRTCProtection && a.settings.DNSProtection,
 		"domesticWeb":      a.settings.DomesticWeb,
+		"gameBypass":       a.settings.GameBypass,
 		"webRTCProtection": a.settings.WebRTCProtection,
 		"dnsProtection":    a.settings.DNSProtection,
 		"wintunPath":       a.settings.WintunPath,
@@ -498,14 +501,65 @@ func (a *app) reapplyProxy(w http.ResponseWriter, _ *http.Request) {
 // page shows are accepted here; the selection, the region lock and the path
 // monitor are owned by their own routes and cannot be changed through this one.
 type settingsPatch struct {
-	DomesticWeb      *bool   `json:"domesticWeb"`
-	WebRTCProtection *bool   `json:"webRTCProtection"`
-	DNSProtection    *bool   `json:"dnsProtection"`
-	SubscriptionURL  *string `json:"subscriptionUrl"`
-	MihomoPath       *string `json:"mihomoPath"`
-	WintunPath       *string `json:"wintunPath"`
-	ConnectionMode   *string `json:"connectionMode"`
-	StrictPrivacy    *bool   `json:"strictPrivacy"`
+	GameBypass       *[]string `json:"gameBypass"`
+	DomesticWeb      *bool     `json:"domesticWeb"`
+	WebRTCProtection *bool     `json:"webRTCProtection"`
+	DNSProtection    *bool     `json:"dnsProtection"`
+	SubscriptionURL  *string   `json:"subscriptionUrl"`
+	MihomoPath       *string   `json:"mihomoPath"`
+	WintunPath       *string   `json:"wintunPath"`
+	ConnectionMode   *string   `json:"connectionMode"`
+	StrictPrivacy    *bool     `json:"strictPrivacy"`
+}
+
+var gameExeName = regexp.MustCompile(`(?i)^[\p{L}\p{N} _.-]+\.exe$`)
+var gamePackageName = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$`)
+
+func windowsGameRule(entry string) string {
+	if gameExeName.MatchString(entry) {
+		return "PROCESS-NAME," + entry + ",DIRECT"
+	}
+	if !filepath.IsAbs(entry) || !strings.EqualFold(filepath.Ext(entry), ".exe") ||
+		strings.ContainsAny(entry, "\r\n\x00*?") {
+		return ""
+	}
+	path := filepath.Clean(entry)
+	if strings.Contains(path, ",") {
+		// A comma would split a plain Mihomo rule. Encode this literal in
+		// an anchored regex so a real filename containing commas still works.
+		return "PROCESS-PATH-REGEX,^" + strings.ReplaceAll(regexp.QuoteMeta(path), ",", `\x2c`) + "$,DIRECT"
+	}
+	return "PROCESS-PATH," + path + ",DIRECT"
+}
+
+func normalizeGameBypass(entries []string, android bool) ([]string, error) {
+	result := make([]string, 0, len(entries))
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		name := strings.TrimSpace(entry)
+		if name == "" {
+			continue
+		}
+		key := name
+		if android {
+			if !gamePackageName.MatchString(name) {
+				return nil, errors.New("每行请输入一个完整的 Android 应用包名")
+			}
+		} else {
+			if windowsGameRule(name) == "" {
+				return nil, errors.New("请选择游戏 .exe，或输入完整路径或进程名")
+			}
+			if filepath.IsAbs(name) {
+				name = filepath.Clean(name)
+			}
+			key = strings.ToLower(name)
+		}
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, name)
+		}
+	}
+	return result, nil
 }
 
 func (a *app) updateSettings(w http.ResponseWriter, r *http.Request) {
@@ -517,6 +571,14 @@ func (a *app) updateSettings(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	next := a.settings
+	if patch.GameBypass != nil {
+		names, err := normalizeGameBypass(*patch.GameBypass, runtime.GOOS == "android")
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		next.GameBypass = names
+	}
 	if patch.StrictPrivacy != nil {
 		next.WebRTCProtection, next.DNSProtection = *patch.StrictPrivacy, *patch.StrictPrivacy
 	}
@@ -1529,6 +1591,13 @@ func generatedConfig(options configOptions) string {
 			chinaProviderName, strconv.Quote(filepath.Join("providers", chinaIPListFile)))
 	}
 	config.WriteString("rules:\n")
+	if options.TUN && findProcessMode == "always" {
+		for _, name := range options.GameBypass {
+			if rule := windowsGameRule(name); rule != "" {
+				fmt.Fprintf(&config, "  - %s\n", strconv.Quote(rule))
+			}
+		}
+	}
 	decided, proxied := splitRulesByTarget(options.Rules)
 	if privateTUN {
 		// Retain explicit blocks. Even if the selected node skips UDP rules,
@@ -1582,7 +1651,10 @@ func writeDomesticTCPRules(config *strings.Builder, options configOptions) {
 	if options.WebRTCProtection {
 		add("AND,((NETWORK,tcp),(DST-PORT,3478/5349/19302)),SmartVPN")
 	}
-	for _, domain := range []string{"mihoyo.com", "biligame.com", "bilibili.com", "bilivideo.com", "bilivideo.cn", "hdslb.com", "biliimg.com", "gov.cn"} {
+	// Bilibili's media hosts (e.g. i0.hdslb.com) can resolve to overseas
+	// edges. Let the domestic IP rule below select DIRECT only for local
+	// edges; overseas edges must reach the final proxy rule.
+	for _, domain := range []string{"mihoyo.com", "biligame.com", "bilibili.com", "gov.cn"} {
 		add("AND,((NETWORK,tcp),(DOMAIN-SUFFIX," + domain + ")),DIRECT")
 	}
 	// Only browsers should retry domestic HTTP/3 over TCP. A game can also
@@ -1613,11 +1685,21 @@ func dnsConfigSection(proxyServerFilters []string, strict bool) string {
 %s`, dnsListenLine, tunFakeIPv4Range, filters.String()) + dnsUpstreams(strict)
 }
 
+//go:embed domestic_dns_suffixes.txt
+var domesticDNSSuffixes string
+
 func dnsUpstreams(strict bool) string {
 	if strict {
 		// Node hostnames must resolve before the tunnel can carry DNS. Using IP
 		// endpoints avoids a separate system lookup of a resolver hostname.
-		return `  proxy-server-nameserver:
+		var policy strings.Builder
+		policy.WriteString("  nameserver-policy:\n")
+		for _, suffix := range strings.Fields(domesticDNSSuffixes) {
+			// Mihomo's +. wildcard includes the apex and subdomains, but
+			// never matches a similarly named domain under another suffix.
+			fmt.Fprintf(&policy, "    \"+.%s\": [\"https://223.5.5.5/dns-query#DIRECT\", \"https://223.6.6.6/dns-query#DIRECT\"]\n", suffix)
+		}
+		return policy.String() + `  proxy-server-nameserver:
     - https://223.5.5.5/dns-query
   default-nameserver:
     - https://223.5.5.5/dns-query

@@ -705,6 +705,30 @@ func TestClearCachedNodesLocked(t *testing.T) {
 // everything derived from it alone: the cached profile is deleted when the
 // subscription changes, so reading an omitted field as "clear it" destroyed a
 // working setup on a click.
+func TestGameBypassSettingsRoundTrip(t *testing.T) {
+	a := storeApp(t)
+	update := func(body string, want int) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		a.updateSettings(w, httptest.NewRequest(http.MethodPut, "/api/settings", strings.NewReader(body)))
+		if w.Code != want {
+			t.Fatalf("settings returned %d: %s", w.Code, w.Body.String())
+		}
+	}
+	update(`{"gameBypass":[" StarRail.exe ","starrail.exe"]}`, 200)
+	update(`{"gameBypass":["*,DIRECT"]}`, 400)
+	update(`{"dnsProtection":true}`, 200)
+	a.loadSettings()
+	if len(a.settings.GameBypass) != 1 || a.settings.GameBypass[0] != "StarRail.exe" {
+		t.Fatal("saved exception changed")
+	}
+	update(`{"gameBypass":[]}`, 200)
+	a.loadSettings()
+	if len(a.settings.GameBypass) != 0 {
+		t.Fatal("cleared exception still active")
+	}
+}
+
 func TestUpdateSettingsChangesOnlyWhatTheRequestCarries(t *testing.T) {
 	a := storeApp(t)
 	a.settings = settings{
@@ -772,12 +796,12 @@ func TestUpdateSettingsRefusesWhatItCannotApply(t *testing.T) {
 	a := storeApp(t)
 	a.settings = settings{SubscriptionURL: "https://example.com/sub", ConnectionMode: modeTUN}
 	for name, body := range map[string]string{
-		"an unknown mode":      `{"connectionMode":"tun2"}`,
-		"an empty mode":        `{"connectionMode":""}`,
-		"a non-dll wintun":     `{"wintunPath":"C:\dll\wintun.exe"}`,
-		"a non-exe kernel":     `{"mihomoPath":"C:\tools\mihomo.dll"}`,
+		"an unknown mode":                `{"connectionMode":"tun2"}`,
+		"an empty mode":                  `{"connectionMode":""}`,
+		"a non-dll wintun":               `{"wintunPath":"C:\dll\wintun.exe"}`,
+		"a non-exe kernel":               `{"mihomoPath":"C:\tools\mihomo.dll"}`,
 		"a subscription that is not one": `{"subscriptionUrl":"not a url"}`,
-		"not an object":        `[1,2,3]`,
+		"not an object":                  `[1,2,3]`,
 	} {
 		t.Run(name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()

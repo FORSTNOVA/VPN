@@ -235,13 +235,30 @@ extension _ConnectPage on _HomePageState {
                 SwitchListTile.adaptive(
                   contentPadding: EdgeInsets.zero,
                   title: const Text('DNS 防泄露'),
-                  subtitle:
-                      const Text('普通 DNS 查询通过节点加密解析。', style: Tokens.small),
+                  subtitle: const Text('国内名单走国内加密 DNS；国外及未识别域名经节点加密解析。',
+                      style: Tokens.small),
                   value: _dnsProtection,
                   onChanged: _busy || _connected
                       ? null
                       : (value) => unawaited(_setConnectionMode(_connectionMode,
                           dnsProtection: value)),
+                ),
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('游戏直连名单'),
+                  subtitle: Text(_gameBypass.isEmpty
+                      ? '未添加游戏'
+                      : '已添加 ${_gameBypass.length} 项'),
+                  trailing: const Icon(Icons.edit_outlined),
+                  enabled: !_busy && !_connected,
+                  onTap: () async {
+                    final names = await editGameBypass(
+                        context, _gameBypass, Platform.isAndroid);
+                    if (names != null && mounted) {
+                      await _setConnectionMode(_connectionMode,
+                          gameBypass: names);
+                    }
+                  },
                 ),
               ],
               if (_domesticWeb ||
@@ -254,7 +271,32 @@ extension _ConnectPage on _HomePageState {
               ],
             ]),
       ),
+      if (Platform.isAndroid)
+        Align(
+          alignment: Alignment.centerLeft,
+          child: TextButton.icon(
+            style: TextButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            onPressed: _openGitHubRelease,
+            icon: const Icon(Icons.open_in_new, size: 16),
+            label: const Text('到 GitHub 查看更新'),
+          ),
+        ),
     ]);
+  }
+
+  Future<void> _openGitHubRelease() async {
+    try {
+      await _HomePageState._host.invokeMethod<void>('openGitHubRelease');
+    } on PlatformException catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(error.message ?? '无法打开 GitHub 发布页')),
+      );
+    }
   }
 
   /// The country's own addresses going direct is what keeps a domestic site off

@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 #include <windowsx.h>
+#include <commdlg.h>
 
 #include "flutter/generated_plugin_registrant.h"
 
@@ -949,6 +950,33 @@ void FlutterWindow::HandleLifecycleCall(
     const flutter::MethodCall<flutter::EncodableValue>& call,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
   const std::string& method = call.method_name();
+
+  if (method == "pickGame") {
+    std::vector<wchar_t> path(32768);
+    OPENFILENAMEW dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.hwndOwner = GetHandle();
+    dialog.lpstrFilter = L"游戏程序 (*.exe)\0*.exe\0";
+    dialog.lpstrTitle = L"选择游戏本体";
+    dialog.lpstrFile = path.data();
+    dialog.nMaxFile = static_cast<DWORD>(path.size());
+    dialog.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+    if (!GetOpenFileNameW(&dialog)) {
+      if (CommDlgExtendedError() == 0) {
+        result->Success();
+      } else {
+        result->Error("picker", "无法打开文件选择器");
+      }
+      return;
+    }
+    const std::filesystem::path selected(path.data());
+    if (_wcsicmp(selected.extension().c_str(), L".exe") != 0) {
+      result->Error("extension", "请选择游戏的 .exe 程序");
+    } else {
+      result->Success(flutter::EncodableValue(selected.u8string()));
+    }
+    return;
+  }
 
   if (method == "closeChoice") {
     // The Flutter side has answered the close prompt, whatever it answered.

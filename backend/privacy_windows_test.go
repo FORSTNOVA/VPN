@@ -38,13 +38,14 @@ func TestPrivacyWithPackagedKernel(t *testing.T) {
 	}
 	defer node.Close()
 	dohViaNode := make(chan string, 1)
+	cdnViaNode := make(chan struct{}, 1)
 	go func() {
 		for {
 			c, err := node.Accept()
 			if err != nil {
 				return
 			}
-			go observeDNSConnect(c, dohViaNode)
+			go observeNodeConnect(c, dohViaNode, cdnViaNode)
 		}
 	}()
 	portText := strconv.Itoa(node.Addr().(*net.TCPAddr).Port)
@@ -68,7 +69,20 @@ func TestPrivacyWithPackagedKernel(t *testing.T) {
 			_, _ = echo.WriteTo(buf[:n], peer)
 		}
 	}()
-	for _, protect := range []bool{false, true} {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		protect, listed bool
+		entry           string
+	}{
+		{false, false, "UnrelatedGame.exe"},
+		{true, false, filepath.Join(dir, filepath.Base(exe))},
+		{true, true, filepath.Base(exe)},
+		{true, true, exe},
+	} {
+		protect := test.protect
 		port, err := freeLoopbackPort()
 		if err != nil {
 			t.Fatal(err)
@@ -79,6 +93,7 @@ func TestPrivacyWithPackagedKernel(t *testing.T) {
 		}
 		opts := configOptions{MixedPort: port, ControllerPort: control, ProviderPath: "nodes.yaml",
 			TUN: true, ChinaDirect: true, trafficPolicy: trafficPolicy{DomesticWeb: protect, WebRTCProtection: protect, DNSProtection: protect}, SubscriptionProvider: true, Rules: []string{"IP-CIDR,127.0.0.1/32,DIRECT,no-resolve"}}
+		opts.GameBypass = []string{test.entry}
 		conf := generatedConfig(opts)
 		path := filepath.Join(dir, "config.yaml")
 		if err := os.WriteFile(path, []byte(conf), 0600); err != nil {
@@ -106,6 +121,7 @@ func TestPrivacyWithPackagedKernel(t *testing.T) {
 		for _, domain := range domains {
 			local += "  " + domain + ": 127.0.0.2\n"
 		}
+		local += "  i0.hdslb.com: 127.0.0.2\n  i1.hdslb.com: 127.0.0.1\n"
 		if err := os.WriteFile(path, []byte(local), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -130,20 +146,21 @@ func TestPrivacyWithPackagedKernel(t *testing.T) {
 			payload := []byte("udp-test-" + strconv.FormatBool(protect))
 			_, _, err := socksUDPExchange(address, echo.LocalAddr().String(), payload,
 				func(p []byte) bool { return bytes.Equal(p, payload) }, 2*time.Second)
-			if protect != (err != nil) {
+			blocked := protect && !test.listed
+			if blocked != (err != nil) {
 				t.Fatalf("strict=%t: unexpected UDP result: %v", protect, err)
 			}
 			select {
 			case data := <-received:
-				if protect || data != string(payload) {
+				if blocked || data != string(payload) {
 					t.Fatalf("unexpected direct datagram %q", data)
 				}
 			default:
-				if !protect {
+				if !blocked {
 					t.Fatal("control datagram did not reach direct receiver")
 				}
 			}
-			if protect {
+			if protect && !test.listed {
 				game := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("game gateway")) }))
 				defer game.Close()
 				proxyURL, _ := url.Parse("http://" + address)
@@ -177,16 +194,38 @@ func TestPrivacyWithPackagedKernel(t *testing.T) {
 						t.Fatalf("domain missed direct gateway: %s", domain)
 					}
 				}
+				// The domestic image edge can serve directly. Its overseas peer
+				// must go to the mock node, even though it also hosts a local server.
+				res, err = client.Get(strings.Replace(game.URL, "127.0.0.1", "i1.hdslb.com", 1))
+				if err != nil {
+					t.Fatal(err)
+				}
+				body, err = io.ReadAll(res.Body)
+				res.Body.Close()
+				if err != nil || string(body) != "game gateway" {
+					t.Fatal("domestic image edge did not reach the direct server")
+				}
+				res, _ = client.Get("http://i0.hdslb.com:" + strconv.Itoa(listener.Addr().(*net.TCPAddr).Port))
+				if res != nil {
+					res.Body.Close()
+				}
+				select {
+				case <-cdnViaNode:
+				case <-time.After(time.Second):
+					t.Fatal("overseas image edge did not reach the selected node")
+				}
 				c, err := net.Dial("udp4", dnsAddress)
 				if err != nil {
 					t.Fatal(err)
 				}
 				defer c.Close()
-				// *.lan is outside the fake-IP pool, so this needs upstream DNS.
-				query, _, err := buildDNSQuery("privacy-probe.lan")
+				// A TXT query bypasses fake-IP synthesis. A domestic name embedded
+				// inside an unrelated domain must still use the protected upstream.
+				query, _, err := buildDNSQuery("www.baidu.com.unclassified.lan")
 				if err != nil {
 					t.Fatal(err)
 				}
+				query[len(query)-3] = 16 // QTYPE TXT
 				if _, err := c.Write(query); err != nil {
 					t.Fatal(err)
 				}
@@ -202,7 +241,7 @@ func TestPrivacyWithPackagedKernel(t *testing.T) {
 }
 
 // Minimal SOCKS node: observe the destination, then close without forwarding.
-func observeDNSConnect(c net.Conn, seen chan<- string) {
+func observeNodeConnect(c net.Conn, seen chan<- string, cdn chan<- struct{}) {
 	defer c.Close()
 	_ = c.SetDeadline(time.Now().Add(3 * time.Second))
 	var hello [2]byte
@@ -220,6 +259,12 @@ func observeDNSConnect(c net.Conn, seen chan<- string) {
 		return
 	}
 	host, port, err := readSocksAddress(c, request[3])
+	if err == nil && (host == "i0.hdslb.com" || host == "127.0.0.2") {
+		select {
+		case cdn <- struct{}{}:
+		default:
+		}
+	}
 	if err == nil && port == 443 && (host == "1.1.1.1" || host == "8.8.8.8") {
 		select {
 		case seen <- host:

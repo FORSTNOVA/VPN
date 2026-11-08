@@ -143,6 +143,27 @@ public class SmartVpnService extends VpnService {
             // subscription while connected.
             android.util.Log.w("SmartVPN", "could not exclude this app from its own tunnel: " + error);
         }
+        // Apply the saved package list on every tunnel establishment, including
+        // reconnects. Android routes excluded apps and their DNS outside the VPN.
+        java.io.File settings = new java.io.File(getFilesDir(), "SmartVPN/settings.json");
+        if (settings.isFile()) {
+            try {
+                String raw = new String(java.nio.file.Files.readAllBytes(settings.toPath()),
+                        java.nio.charset.StandardCharsets.UTF_8);
+                JSONArray games = new JSONObject(raw).optJSONArray("gameBypass");
+                for (int i = 0; games != null && i < games.length(); i++) {
+                    String game = games.getString(i);
+                    if (getPackageName().equals(game)) continue;
+                    try {
+                        builder.addDisallowedApplication(game);
+                    } catch (android.content.pm.PackageManager.NameNotFoundException absent) {
+                        // An uninstalled game has no traffic to exclude.
+                    }
+                }
+            } catch (Exception error) {
+                return "无法应用游戏直连名单：" + error.getMessage();
+            }
+        }
         ParcelFileDescriptor established = builder.establish();
         if (established == null) {
             return "系统拒绝建立隧道：可能是另一个 VPN 正在运行，或授权已被撤销";
