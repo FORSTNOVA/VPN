@@ -33,7 +33,7 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "service" -> result.success(startService())
                     "connect" -> connect(result)
-                    "pickGame" -> pickGame(result)
+                    "listGames" -> listGames(result)
                     "openGitHubRelease" -> {
                         val url = android.net.Uri.parse("https://github.com/FORSTNOVA/VPN/releases/latest")
                         try {
@@ -62,7 +62,7 @@ class MainActivity : FlutterActivity() {
         CoreBridge.start(filesDir.absolutePath, CoreBridge.CLASS_NAME)
             ?: JSONObject().put("error", "本地服务没有启动").toString()
 
-    private fun pickGame(result: MethodChannel.Result) {
+    private fun listGames(result: MethodChannel.Result) {
         val launcher = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
         val apps = packageManager.queryIntentActivities(launcher, 0)
             .filter { it.activityInfo.packageName != packageName }
@@ -73,14 +73,7 @@ class MainActivity : FlutterActivity() {
             result.error("picker", "没有找到可启动的应用，可手动填写包名", null)
             return
         }
-        android.app.AlertDialog.Builder(this)
-            .setTitle("选择已安装的游戏")
-            .setItems(apps.map { "${it.first}\n${it.second}" }.toTypedArray()) { _, index ->
-                result.success(apps[index].second)
-            }
-            .setNegativeButton("取消") { _, _ -> result.success(null) }
-            .setOnCancelListener { result.success(null) }
-            .show()
+        result.success(apps.map { mapOf("label" to it.first, "package" to it.second) })
     }
 
     /**

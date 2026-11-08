@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import 'installed_game_picker.dart';
+
 Future<List<String>?> editGameBypass(
   BuildContext context,
   List<String> current,
@@ -45,18 +47,38 @@ class _GameBypassDialogState extends State<_GameBypassDialog> {
 
   Future<void> _pickGame() async {
     try {
-      final selected = await MethodChannel(
-        widget.android ? 'smartvpn/host' : 'smartvpn/lifecycle',
-      ).invokeMethod<String>('pickGame');
-
+      if (widget.android) {
+        final rows = await const MethodChannel('smartvpn/host')
+            .invokeListMethod<Map<Object?, Object?>>('listGames');
+        if (!mounted) return;
+        final apps =
+            (rows ?? []).map((app) => Map<String, String>.from(app)).toList();
+        final selection = await showDialog<List<String>>(
+          context: context,
+          builder: (_) => InstalledGamePicker(
+            apps: apps,
+            initial: _controller.text
+                .split('\n')
+                .map((e) => e.trim())
+                .where((e) => e.isNotEmpty)
+                .toList(),
+          ),
+        );
+        if (mounted && selection != null) {
+          _controller.text = selection.join('\n');
+        }
+        return;
+      }
+      final selected = await const MethodChannel('smartvpn/lifecycle')
+          .invokeMethod<String>('pickGame');
       if (selected == null || !mounted) return;
 
       final trimmed = selected.trim();
       if (trimmed.isEmpty) return;
 
-      final exists = _controller.text.split('\n').any((line) => widget.android
-          ? line.trim() == trimmed
-          : line.trim().toLowerCase() == trimmed.toLowerCase());
+      final exists = _controller.text
+          .split('\n')
+          .any((line) => line.trim().toLowerCase() == trimmed.toLowerCase());
       if (exists) return;
       final current = _controller.text;
       if (current.isEmpty) {
