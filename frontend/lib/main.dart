@@ -121,7 +121,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Map<String, NodeHealth> _nodeHealth = const {};
   Map<String, RegionInfo> _regionByName = const {};
   String _connectionMode = 'system-proxy';
-  bool _strictPrivacy = false;
+  bool _domesticWeb = false, _webRTCProtection = false, _dnsProtection = false;
   bool _elevated = false;
   bool _tunAvailable = false;
   String _tunReason = '';
@@ -660,7 +660,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _applyTunState(Map<String, dynamic> value) {
     _connectionMode = value['connectionMode'] as String? ?? 'system-proxy';
-    _strictPrivacy = value['strictPrivacy'] as bool? ?? false;
+    _domesticWeb = value['domesticWeb'] as bool? ?? false;
+    _webRTCProtection = value['webRTCProtection'] as bool? ?? false;
+    _dnsProtection = value['dnsProtection'] as bool? ?? false;
     _elevated = value['elevated'] as bool? ?? false;
     _tunAvailable = value['tunAvailable'] as bool? ?? false;
     _tunReason = value['tunReason'] as String? ?? '';
@@ -1853,9 +1855,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _setConnectionMode(String mode, {bool? strictPrivacy}) async {
+  Future<void> _setConnectionMode(String mode,
+      {bool? domesticWeb, bool? webRTCProtection, bool? dnsProtection}) async {
     if (mode == _connectionMode &&
-        (strictPrivacy == null || strictPrivacy == _strictPrivacy)) {
+        domesticWeb == null &&
+        webRTCProtection == null &&
+        dnsProtection == null) {
       return;
     }
     setState(() {
@@ -1865,7 +1870,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     try {
       await _request('PUT', '/api/settings', body: {
         'connectionMode': mode,
-        if (strictPrivacy != null) 'strictPrivacy': strictPrivacy,
+        if (domesticWeb != null) 'domesticWeb': domesticWeb,
+        if (webRTCProtection != null) 'webRTCProtection': webRTCProtection,
+        if (dnsProtection != null) 'dnsProtection': dnsProtection,
       });
       await _loadState();
     } catch (e) {

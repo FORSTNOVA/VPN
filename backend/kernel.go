@@ -90,12 +90,15 @@ func (a *app) startMihomoLocked() error {
 		ControllerSecret:     a.ctrlSecret,
 		Rules:                subscriptionRules(profile),
 		TUN:                  a.connectionModeLocked() != modeSystemProxy,
-		StrictPrivacy:        a.settings.StrictPrivacy,
+		trafficPolicy:        a.settings.trafficPolicy,
 		SubscriptionProvider: a.settings.SubscriptionURL != "",
 		ManualProvider:       len(a.manualNodes) > 0,
 		ChinaDirect:          a.chinaDirect.Available && a.chinaRuleSupported(),
 	}
-	a.chinaDirectActive = options.ChinaDirect && !(options.TUN && options.StrictPrivacy)
+	if options.TUN && options.DomesticWeb && !options.ChinaDirect {
+		return errors.New("国内加速需要可用的国内直连列表，请获取或更新列表后重试")
+	}
+	a.chinaDirectActive = options.ChinaDirect && (!options.TUN || !options.active() || options.DomesticWeb)
 	if options.TUN {
 		options.ProxyServerDomains = mergeProxyServerDomains(
 			proxyServerDomains(profile), manualServerDomains(a.manualNodes))
@@ -120,7 +123,7 @@ func (a *app) startMihomoLocked() error {
 		_ = a.stopMihomoLocked()
 		return errors.New("subscription returned no selectable nodes; check the subscription and network")
 	}
-	if options.TUN && options.StrictPrivacy {
+	if options.TUN && options.active() {
 		if err := a.verifyPrivacyTunnel(); err != nil {
 			_ = a.stopMihomoLocked()
 			return err

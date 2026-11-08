@@ -24,7 +24,18 @@ import (
 	"time"
 )
 
+type trafficPolicy struct {
+	DomesticWeb      bool `json:"domesticWeb"`
+	WebRTCProtection bool `json:"webRTCProtection"`
+	DNSProtection    bool `json:"dnsProtection"`
+}
+
+func (p trafficPolicy) active() bool {
+	return p.DomesticWeb || p.WebRTCProtection || p.DNSProtection
+}
+
 type settings struct {
+	trafficPolicy
 	SubscriptionURL string `json:"subscriptionUrl"`
 	MihomoPath      string `json:"mihomoPath"`
 	SelectedNode    string `json:"selectedNode,omitempty"`
@@ -424,26 +435,29 @@ func (a *app) state(w http.ResponseWriter, _ *http.Request) {
 		"mihomoPath":      a.settings.MihomoPath,
 		// What will actually be run, which differs from the field above whenever
 		// the kernel came with the package.
-		"mihomoResolved": a.mihomoPath(),
-		"home":           a.home,
-		"portable":       a.portable,
-		"proxyEnabled":   proxyEnabled,
-		"mixedPort":      a.mixedPort,
-		"startedAt":      a.started,
-		"selectedNode":   a.selectedChoice(),
-		"activeNode":     activeNode,
-		"activeRegion":   activeRegion,
-		"lockedRegion":   a.lockedRegion,
-		"blocked":        a.blocked,
-		"blockReason":    a.blockReason,
-		"health":         a.healthSnapshotLocked(),
-		"regionJob":      a.regionJobSnapshotLocked(),
-		"connectionMode": a.connectionModeLocked(),
-		"strictPrivacy":  a.settings.StrictPrivacy,
-		"wintunPath":     a.settings.WintunPath,
-		"elevated":       a.elevated,
-		"tunAvailable":   tunReasonText == "",
-		"tunReason":      tunReasonText,
+		"mihomoResolved":   a.mihomoPath(),
+		"home":             a.home,
+		"portable":         a.portable,
+		"proxyEnabled":     proxyEnabled,
+		"mixedPort":        a.mixedPort,
+		"startedAt":        a.started,
+		"selectedNode":     a.selectedChoice(),
+		"activeNode":       activeNode,
+		"activeRegion":     activeRegion,
+		"lockedRegion":     a.lockedRegion,
+		"blocked":          a.blocked,
+		"blockReason":      a.blockReason,
+		"health":           a.healthSnapshotLocked(),
+		"regionJob":        a.regionJobSnapshotLocked(),
+		"connectionMode":   a.connectionModeLocked(),
+		"strictPrivacy":    a.settings.WebRTCProtection && a.settings.DNSProtection,
+		"domesticWeb":      a.settings.DomesticWeb,
+		"webRTCProtection": a.settings.WebRTCProtection,
+		"dnsProtection":    a.settings.DNSProtection,
+		"wintunPath":       a.settings.WintunPath,
+		"elevated":         a.elevated,
+		"tunAvailable":     tunReasonText == "",
+		"tunReason":        tunReasonText,
 		// True whenever the traffic is carried by a tunnel rather than by the
 		// machine's proxy setting, which is what the window's status row says:
 		// the mode itself already names which kind of tunnel it is.
@@ -484,11 +498,14 @@ func (a *app) reapplyProxy(w http.ResponseWriter, _ *http.Request) {
 // page shows are accepted here; the selection, the region lock and the path
 // monitor are owned by their own routes and cannot be changed through this one.
 type settingsPatch struct {
-	SubscriptionURL *string `json:"subscriptionUrl"`
-	MihomoPath      *string `json:"mihomoPath"`
-	WintunPath      *string `json:"wintunPath"`
-	ConnectionMode  *string `json:"connectionMode"`
-	StrictPrivacy   *bool   `json:"strictPrivacy"`
+	DomesticWeb      *bool   `json:"domesticWeb"`
+	WebRTCProtection *bool   `json:"webRTCProtection"`
+	DNSProtection    *bool   `json:"dnsProtection"`
+	SubscriptionURL  *string `json:"subscriptionUrl"`
+	MihomoPath       *string `json:"mihomoPath"`
+	WintunPath       *string `json:"wintunPath"`
+	ConnectionMode   *string `json:"connectionMode"`
+	StrictPrivacy    *bool   `json:"strictPrivacy"`
 }
 
 func (a *app) updateSettings(w http.ResponseWriter, r *http.Request) {
@@ -501,7 +518,19 @@ func (a *app) updateSettings(w http.ResponseWriter, r *http.Request) {
 	defer a.mu.Unlock()
 	next := a.settings
 	if patch.StrictPrivacy != nil {
-		next.StrictPrivacy = *patch.StrictPrivacy
+		next.WebRTCProtection, next.DNSProtection = *patch.StrictPrivacy, *patch.StrictPrivacy
+	}
+	if patch.DomesticWeb != nil {
+		if *patch.DomesticWeb && !next.DomesticWeb {
+			next.WebRTCProtection, next.DNSProtection = true, true
+		}
+		next.DomesticWeb = *patch.DomesticWeb
+	}
+	if patch.WebRTCProtection != nil {
+		next.WebRTCProtection = *patch.WebRTCProtection
+	}
+	if patch.DNSProtection != nil {
+		next.DNSProtection = *patch.DNSProtection
 	}
 	if patch.ConnectionMode != nil {
 		mode := strings.TrimSpace(*patch.ConnectionMode)
@@ -1251,6 +1280,10 @@ func (a *app) loadSettings() {
 	b, err := os.ReadFile(filepath.Join(a.home, "settings.json"))
 	if err == nil {
 		_ = json.Unmarshal(b, &a.settings)
+		if a.settings.StrictPrivacy {
+			a.settings.WebRTCProtection, a.settings.DNSProtection = true, true
+			a.settings.StrictPrivacy = false
+		}
 	}
 	if a.settings.SubscriptionURL != "" {
 		// What is on disk is the platform's credential form of the URL — the URL
@@ -1393,7 +1426,7 @@ type configOptions struct {
 	ControllerSecret string
 	Rules            []string
 	TUN              bool
-	StrictPrivacy    bool
+	trafficPolicy
 	// Which providers the groups may draw nodes from. A machine that has only
 	// pasted nodes must not be handed a subscription file that does not exist.
 	SubscriptionProvider bool
@@ -1462,8 +1495,8 @@ func generatedConfig(options configOptions) string {
 	fmt.Fprintf(&config, "secret: %s\n", strconv.Quote(options.ControllerSecret))
 	config.WriteString("profile:\n  store-selected: true\n")
 	if options.TUN {
-		config.WriteString(tunConfigSection(options.StrictPrivacy))
-		config.WriteString(dnsConfigSection(options.ProxyServerDomains, options.StrictPrivacy))
+		config.WriteString(tunConfigSection(options.DNSProtection))
+		config.WriteString(dnsConfigSection(options.ProxyServerDomains, options.DNSProtection))
 	}
 	config.WriteString("proxy-providers:\n")
 	providers := make([]string, 0, 2)
@@ -1489,8 +1522,8 @@ func generatedConfig(options configOptions) string {
 	fmt.Fprintf(&config, "  - name: SmartVPNAuto\n    type: url-test\n    use:%s\n    url: https://www.youtube.com/generate_204\n    interval: %d\n    tolerance: 100\n", uses.String(), testIntervalSec)
 	fmt.Fprintf(&config, "  - name: SmartVPNFallback\n    type: fallback\n    use:%s\n    url: https://www.youtube.com/generate_204\n    interval: %d\n", uses.String(), testIntervalSec)
 	fmt.Fprintf(&config, "  - name: SmartVPN\n    type: select\n    use:%s\n    proxies:\n      - SmartVPNAuto\n      - SmartVPNFallback\n      - REJECT\n", uses.String())
-	privateTUN := options.TUN && options.StrictPrivacy
-	if options.ChinaDirect && !privateTUN {
+	privateTUN := options.TUN && options.active()
+	if options.ChinaDirect && (!privateTUN || options.DomesticWeb) {
 		config.WriteString("rule-providers:\n")
 		fmt.Fprintf(&config, "  %s:\n    type: file\n    behavior: ipcidr\n    format: text\n    path: %s\n",
 			chinaProviderName, strconv.Quote(filepath.Join("providers", chinaIPListFile)))
@@ -1505,8 +1538,16 @@ func generatedConfig(options configOptions) string {
 				fmt.Fprintf(&config, "  - %s\n", strconv.Quote(rule))
 			}
 		}
-		fmt.Fprintf(&config, "  - %s\n", strconv.Quote(quicRejectRule))
-		config.WriteString("  - MATCH,SmartVPN\n  - MATCH,REJECT\n")
+		if !options.WebRTCProtection {
+			fmt.Fprintf(&config, "  - %s\n", strconv.Quote(quicRejectRule))
+		}
+		if options.DomesticWeb && options.ChinaDirect {
+			fmt.Fprintf(&config, "  - %s\n", strconv.Quote("AND,((NETWORK,tcp),(DST-PORT,80/443),(RULE-SET,"+chinaProviderName+")),DIRECT"))
+		}
+		config.WriteString("  - MATCH,SmartVPN\n")
+		if options.WebRTCProtection {
+			config.WriteString("  - MATCH,REJECT\n")
+		}
 		return config.String()
 	}
 	for _, rule := range decided {

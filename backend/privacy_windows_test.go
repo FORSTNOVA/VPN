@@ -22,6 +22,13 @@ func TestPrivacyWithPackagedKernel(t *testing.T) {
 		t.Skip("set SMARTVPN_TEST_MIHOMO to run the packaged kernel")
 	}
 	dir := t.TempDir()
+	providerDir := filepath.Join(dir, "providers")
+	if err := os.MkdirAll(providerDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(providerDir, chinaIPListFile), []byte("127.0.0.0/8\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	node, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -68,7 +75,7 @@ func TestPrivacyWithPackagedKernel(t *testing.T) {
 			t.Fatal("could not allocate separate local ports")
 		}
 		opts := configOptions{MixedPort: port, ControllerPort: control, ProviderPath: "nodes.yaml",
-			TUN: true, StrictPrivacy: protect, SubscriptionProvider: true, Rules: []string{"IP-CIDR,127.0.0.1/32,DIRECT,no-resolve"}}
+			TUN: true, ChinaDirect: true, trafficPolicy: trafficPolicy{DomesticWeb: protect, WebRTCProtection: protect, DNSProtection: protect}, SubscriptionProvider: true, Rules: []string{"IP-CIDR,127.0.0.1/32,DIRECT,no-resolve"}}
 		conf := generatedConfig(opts)
 		path := filepath.Join(dir, "config.yaml")
 		if err := os.WriteFile(path, []byte(conf), 0600); err != nil {

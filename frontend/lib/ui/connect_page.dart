@@ -163,7 +163,9 @@ extension _ConnectPage on _HomePageState {
         padding: EdgeInsets.zero,
         child: ExpansionTile(
             title: const Text('代理模式与分流'),
-            subtitle: Text(_connectionMode == 'tun' ? 'TUN 全设备' : '系统代理'),
+            subtitle: Text(Platform.isAndroid
+                ? 'VPN 全设备'
+                : (tunMode ? 'TUN 全设备' : '系统代理')),
             childrenPadding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
             expandedCrossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -206,21 +208,45 @@ extension _ConnectPage on _HomePageState {
               const SizedBox(height: 14),
               const Divider(),
               const SizedBox(height: 12),
-              if (tunMode || Platform.isAndroid)
+              if (tunMode || Platform.isAndroid) ...[
                 SwitchListTile.adaptive(
                   contentPadding: EdgeInsets.zero,
-                  title: const Text('WebRTC 与 DNS 防泄露'),
+                  title: const Text('国内加速'),
                   subtitle: const Text(
-                    '连接期间，国内外流量和普通 DNS 查询都经节点。节点不支持 UDP 时会阻断，部分通话可能无法接通。',
-                    style: Tokens.small,
-                  ),
-                  value: _strictPrivacy,
+                      '国内地址的 HTTP/HTTPS 网页直连。开启时同时启用两项保护，可分别调整。',
+                      style: Tokens.small),
+                  value: _domesticWeb,
                   onChanged: _busy || _connected
                       ? null
                       : (value) => unawaited(_setConnectionMode(_connectionMode,
-                          strictPrivacy: value)),
+                          domesticWeb: value)),
                 ),
-              if (!(tunMode || Platform.isAndroid) || !_strictPrivacy)
+                SwitchListTile.adaptive(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('WebRTC 防泄露'),
+                  subtitle: const Text('公网 UDP 经节点中继；节点不支持时阻断，通话可能受影响。',
+                      style: Tokens.small),
+                  value: _webRTCProtection,
+                  onChanged: _busy || _connected
+                      ? null
+                      : (value) => unawaited(_setConnectionMode(_connectionMode,
+                          webRTCProtection: value)),
+                ),
+                SwitchListTile.adaptive(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('DNS 防泄露'),
+                  subtitle:
+                      const Text('普通 DNS 查询通过节点加密解析。', style: Tokens.small),
+                  value: _dnsProtection,
+                  onChanged: _busy || _connected
+                      ? null
+                      : (value) => unawaited(_setConnectionMode(_connectionMode,
+                          dnsProtection: value)),
+                ),
+              ],
+              if (_domesticWeb ||
+                  !(_webRTCProtection || _dnsProtection) ||
+                  !(tunMode || Platform.isAndroid))
                 _chinaDirectRow(),
               if (!Platform.isAndroid && tunMode) ...[
                 const SizedBox(height: 14),

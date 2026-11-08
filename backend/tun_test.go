@@ -13,7 +13,7 @@ import (
 
 func TestStrictPrivacyConfigBlocksDirectFallback(t *testing.T) {
 	options := configOptions{
-		TUN: true, StrictPrivacy: true, ChinaDirect: true,
+		TUN: true, trafficPolicy: trafficPolicy{WebRTCProtection: true, DNSProtection: true}, ChinaDirect: true,
 		Rules: []string{"DOMAIN,deny.test,REJECT", "DOMAIN,private.test,DIRECT"},
 	}
 	var cfg struct {
@@ -41,13 +41,40 @@ func TestStrictPrivacyConfigBlocksDirectFallback(t *testing.T) {
 			t.Fatalf("application DNS can bypass the node: %s", server)
 		}
 	}
-	if got := strings.Join(cfg.Rules, "\n"); got != "DOMAIN,deny.test,REJECT\n"+quicRejectRule+"\nMATCH,SmartVPN\nMATCH,REJECT" {
+	if got := strings.Join(cfg.Rules, "\n"); got != "DOMAIN,deny.test,REJECT\nMATCH,SmartVPN\nMATCH,REJECT" {
 		t.Fatalf("unexpected strict routing:\n%s", got)
 	}
 	options.TUN = false
 	config := generatedConfig(options)
 	if strings.Contains(config, "#SmartVPN") || !strings.Contains(config, "DOMAIN,private.test,DIRECT") {
 		t.Fatal("a remembered TUN preference must not alter system-proxy routing")
+	}
+}
+
+func TestDomesticWebAndIndependentProtections(t *testing.T) {
+	for _, udp := range []bool{false, true} {
+		for _, dns := range []bool{false, true} {
+			config := generatedConfig(configOptions{TUN: true, ChinaDirect: true,
+				trafficPolicy: trafficPolicy{DomesticWeb: true, WebRTCProtection: udp, DNSProtection: dns},
+				Rules: []string{"DOMAIN,deny.test,REJECT", "DOMAIN,any.test,DIRECT"}})
+			var cfg struct{ Rules []string }
+			if err := yaml.Unmarshal([]byte(config), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			web := "AND,((NETWORK,tcp),(DST-PORT,80/443),(RULE-SET," + chinaProviderName + ")),DIRECT"
+			expected := []string{"DOMAIN,deny.test,REJECT"}
+			if !udp {
+				expected = append(expected, quicRejectRule)
+			}
+			expected = append(expected, web, "MATCH,SmartVPN")
+			if udp {
+				expected = append(expected, "MATCH,REJECT")
+			}
+			if strings.Join(cfg.Rules, "\n") != strings.Join(expected, "\n") ||
+				strings.Contains(config, "dns-query#SmartVPN") != dns || strings.Contains(config, "strict-route: true") != dns {
+				t.Fatalf("unexpected domestic policy for UDP=%t DNS=%t", udp, dns)
+			}
+		}
 	}
 }
 
