@@ -1558,7 +1558,7 @@ func generatedConfig(options configOptions) string {
 	config.WriteString("profile:\n  store-selected: true\n")
 	if options.TUN {
 		config.WriteString(tunConfigSection(options.DNSProtection))
-		config.WriteString(dnsConfigSection(options.ProxyServerDomains, options.DNSProtection))
+		config.WriteString(dnsConfigSection(options.ProxyServerDomains, options.DNSProtection, runtime.GOOS == "android"))
 	}
 	config.WriteString("proxy-providers:\n")
 	providers := make([]string, 0, 2)
@@ -1665,15 +1665,18 @@ func writeDomesticTCPRules(config *strings.Builder, options configOptions) {
 	add("AND,((NETWORK,tcp),(RULE-SET," + chinaProviderName + ")),DIRECT")
 }
 
-func dnsConfigSection(proxyServerFilters []string, strict bool) string {
+func dnsConfigSection(proxyServerFilters []string, strict, android bool) string {
+	header := "dns:\n  enable: true\n  ipv6: false\n" + dnsListenLine
+	// Android apps can retain an answer when their UID moves outside the VPN.
+	// Return routable addresses even before the user creates a bypass list.
+	if android {
+		return header + "  enhanced-mode: redir-host\n" + dnsUpstreams(strict)
+	}
 	var filters strings.Builder
 	for _, entry := range proxyServerFilters {
 		fmt.Fprintf(&filters, "    - %s\n", strconv.Quote(entry))
 	}
-	return fmt.Sprintf(`dns:
-  enable: true
-  ipv6: false
-%s  enhanced-mode: fake-ip
+	return header + fmt.Sprintf(`  enhanced-mode: fake-ip
   fake-ip-range: %s
   fake-ip-filter:
     - "*.lan"
@@ -1682,7 +1685,7 @@ func dnsConfigSection(proxyServerFilters []string, strict bool) string {
     - "+.msftncsi.com"
     - "www.msftconnecttest.com"
     - "time.*.com"
-%s`, dnsListenLine, tunFakeIPv4Range, filters.String()) + dnsUpstreams(strict)
+%s`, tunFakeIPv4Range, filters.String()) + dnsUpstreams(strict)
 }
 
 //go:embed domestic_dns_suffixes.txt

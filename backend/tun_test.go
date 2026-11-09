@@ -86,7 +86,7 @@ func TestSplitDNSProtectsUnclassifiedNames(t *testing.T) {
 			Fallback []string            `yaml:"fallback"`
 		}
 	}
-	if err := yaml.Unmarshal([]byte(dnsConfigSection(nil, true)), &config); err != nil {
+	if err := yaml.Unmarshal([]byte(dnsConfigSection(nil, true, false)), &config); err != nil {
 		t.Fatal(err)
 	}
 	if len(config.DNS.Servers) == 0 || len(config.DNS.Fallback) != 0 {
@@ -97,7 +97,7 @@ func TestSplitDNSProtectsUnclassifiedNames(t *testing.T) {
 			t.Fatalf("unprotected default resolver: %s", s)
 		}
 	}
-	for _, key := range []string{"+.cn", "+.baidu.com", "+.hdslb.com"} {
+	for _, key := range []string{"+.cn", "+.baidu.com", "+.hdslb.com", "+.cdn.max-c.com"} {
 		if len(config.DNS.Policy[key]) == 0 {
 			t.Fatalf("missing domestic policy for %s", key)
 		}
@@ -130,6 +130,24 @@ func TestIsFakeAddress(t *testing.T) {
 	for _, address := range real {
 		if isFakeAddress(address) {
 			t.Errorf("%q must not be treated as a fake-ip address", address)
+		}
+	}
+}
+
+func TestAndroidDNSAnswersSurviveVPNBypass(t *testing.T) {
+	for _, strict := range []bool{false, true} {
+		section := dnsConfigSection([]string{"+.node.test"}, strict, true)
+		var cfg struct {
+			DNS map[string]interface{} `yaml:"dns"`
+		}
+		if err := yaml.Unmarshal([]byte(section), &cfg); err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DNS["enhanced-mode"] != "redir-host" || strings.Contains(section, "fake-ip") {
+			t.Fatal("Android returned tunnel-only addresses")
+		}
+		if !strings.Contains(section, dnsUpstreams(strict)) {
+			t.Fatal("Android DNS upstream policy changed")
 		}
 	}
 }
@@ -317,7 +335,7 @@ func TestProbeDomainIsFreshEveryTime(t *testing.T) {
 	// The probe zone must not be inside the fake-ip bypass list, otherwise the
 	// check would never see a fake address.
 	filters := proxyServerDomains([]byte("proxies:\n  - name: node\n    server: abc123.qos.onl\n"))
-	section := dnsConfigSection(filters, false)
+	section := dnsConfigSection(filters, false, false)
 	if strings.Contains(section, "smartvpn-probe") {
 		t.Fatal("the probe zone must not be excluded from fake-ip")
 	}

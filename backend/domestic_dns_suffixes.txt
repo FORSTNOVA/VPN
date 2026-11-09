@@ -6,6 +6,7 @@ bcebos.com
 bilibili.com
 bilivideo.com
 hdslb.com
+cdn.max-c.com
 biliimg.com
 biligame.com
 mihoyo.com
