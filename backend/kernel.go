@@ -2,9 +2,13 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"time"
 )
 
@@ -60,9 +64,9 @@ func (a *app) startMihomoLocked() error {
 		return errors.New("could not write the file for the nodes added by hand")
 	}
 	var err error
-	a.mixedPort, err = freeLoopbackPort()
+	a.mixedPort, err = proxyListenPort(a.settings.SocksPort)
 	if err != nil {
-		return errors.New("could not allocate a local proxy port")
+		return err
 	}
 	a.ctrlPort, err = freeLoopbackPort()
 	if err != nil {
@@ -119,6 +123,12 @@ func (a *app) startMihomoLocked() error {
 		_ = a.stopMihomoLocked()
 		return errors.New("Mihomo did not become ready; see the local log")
 	}
+	if checker, ok := runner.(interface{ verifyPortOwner(int) error }); ok && a.settings.SocksPort != 0 {
+		if err := checker.verifyPortOwner(a.mixedPort); err != nil {
+			_ = a.stopMihomoLocked()
+			return err
+		}
+	}
 	if err := a.waitForNodes(20 * time.Second); err != nil {
 		_ = a.stopMihomoLocked()
 		return errors.New("subscription returned no selectable nodes; check the subscription and network")
@@ -131,6 +141,18 @@ func (a *app) startMihomoLocked() error {
 	}
 	a.startTrafficHistoryLocked()
 	return nil
+}
+
+func proxyListenPort(saved int) (int, error) {
+	if runtime.GOOS != "windows" || saved == 0 {
+		return freeLoopbackPort()
+	}
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(saved))
+	listener, err := net.Listen("tcp4", addr)
+	if err != nil {
+		return 0, fmt.Errorf("无法监听 SOCKS5 端口 %s，请检查端口是否被占用或更换端口：%w", addr, err)
+	}
+	return saved, listener.Close()
 }
 
 // stopMihomoLocked ends the kernel and leaves nothing of the configuration in

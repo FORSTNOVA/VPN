@@ -48,6 +48,7 @@ type settings struct {
 	StrictPrivacy   bool   `json:"strictPrivacy,omitempty"`
 	WintunPath      string `json:"wintunPath,omitempty"`
 	AutoMergeHours  int    `json:"autoMergeHours,omitempty"`
+	SocksPort       int    `json:"socksPort,omitempty"`
 	// The sites the path monitor checks, and how often.
 	PathChecks pathCheckSettings `json:"pathChecks,omitempty"`
 }
@@ -319,6 +320,11 @@ func (a *app) newToken() string {
 // the port at all and the token is the only thing a local caller needs.
 func (a *app) serveLocalAPI(token string) (int, *http.Server, error) {
 	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err == nil && listener.Addr().(*net.TCPAddr).Port == a.settings.SocksPort {
+		reserved := listener
+		listener, err = net.Listen("tcp4", "127.0.0.1:0")
+		_ = reserved.Close()
+	}
 	if err != nil {
 		return 0, nil, err
 	}
@@ -442,6 +448,7 @@ func (a *app) state(w http.ResponseWriter, _ *http.Request) {
 		"portable":         a.portable,
 		"proxyEnabled":     proxyEnabled,
 		"mixedPort":        a.mixedPort,
+		"socksPort":        a.settings.SocksPort,
 		"startedAt":        a.started,
 		"selectedNode":     a.selectedChoice(),
 		"activeNode":       activeNode,
@@ -501,6 +508,7 @@ func (a *app) reapplyProxy(w http.ResponseWriter, _ *http.Request) {
 // page shows are accepted here; the selection, the region lock and the path
 // monitor are owned by their own routes and cannot be changed through this one.
 type settingsPatch struct {
+	SocksPort        *int      `json:"socksPort"`
 	GameBypass       *[]string `json:"gameBypass"`
 	DomesticWeb      *bool     `json:"domesticWeb"`
 	WebRTCProtection *bool     `json:"webRTCProtection"`
@@ -571,6 +579,17 @@ func (a *app) updateSettings(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	next := a.settings
+	if patch.SocksPort != nil {
+		if runtime.GOOS != "windows" || *patch.SocksPort < 0 || *patch.SocksPort > 65535 {
+			http.Error(w, "Windows SOCKS5 端口须为 1–65535，或设为 0 自动分配", http.StatusBadRequest)
+			return
+		}
+		next.SocksPort = *patch.SocksPort
+		if next.SocksPort != 0 && next.SocksPort == a.apiPort {
+			http.Error(w, "端口已被本地管理服务使用，请选择其他端口", http.StatusConflict)
+			return
+		}
+	}
 	if patch.GameBypass != nil {
 		names, err := normalizeGameBypass(*patch.GameBypass, runtime.GOOS == "android")
 		if err != nil {

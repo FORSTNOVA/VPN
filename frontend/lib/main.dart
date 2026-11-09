@@ -94,6 +94,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _proxyEnabled = false;
   Timer? _stateTimer;
   int _mixedPort = 0;
+  int _socksPort = 0;
   bool _busy = false;
   bool _hasFetchedNodes = false;
   String _savedSubscriptionUrl = '';
@@ -626,6 +627,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _connected = value['connected'] as bool? ?? false;
       _proxyEnabled = value['proxyEnabled'] as bool? ?? false;
       _mixedPort = value['mixedPort'] as int? ?? 0;
+      _socksPort = value['socksPort'] as int? ?? 0;
       _selectedNode = value['selectedNode'] as String?;
       _activeNode = value['activeNode'] as String? ?? '';
       _applyRegionState(value);
@@ -1863,12 +1865,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       {bool? domesticWeb,
       bool? webRTCProtection,
       bool? dnsProtection,
-      List<String>? gameBypass}) async {
+      List<String>? gameBypass,
+      int? socksPort}) async {
     if (mode == _connectionMode &&
         domesticWeb == null &&
         webRTCProtection == null &&
         dnsProtection == null &&
-        gameBypass == null) {
+        gameBypass == null &&
+        socksPort == null) {
       return;
     }
     setState(() {
@@ -1882,6 +1886,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (webRTCProtection != null) 'webRTCProtection': webRTCProtection,
         if (dnsProtection != null) 'dnsProtection': dnsProtection,
         if (gameBypass != null) 'gameBypass': gameBypass,
+        if (socksPort != null) 'socksPort': socksPort,
       });
       await _loadState();
     } catch (e) {

@@ -1,9 +1,35 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smartvpn_windows/main.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  testWidgets('Windows proxy port rejects out-of-range input before saving', (tester) async {
+    tester.view.physicalSize = const Size(1440, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(const SmartVpnApp());
+    await tester.pumpAndSettle();
+    final section = find.text('代理模式与分流');
+    await tester.ensureVisible(section);
+    await tester.tap(section);
+    await tester.pumpAndSettle();
+    final row = find.text('SOCKS5 代理端口');
+    await tester.ensureVisible(row);
+    await tester.tap(row);
+    await tester.pumpAndSettle();
+    final dialog = find.byType(AlertDialog);
+    await tester.enterText(find.descendant(of: dialog, matching: find.byType(TextFormField)), '65536');
+    await tester.tap(find.descendant(of: dialog, matching: find.text('保存')));
+    await tester.pump();
+    expect(find.text('请输入 1–65535'), findsOneWidget);
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(dialog, findsNothing);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.windows), skip: !Platform.isWindows);
   for (final size in [
     const Size(390, 844),
     const Size(800, 900),

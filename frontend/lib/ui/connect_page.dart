@@ -4,6 +4,51 @@ part of '../main.dart';
 /// Answers at a glance: connection state, route flow, real-time telemetry,
 /// and core proxy/routing mode controls.
 extension _ConnectPage on _HomePageState {
+  Future<void> _editSocksPort() async {
+    final form = GlobalKey<FormState>();
+    var input = _socksPort == 0 ? '' : '$_socksPort';
+    final port = await showDialog<int>(
+      context: context,
+      builder: (dialog) {
+        void save() {
+          if (form.currentState!.validate()) {
+            Navigator.pop(dialog, int.tryParse(input.trim()) ?? 0);
+          }
+        }
+        return AlertDialog(
+          title: const Text('SOCKS5 代理端口'),
+          content: Form(
+            key: form,
+            child: TextFormField(
+              initialValue: input,
+              autofocus: true,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(
+                labelText: '本地端口',
+                helperText: '留空自动分配；固定端口在重连和重启后生效。',
+              ),
+              onChanged: (value) => input = value,
+              onFieldSubmitted: (_) => save(),
+              validator: (value) {
+                final text = (value ?? '').trim();
+                if (text.isEmpty) return null;
+                final n = int.tryParse(text, radix: 10);
+                return n == null || n < 1 || n > 65535 ? '请输入 1–65535' : null;
+              },
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(dialog), child: const Text('取消')),
+            FilledButton(onPressed: save, child: const Text('保存')),
+          ],
+        );
+      },
+    );
+    if (port != null && mounted) {
+      await _setConnectionMode(_connectionMode, socksPort: port);
+    }
+  }
+
   Widget _connectPage() {
     final tunMode = _connectionMode == 'tun';
     final hasNoNodes = _nodes.isEmpty && _savedSubscriptions.isEmpty;
@@ -175,6 +220,16 @@ extension _ConnectPage on _HomePageState {
                   style: Tokens.small,
                 )
               else ...[
+                if (Platform.isWindows)
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: const Text('SOCKS5 代理端口'),
+                    subtitle: Text(_connected
+                        ? '127.0.0.1:$_mixedPort · 断开后可修改'
+                        : (_socksPort == 0 ? '自动分配' : '127.0.0.1:$_socksPort · 固定')),
+                    trailing: const Icon(Icons.edit_outlined),
+                    onTap: _busy || _connected ? null : _editSocksPort,
+                  ),
                 SizedBox(
                   width: 320,
                   child: SegmentedButton<String>(

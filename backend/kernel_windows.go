@@ -9,6 +9,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"time"
 )
 
@@ -20,6 +23,7 @@ type execKernel struct {
 	app    *app
 	path   string
 	cmd    *exec.Cmd
+	exited chan struct{}
 	log    *os.File
 	config string
 }
@@ -52,9 +56,11 @@ func (k *execKernel) Start() error {
 		return errors.New("could not start Mihomo")
 	}
 	k.cmd, k.log = cmd, logFile
+	k.exited = make(chan struct{})
 	go func() {
 		_ = cmd.Wait()
 		_ = logFile.Close()
+		close(k.exited)
 		k.app.kernelExited(k)
 	}()
 	return nil
@@ -64,7 +70,34 @@ func (k *execKernel) Stop() error {
 	if !k.Running() {
 		return nil
 	}
-	return k.cmd.Process.Kill()
+	err := k.cmd.Process.Kill()
+	if err == nil {
+		// Kill on Windows returns before the process releases its listener.
+		// Reconnect must be able to bind that same port immediately.
+		<-k.exited
+	}
+	return err
+}
+
+// A successful dial can belong to another program that bound the fixed port
+// after our availability check. Only publish the proxy once its PID matches.
+func (k *execKernel) verifyPortOwner(port int) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, filepath.Join(os.Getenv("SystemRoot"), "System32", "netstat.exe"), "-ano", "-p", "tcp")
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	out, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("无法核对 SOCKS5 端口 %d 的监听进程：%w", port, err)
+	}
+	addr := "127.0.0.1:" + strconv.Itoa(port)
+	for _, line := range strings.Split(string(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 5 && f[1] == addr && f[2] == "0.0.0.0:0" && f[4] == strconv.Itoa(k.cmd.Process.Pid) {
+			return nil
+		}
+	}
+	return fmt.Errorf("内核未能监听 SOCKS5 端口 %s，请检查端口占用后重连", addr)
 }
 
 // checkKernelConfig hands a configuration to the kernel and reports whether it
