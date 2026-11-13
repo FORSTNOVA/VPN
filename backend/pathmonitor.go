@@ -400,6 +400,12 @@ func (a *app) runPathBaselineRound(check pathChecker) {
 		return
 	}
 	a.pathStatus.Phase = "waiting"
+	if a.settings.Chain.Enabled {
+		a.clearPathRetryLocked()
+		a.pathStatus.Note = "当前代理链未通过连通性检测，请检查各跳节点"
+		a.mu.Unlock()
+		return
+	}
 	a.pathStatus.Note = "Google 或 YouTube 不通；30 秒后自动检查同地区节点。"
 	if a.pathStatus.RetryAt == "" {
 		a.queuePathRetryLocked("scan", "Google 或 YouTube 当前无法连通。30 秒后将自动检测同地区节点。")
@@ -481,6 +487,11 @@ func (a *app) runPathRound(check pathChecker) {
 	a.pathStatus.Note = ""
 	a.pathStatus.Switched = nil
 	if len(failures) == 0 {
+		a.mu.Unlock()
+		return
+	}
+	if a.settings.Chain.Enabled {
+		a.pathStatus.Note = "链路检测失败，请检查所选各跳节点"
 		a.mu.Unlock()
 		return
 	}

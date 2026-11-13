@@ -44,6 +44,10 @@ type store struct {
 }
 
 const storeSchema = `
+CREATE TABLE IF NOT EXISTS probe_results (
+ path TEXT PRIMARY KEY, fingerprint TEXT NOT NULL, delay INTEGER NOT NULL, error TEXT NOT NULL, measured INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS nodes (
   name       TEXT PRIMARY KEY,
   protocol   TEXT NOT NULL DEFAULT '',

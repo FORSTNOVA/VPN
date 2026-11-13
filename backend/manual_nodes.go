@@ -51,6 +51,7 @@ func (a *app) loadManualNodesLocked() {
 		if node.Name == "" || node.URI == "" || len(node.Proxy) == 0 {
 			continue
 		}
+		node.Proxy["name"] = node.Name
 		a.manualNodes = append(a.manualNodes, node)
 	}
 }
@@ -132,6 +133,7 @@ func (a *app) addManualNodeLocked(uri, name string) (manualNode, error) {
 	}
 	if trimmed := strings.TrimSpace(name); trimmed != "" {
 		node.Name = trimmed
+		node.Proxy["name"] = trimmed
 	}
 	for _, existing := range a.manualNodes {
 		if existing.Name == node.Name {

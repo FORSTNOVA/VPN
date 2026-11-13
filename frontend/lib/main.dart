@@ -1,4 +1,6 @@
 import 'ui/game_bypass_dialog.dart';
+import 'ui/chain_editor.dart';
+import 'ui/probe_book.dart';
 import 'ui/desktop_pet_settings_dialog.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -103,6 +105,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   List<ProxyNode> _nodes = const [];
   String? _selectedNode;
   String _activeNode = '';
+  bool _chainEnabled = false;
+  Map<String, List<String>> _chains = {};
+  String _chainName = '';
+  List<String> _chainHops = const [];
+
+  String _nodeLabel(String name) =>
+      name == 'SmartVPNChain' && _chainEnabled ? _chainHops.join(' → ') : name;
   DiagnoseReport? _diagnose;
   bool _diagnosing = false;
   List<RegionInfo> _regionNodes = const [];
@@ -141,7 +150,20 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   _AppPage _page = _AppPage.connect;
   NodeGrouping _nodeGrouping = NodeGrouping.region;
   String _nodeQuery = '';
-  Map<String, int> _nodeLatency = const {};
+  late final _probes = ProbeBook((hops) =>
+      _request('POST', '/api/nodes/chain/probe', body: {'hops': hops}));
+  int _probeDone = 0, _probeTotal = 0;
+  Future<void> _loadProbes() async {
+    final revision = _probes.revision;
+    final data = await _request('GET', '/api/nodes/probes');
+    if (!mounted) return;
+    if (revision != _probes.revision) {
+      await _loadProbes();
+      return;
+    }
+    _probes.restore(data['results'] as List? ?? []);
+  }
+
   bool _measuringNodes = false;
   List<TunCheck> _tunChecks = const [];
   bool _tunChecksActive = false;
@@ -629,7 +651,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _mixedPort = value['mixedPort'] as int? ?? 0;
       _socksPort = value['socksPort'] as int? ?? 0;
       _selectedNode = value['selectedNode'] as String?;
-      _activeNode = value['activeNode'] as String? ?? '';
+      final chain = value['chain'] as Map<String, dynamic>? ?? const {};
+      _chainEnabled = chain['enabled'] == true;
+      _chainName = chain['name'] as String? ?? '';
+      _chains = (value['chains'] as Map<String, dynamic>? ?? {})
+          .map((k, v) => MapEntry(k, (v as List).cast<String>()));
+      _chainHops =
+          (chain['hops'] as List? ?? const []).whereType<String>().toList();
+      _activeNode = _nodeLabel(value['activeNode'] as String? ?? '');
       _applyRegionState(value);
       _applyTunState(value);
       _applyChinaState(value);
@@ -719,7 +748,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       setState(() {
         _connected = value['connected'] as bool? ?? false;
         _proxyEnabled = value['proxyEnabled'] as bool? ?? false;
-        _activeNode = value['activeNode'] as String? ?? '';
+        _activeNode = _nodeLabel(value['activeNode'] as String? ?? '');
         _applyRegionState(value);
         _applyTunState(value);
         _applyChinaState(value);
@@ -914,6 +943,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final value = await _request('GET', '/api/nodes');
     if (!mounted) return;
     _applyNodes(value);
+    await _loadProbes();
+    if (!mounted) return;
     final rawNodes = value['nodes'] as List<dynamic>? ?? const [];
     setState(() => _hasFetchedNodes = rawNodes.isNotEmpty);
   }
@@ -925,7 +956,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     });
     try {
       final value = await _request('POST', '/api/nodes/refresh');
-      if (mounted) _applyNodes(value);
+      if (mounted) {
+        _applyNodes(value);
+        await _loadProbes();
+      }
     } catch (e) {
       if (mounted) {
         setState(() => _error = e.toString().replaceFirst('Exception: ', ''));
@@ -945,6 +979,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       final value = await _request('POST', '/api/nodes/fetch');
       if (mounted) {
         _applyNodes(value);
+        await _loadProbes();
+        if (!mounted) return;
         setState(() => _hasFetchedNodes = true);
         final appliedFormat = value['appliedFormat'] as String? ?? '';
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1033,6 +1069,105 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         .showSnackBar(SnackBar(content: Text('已添加 ${parsedNodeLabel(added)}')));
   }
 
+  Future<void> _editChain() async {
+    await Navigator.of(context).push<void>(MaterialPageRoute(
+        builder: (routeContext) => StatefulBuilder(builder: (context, refresh) {
+              Future<void> edit(String? original) async {
+                final saved =
+                    await Navigator.of(context).push<bool>(MaterialPageRoute(
+                        builder: (_) => ChainEditor(
+                              available:
+                                  _nodes.map((n) => n.name).toSet().toList(),
+                              initialHops: _chains[original] ?? [],
+                              tunnelActive: Platform.isWindows && _kernelRunning &&
+                                  _connectionMode != 'system-proxy',
+                              initialName: original ?? '',
+                              book: _probes,
+                              save: (name, hops) async {
+                                await _request(
+                                    'PUT', '/api/nodes/chain/profile', body: {
+                                  'original': original ?? '',
+                                  'name': name,
+                                  'hops': hops
+                                });
+                              },
+                            )));
+                if (saved == true && mounted) {
+                  await _loadState();
+                  if (context.mounted) refresh(() {});
+                }
+              }
+
+              Future<void> select(String? name) async {
+                try {
+                  await _request('PUT', '/api/nodes/chain', body: {
+                    'name': name ?? '',
+                    'enabled': name != null,
+                    'hops': _chains[name] ?? []
+                  });
+                  await _loadState();
+                  if (context.mounted) refresh(() {});
+                } catch (e) {
+                  if (context.mounted)
+                    ScaffoldMessenger.of(context)
+                        .showSnackBar(SnackBar(content: Text(e.toString())));
+                }
+              }
+
+              return Scaffold(
+                  appBar: AppBar(title: const Text('代理链')),
+                  body: ListView(padding: const EdgeInsets.all(16), children: [
+                    Wrap(spacing: 12, children: [
+                      FilledButton.icon(
+                          onPressed: () => edit(null),
+                          icon: const Icon(Icons.add),
+                          label: const Text('新建代理链')),
+                      if (_chainEnabled)
+                        TextButton(
+                            onPressed:
+                                _kernelRunning ? null : () => select(null),
+                            child: const Text('停用代理链')),
+                    ]),
+                    if (_kernelRunning)
+                      const Padding(
+                          padding: EdgeInsets.symmetric(vertical: 8),
+                          child: Text('断开连接后可切换代理链')),
+                    for (final entry in _chains.entries)
+                      Card(
+                          child: Padding(
+                              padding: const EdgeInsets.all(12),
+                              child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    Text(entry.key,
+                                        style: Theme.of(context)
+                                            .textTheme
+                                            .titleMedium),
+                                    Text(entry.value.join(' → ')),
+                                    PathProbeButton(
+                                        book: _probes,
+                                        hops: entry.value,
+                                        title: '测整链'),
+                                    Wrap(children: [
+                                      TextButton(
+                                          onPressed: () => edit(entry.key),
+                                          child: const Text('查看 / 编辑')),
+                                      TextButton(
+                                          onPressed: _kernelRunning ||
+                                                  (_chainEnabled &&
+                                                      _chainName == entry.key)
+                                              ? null
+                                              : () => select(entry.key),
+                                          child: Text(_chainEnabled &&
+                                                  _chainName == entry.key
+                                              ? '已选用'
+                                              : '选用')),
+                                    ]),
+                                  ]))),
+                  ]));
+            })));
+  }
+
   Future<void> _deleteManualNode(String name) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -1079,30 +1214,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// Measures every node in one kernel call, which is the only way to get
   /// comparable numbers for nodes the health sweep never touches.
   Future<void> _measureAllNodes() async {
+    if (_measuringNodes) return;
+    final names = _nodes.map((n) => n.name).toSet().toList();
+    int next = 0;
     setState(() {
-      _busy = true;
       _measuringNodes = true;
-      _error = null;
+      _probeDone = 0;
+      _probeTotal = names.length;
     });
+    Future<void> worker() async {
+      while (mounted && next < names.length) {
+        final name = names[next++];
+        await _probes.run([name]);
+        if (mounted) setState(() => _probeDone++);
+      }
+    }
+
     try {
-      final value = await _request('GET', '/api/nodes/latency');
-      if (!mounted) return;
-      final raw = value['latency'] as Map<String, dynamic>? ?? const {};
-      setState(() {
-        _nodeLatency =
-            raw.map((key, item) => MapEntry(key, (item as num?)?.toInt() ?? 0));
-      });
-    } catch (e) {
-      if (mounted) {
-        setState(() => _error = e.toString().replaceFirst('Exception: ', ''));
-      }
+      await Future.wait(List.generate(4, (_) => worker()));
     } finally {
-      if (mounted) {
-        setState(() {
-          _busy = false;
-          _measuringNodes = false;
-        });
-      }
+      if (mounted) setState(() => _measuringNodes = false);
     }
   }
 

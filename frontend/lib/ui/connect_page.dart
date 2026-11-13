@@ -15,6 +15,7 @@ extension _ConnectPage on _HomePageState {
             Navigator.pop(dialog, int.tryParse(input.trim()) ?? 0);
           }
         }
+
         return AlertDialog(
           title: const Text('SOCKS5 代理端口'),
           content: Form(
@@ -38,7 +39,9 @@ extension _ConnectPage on _HomePageState {
             ),
           ),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(dialog), child: const Text('取消')),
+            TextButton(
+                onPressed: () => Navigator.pop(dialog),
+                child: const Text('取消')),
             FilledButton(onPressed: save, child: const Text('保存')),
           ],
         );
@@ -63,7 +66,9 @@ extension _ConnectPage on _HomePageState {
       ),
       nodeLabel: _connected
           ? (_activeNode.isEmpty ? '正在选择节点…' : _activeNode)
-          : (_selectedNode ?? '自动选择'),
+          : (_chainEnabled
+              ? _chainHops.join(' → ')
+              : (_selectedNode ?? '自动选择')),
       regionLabel: _activeRegion.isNotEmpty
           ? _activeRegion
           : (_lockedRegion.isNotEmpty ? '锁定 $_lockedRegion' : '未锁定'),
@@ -226,7 +231,9 @@ extension _ConnectPage on _HomePageState {
                     title: const Text('SOCKS5 代理端口'),
                     subtitle: Text(_connected
                         ? '127.0.0.1:$_mixedPort · 断开后可修改'
-                        : (_socksPort == 0 ? '自动分配' : '127.0.0.1:$_socksPort · 固定')),
+                        : (_socksPort == 0
+                            ? '自动分配'
+                            : '127.0.0.1:$_socksPort · 固定')),
                     trailing: const Icon(Icons.edit_outlined),
                     onTap: _busy || _connected ? null : _editSocksPort,
                   ),

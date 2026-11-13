@@ -74,19 +74,30 @@ extension _NodesPage on _HomePageState {
                   crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
                     const Text('选择模式', style: Tokens.hint),
-                    _ModeChip(
-                      label: '自动选择',
-                      selected:
-                          _lockedRegion.isEmpty && _selectedNode == autoGroup,
-                      onTap: () => unawaited(_selectNode(autoGroup)),
+                    if (!_chainEnabled) ...[
+                      _ModeChip(
+                        label: '自动选择',
+                        selected:
+                            _lockedRegion.isEmpty && _selectedNode == autoGroup,
+                        onTap: () => unawaited(_selectNode(autoGroup)),
+                      ),
+                      _ModeChip(
+                        label: '故障转移',
+                        selected: _lockedRegion.isEmpty &&
+                            _selectedNode == fallbackGroup,
+                        onTap: () => unawaited(_selectNode(fallbackGroup)),
+                      ),
+                      const SizedBox(width: 4),
+                    ],
+                    OutlinedButton.icon(
+                      onPressed: _busy ? null : () => unawaited(_editChain()),
+                      icon: const Icon(Icons.link, size: 16),
+                      label: const Text('代理链'),
                     ),
-                    _ModeChip(
-                      label: '故障转移',
-                      selected: _lockedRegion.isEmpty &&
-                          _selectedNode == fallbackGroup,
-                      onTap: () => unawaited(_selectNode(fallbackGroup)),
-                    ),
-                    const SizedBox(width: 4),
+                    if (_chainEnabled)
+                      Text(_chainName.isEmpty
+                          ? _chainHops.join(' → ')
+                          : _chainName),
                     _lockHint(),
                   ],
                 ),
@@ -190,23 +201,12 @@ extension _NodesPage on _HomePageState {
     final region = _regionByName[node.name];
     final selected = node.name == _selectedNode;
     final active = node.name == _activeNode;
-    final latency = _nodeLatency[node.name] ?? health?.latencyMs ?? 0;
     final country =
         (region != null && region.country.isNotEmpty) ? region.country : '—';
     final narrow = MediaQuery.sizeOf(context).width < Tokens.mobileBreakpoint;
 
-    final latencyLabel = Text(
-      latency > 0 ? '$latency ms' : '—',
-      textAlign: TextAlign.right,
-      style: Tokens.number.copyWith(
-        color: latency > 0
-            ? (latency < 160
-                ? Tokens.ok
-                : (latency < 320 ? Tokens.yellow : Tokens.bad))
-            : Tokens.inkFaint,
-        fontWeight: FontWeight.w700,
-      ),
-    );
+    final latencyLabel =
+        PathProbeButton(book: _probes, hops: [node.name], title: '测单节点');
 
     final healthBadge = _Badge(
       label: nodeHealthLabel(health?.state),
@@ -265,7 +265,9 @@ extension _NodesPage on _HomePageState {
         : null;
 
     return _AkHoverRow(
-      onTap: _busy ? null : () => unawaited(_selectNode(node.name)),
+      onTap: _busy || _chainEnabled
+          ? null
+          : () => unawaited(_selectNode(node.name)),
       selected: selected || active,
       accentColor:
           active ? Tokens.ok : (selected ? Tokens.yellow : Tokens.cyan),
@@ -293,6 +295,20 @@ extension _NodesPage on _HomePageState {
                 ),
                 const SizedBox(height: 3),
                 meta,
+                ListenableBuilder(
+                    listenable: _probes,
+                    builder: (context, _) {
+                      final paths = _probes.pathsTo(node.name);
+                      if (paths.isEmpty) return const SizedBox.shrink();
+                      return Wrap(children: [
+                        for (final path in paths)
+                          Tooltip(
+                              message: _probes.detail(path),
+                              child: Text(
+                                  '${path.join(" → ")} · ${_probes.label(path)}  ',
+                                  style: Tokens.hint))
+                      ]);
+                    }),
                 if (narrow) ...[
                   const SizedBox(height: 6),
                   Row(children: [
@@ -313,7 +329,7 @@ extension _NodesPage on _HomePageState {
           if (!narrow) ...[
             const SizedBox(width: 12),
             if (deleteButton != null) deleteButton,
-            SizedBox(width: 76, child: latencyLabel),
+            latencyLabel,
             const SizedBox(width: 10),
             SizedBox(
               width: 68,
@@ -350,9 +366,9 @@ extension _NodesPage on _HomePageState {
       );
 
   Widget _measureAllNodesButton() => OutlinedButton.icon(
-        onPressed: _busy || !_connected ? null : _measureAllNodes,
+        onPressed: _measuringNodes || _nodes.isEmpty ? null : _measureAllNodes,
         icon: const Icon(Icons.speed_rounded, size: 16),
-        label: Text(_measuringNodes ? '测速中…' : '测试延迟'),
+        label: Text(_measuringNodes ? '已测 $_probeDone/$_probeTotal' : '测全部节点'),
       );
 
   Widget _reloadNodesButton() => OutlinedButton.icon(

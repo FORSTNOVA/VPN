@@ -871,7 +871,7 @@ class _PathSurface extends StatelessWidget {
               Flexible(
                 child: Text(
                   nodeLabel,
-                  overflow: TextOverflow.ellipsis,
+                  softWrap: true,
                   style: TextStyle(
                     fontFamily: 'JetBrains Mono',
                     fontFamilyFallback: Tokens.fontMonoFallback,

@@ -210,6 +210,11 @@ func (a *app) startRegionVerification(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	a.mu.Lock()
+	if a.settings.Chain.Enabled {
+		a.mu.Unlock()
+		http.Error(w, "请先关闭链式代理，再逐个验证节点地区", http.StatusConflict)
+		return
+	}
 	if a.settings.SubscriptionURL == "" {
 		a.mu.Unlock()
 		http.Error(w, "set a subscription URL first", http.StatusBadRequest)
@@ -409,6 +414,10 @@ func (a *app) lockRegion(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if country != "" {
+		if a.settings.Chain.Enabled {
+			http.Error(w, "请先关闭链式代理，再更改锁定地区", http.StatusConflict)
+			return
+		}
 		now := time.Now()
 		usable := false
 		for _, record := range a.regions {
@@ -472,6 +481,9 @@ func (a *app) lockRegion(w http.ResponseWriter, r *http.Request) {
 // the UI keeps the lock in step with the user's chosen node. The node itself
 // becomes the pinned selection so automatic groups cannot leave the region.
 func (a *app) lockRegionToLocked(node string) {
+	if a.settings.Chain.Enabled {
+		return
+	}
 	if node == "" {
 		return
 	}

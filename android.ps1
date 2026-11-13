@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
   Builds the Android app: the kernel library first, then the package around it.
 
@@ -79,7 +79,7 @@ foreach ($oneAbi in $Abi) {
     # with_gvisor: the tunnel's stack in the generated configuration is gvisor,
     # and the cmfa tag drops it, so the kernel refuses to start the listener
     # with a message saying exactly that.
-    & (Join-Path $tools 'go\bin\go.exe') build -tags cmfa,with_gvisor -buildmode=c-shared -ldflags='-s -w' `
+    & (Join-Path $tools 'go\bin\go.exe') build -tags cmfa,with_gvisor -buildmode=c-shared -ldflags='-s -w -extldflags=-Wl,-z,max-page-size=16384' `
       -o (Join-Path $out 'libsmartvpn.so') .
     if ($LASTEXITCODE -ne 0) { throw "the library build failed for $oneAbi" }
   } finally {

@@ -38,17 +38,19 @@ func (p trafficPolicy) active() bool {
 
 type settings struct {
 	trafficPolicy
-	SubscriptionURL string `json:"subscriptionUrl"`
-	MihomoPath      string `json:"mihomoPath"`
-	SelectedNode    string `json:"selectedNode,omitempty"`
-	SelectionMode   string `json:"selectionMode,omitempty"`
-	LockedRegion    string `json:"lockedRegion,omitempty"`
-	LockedNode      string `json:"lockedNode,omitempty"`
-	ConnectionMode  string `json:"connectionMode,omitempty"`
-	StrictPrivacy   bool   `json:"strictPrivacy,omitempty"`
-	WintunPath      string `json:"wintunPath,omitempty"`
-	AutoMergeHours  int    `json:"autoMergeHours,omitempty"`
-	SocksPort       int    `json:"socksPort,omitempty"`
+	Chains          map[string][]string `json:"chains,omitempty"`
+	Chain           proxyChain          `json:"chain,omitempty"`
+	SubscriptionURL string              `json:"subscriptionUrl"`
+	MihomoPath      string              `json:"mihomoPath"`
+	SelectedNode    string              `json:"selectedNode,omitempty"`
+	SelectionMode   string              `json:"selectionMode,omitempty"`
+	LockedRegion    string              `json:"lockedRegion,omitempty"`
+	LockedNode      string              `json:"lockedNode,omitempty"`
+	ConnectionMode  string              `json:"connectionMode,omitempty"`
+	StrictPrivacy   bool                `json:"strictPrivacy,omitempty"`
+	WintunPath      string              `json:"wintunPath,omitempty"`
+	AutoMergeHours  int                 `json:"autoMergeHours,omitempty"`
+	SocksPort       int                 `json:"socksPort,omitempty"`
 	// The sites the path monitor checks, and how often.
 	PathChecks pathCheckSettings `json:"pathChecks,omitempty"`
 }
@@ -369,6 +371,10 @@ func (a *app) routes(token string) *http.ServeMux {
 	mux.HandleFunc("GET /api/traffic", a.authorize(token, a.traffic))
 	mux.HandleFunc("GET /api/traffic/history", a.authorize(token, a.trafficHistory))
 	mux.HandleFunc("GET /api/nodes/manual", a.authorize(token, a.listManualNodes))
+	mux.HandleFunc("PUT /api/nodes/chain/profile", a.authorize(token, a.saveChainProfile))
+	mux.HandleFunc("GET /api/nodes/probes", a.authorize(token, a.listProbeResults))
+	mux.HandleFunc("POST /api/nodes/chain/probe", a.authorize(token, a.probeChain))
+	mux.HandleFunc("PUT /api/nodes/chain", a.authorize(token, a.updateChain))
 	mux.HandleFunc("POST /api/nodes/manual", a.authorize(token, a.addManualNode))
 	mux.HandleFunc("DELETE /api/nodes/manual", a.authorize(token, a.deleteManualNode))
 	mux.HandleFunc("GET /api/subscriptions", a.authorize(token, a.listSubscriptions))
@@ -452,6 +458,8 @@ func (a *app) state(w http.ResponseWriter, _ *http.Request) {
 		"startedAt":        a.started,
 		"selectedNode":     a.selectedChoice(),
 		"activeNode":       activeNode,
+		"chain":            a.settings.Chain,
+		"chains":           a.settings.Chains,
 		"activeRegion":     activeRegion,
 		"lockedRegion":     a.lockedRegion,
 		"blocked":          a.blocked,
@@ -711,7 +719,9 @@ func (a *app) connect(w http.ResponseWriter, _ *http.Request) {
 	}
 	choice := a.selectedChoice()
 	autoSwitched := false
-	if a.lockedRegion != "" {
+	if a.settings.Chain.Enabled {
+		choice = chainExit
+	} else if a.lockedRegion != "" {
 		// A locked region must bind the selection to keep failover inside the region.
 		nodeExists := false
 		if a.lockedNode != "" {
@@ -795,7 +805,7 @@ func (a *app) connect(w http.ResponseWriter, _ *http.Request) {
 	// The lock follows the node that is actually in use, so a fresh connection
 	// keeps failover inside the region the user just measured.
 	a.lockRegionToLocked(selected)
-	if a.lockedRegion != "" && a.lockedNode != "" && a.lockedNode != choice {
+	if !a.settings.Chain.Enabled && a.lockedRegion != "" && a.lockedNode != "" && a.lockedNode != choice {
 		// The lock was only just established from the active node, so the group
 		// still points at an automatic group that could leave the region.
 		if err := a.switchGroupLocked(a.lockedNode); err != nil {
@@ -1126,6 +1136,11 @@ func (a *app) selectNode(w http.ResponseWriter, r *http.Request) {
 	}
 	a.mu.Lock()
 	connected := a.kernelRunningLocked()
+	if a.settings.Chain.Enabled {
+		a.mu.Unlock()
+		http.Error(w, "请先关闭链式代理，再选择单个节点", http.StatusConflict)
+		return
+	}
 	if !connected {
 		found := body.Name == autoGroup || body.Name == fallbackGroup
 		for _, node := range a.cachedNodes {
@@ -1361,6 +1376,10 @@ func (a *app) loadSettings() {
 	b, err := os.ReadFile(filepath.Join(a.home, "settings.json"))
 	if err == nil {
 		_ = json.Unmarshal(b, &a.settings)
+		if a.settings.Chains == nil && len(a.settings.Chain.Hops) >= 2 {
+			a.settings.Chain.Name = "我的代理链"
+			a.settings.Chains = map[string][]string{"我的代理链": a.settings.Chain.Hops}
+		}
 		if a.settings.StrictPrivacy {
 			a.settings.WebRTCProtection, a.settings.DNSProtection = true, true
 			a.settings.StrictPrivacy = false
@@ -1391,6 +1410,9 @@ func (a *app) loadSettings() {
 }
 
 func (a *app) selectedChoice() string {
+	if a.settings.Chain.Enabled {
+		return chainExit
+	}
 	// A locked region owns the selection, so Mihomo's own automatic groups can
 	// never pick a node outside the region the user pinned.
 	if a.lockedRegion != "" && a.lockedNode != "" {
@@ -1501,6 +1523,7 @@ func (a *app) saveSettings() error {
 }
 
 type configOptions struct {
+	ChainProxies     []byte
 	MixedPort        int
 	ControllerPort   int
 	ProviderPath     string
@@ -1579,6 +1602,7 @@ func generatedConfig(options configOptions) string {
 		config.WriteString(tunConfigSection(options.DNSProtection))
 		config.WriteString(dnsConfigSection(options.ProxyServerDomains, options.DNSProtection, runtime.GOOS == "android"))
 	}
+	config.Write(options.ChainProxies)
 	config.WriteString("proxy-providers:\n")
 	providers := make([]string, 0, 2)
 	if options.SubscriptionProvider {
@@ -1600,9 +1624,13 @@ func generatedConfig(options configOptions) string {
 		fmt.Fprintf(&uses, "\n      - %s", provider)
 	}
 	config.WriteString("proxy-groups:\n")
-	fmt.Fprintf(&config, "  - name: SmartVPNAuto\n    type: url-test\n    use:%s\n    url: https://www.youtube.com/generate_204\n    interval: %d\n    tolerance: 100\n", uses.String(), testIntervalSec)
-	fmt.Fprintf(&config, "  - name: SmartVPNFallback\n    type: fallback\n    use:%s\n    url: https://www.youtube.com/generate_204\n    interval: %d\n", uses.String(), testIntervalSec)
-	fmt.Fprintf(&config, "  - name: SmartVPN\n    type: select\n    use:%s\n    proxies:\n      - SmartVPNAuto\n      - SmartVPNFallback\n      - REJECT\n", uses.String())
+	if len(options.ChainProxies) > 0 {
+		fmt.Fprintf(&config, "  - name: SmartVPN\n    type: select\n    proxies:\n      - %s\n      - REJECT\n", chainExit)
+	} else {
+		fmt.Fprintf(&config, "  - name: SmartVPNAuto\n    type: url-test\n    use:%s\n    url: https://www.youtube.com/generate_204\n    interval: %d\n    tolerance: 100\n", uses.String(), testIntervalSec)
+		fmt.Fprintf(&config, "  - name: SmartVPNFallback\n    type: fallback\n    use:%s\n    url: https://www.youtube.com/generate_204\n    interval: %d\n", uses.String(), testIntervalSec)
+		fmt.Fprintf(&config, "  - name: SmartVPN\n    type: select\n    use:%s\n    proxies:\n      - SmartVPNAuto\n      - SmartVPNFallback\n      - REJECT\n", uses.String())
+	}
 	privateTUN := options.TUN && options.active()
 	if options.ChinaDirect && (!privateTUN || options.DomesticWeb) {
 		config.WriteString("rule-providers:\n")
@@ -1633,7 +1661,7 @@ func generatedConfig(options configOptions) string {
 			writeDomesticTCPRules(&config, options)
 		}
 		config.WriteString("  - MATCH,SmartVPN\n")
-		if options.WebRTCProtection {
+		if options.WebRTCProtection || len(options.ChainProxies) > 0 {
 			config.WriteString("  - MATCH,REJECT\n")
 		}
 		return config.String()
@@ -1649,6 +1677,9 @@ func generatedConfig(options configOptions) string {
 		fmt.Fprintf(&config, "  - %s\n", strconv.Quote(rule))
 	}
 	config.WriteString("  - MATCH,SmartVPN\n")
+	if len(options.ChainProxies) > 0 {
+		config.WriteString("  - MATCH,REJECT\n")
+	}
 	return config.String()
 }
 

@@ -102,6 +102,10 @@ func (a *app) startMihomoLocked() error {
 	if options.TUN && options.DomesticWeb && !options.ChinaDirect {
 		return errors.New("国内加速需要可用的国内直连列表，请获取或更新列表后重试")
 	}
+	options.ChainProxies, err = a.buildChain(a.settings.Chain, profile)
+	if err != nil {
+		return err
+	}
 	a.chinaDirectActive = options.ChinaDirect && (!options.TUN || !options.active() || options.DomesticWeb)
 	if options.TUN {
 		options.ProxyServerDomains = mergeProxyServerDomains(

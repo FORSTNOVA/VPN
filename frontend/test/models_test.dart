@@ -1171,7 +1171,7 @@ void main() {
       await tester.tap(navItem('线路'));
       await tester.pumpAndSettle();
       expect(find.text('选择模式'), findsOneWidget);
-      expect(find.text('测试延迟'), findsOneWidget);
+      expect(find.text('测全部节点'), findsOneWidget);
       expect(find.text('搜索节点名称'), findsOneWidget);
       expect(find.text('添加节点'), findsOneWidget);
       expect(find.textContaining('尚未检索到可选节点'), findsOneWidget);

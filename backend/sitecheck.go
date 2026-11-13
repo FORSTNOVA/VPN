@@ -48,7 +48,12 @@ func (a *app) ensureKernelForCheckLocked() (bool, error) {
 		return false, err
 	}
 	choice := a.selectedChoice()
-	if choice == autoGroup || choice == fallbackGroup {
+	if choice == chainExit && a.settings.Chain.Enabled {
+		if err := a.switchGroupLocked(choice); err != nil {
+			_ = a.stopMihomoLocked()
+			return false, err
+		}
+	} else if choice == autoGroup || choice == fallbackGroup {
 		_, _ = a.mihomoRequest(http.MethodPut, "/proxies/SmartVPN", map[string]string{"name": choice})
 	} else if choice != "" {
 		nodes, err := a.listNodes()

@@ -146,6 +146,10 @@ func bridgeReply(value any) *C.char {
 // answer: it binds one socket to the underlying network, and every socket the
 // kernel dials goes through here to get it.
 func protectSocket(network, address string, conn syscall.RawConn) error {
+	// With no app tunnel, standalone node probes use ordinary Android sockets.
+	if tunnel.descriptor() <= 0 {
+		return nil
+	}
 	refused := false
 	if err := conn.Control(func(fd uintptr) {
 		if C.smartvpn_protect(C.int(fd)) != 0 {

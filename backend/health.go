@@ -289,6 +289,9 @@ func (a *app) patrolLocked() {
 // responsible for: the node currently in use plus the locked-region candidates.
 func (a *app) applyPatrolLocked(active string, delays map[string]int, now time.Time) {
 	watched := append([]string{active}, candidatesForRegion(a.lockedRegion, a.regions, a.health, now)...)
+	if a.settings.Chain.Enabled {
+		watched = []string{active}
+	}
 	// A sweep that reached anything has put the measurement machinery back in
 	// order, so an anomaly reported by an earlier one no longer describes now.
 	for _, name := range watched {
@@ -334,6 +337,9 @@ func (a *app) recordSweepLocked(watched []string, delays map[string]int, now tim
 // failoverIfUnhealthyLocked moves traffic off the node in use once it is marked
 // unhealthy, unless there is no locked region to stay inside.
 func (a *app) failoverIfUnhealthyLocked(active string, now time.Time) {
+	if a.settings.Chain.Enabled {
+		return
+	}
 	if a.health[active].State != healthUnhealthy || a.lockedRegion == "" {
 		return
 	}
