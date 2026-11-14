@@ -2,7 +2,11 @@
 
 This repository implements the SmartVPN Windows and Android client described in `SmartVPN_Windows_Android_开发文档.docx`, including shared Go scheduling logic, Windows TUN, and Android VpnService. The Word document is a design reference; this README and [CHANGELOG.md](CHANGELOG.md) describe the current implementation.
 
-**Android v0.2.6** · [ARM64 APK](https://github.com/FORSTNOVA/VPN/releases/download/v0.2.6/SmartVPN-0.2.6-android.apk) · [Release notes and checksum](https://github.com/FORSTNOVA/VPN/releases/tag/v0.2.6). **Windows v0.2.5** · [x64 portable ZIP](https://github.com/FORSTNOVA/VPN/releases/download/v0.2.5/SmartVPN-0.2.5-portable.zip).
+**Download v0.2.13** · [Android ARM64 APK](https://github.com/FORSTNOVA/VPN/releases/download/v0.2.13/SmartVPN-0.2.13-android-arm64.apk) · [Windows x64 portable ZIP](https://github.com/FORSTNOVA/VPN/releases/download/v0.2.13/SmartVPN-0.2.13-portable.zip) · [Release notes and checksums](https://github.com/FORSTNOVA/VPN/releases/tag/v0.2.13). This is a binary-only update. The public source corresponds to v0.2.11.
+
+- **v0.2.11** adds saved multi-hop proxy chains and HTTPS latency tests for individual nodes, all nodes, and chain paths on Windows and Android. Test results persist across restarts.
+- **v0.2.8** lets Windows users save a fixed local SOCKS5 port for other applications and reuse it after reconnecting.
+- **v0.2.7** makes Android tunnel DNS return routable addresses so apps can reuse cached answers after moving to the bypass list. Both platforms route DNS for `cdn.max-c.com` through domestic encrypted resolvers.
 
 ## Current scope
 
@@ -44,7 +48,7 @@ TUN mode covers the whole device only through Mihomo's own TUN inbound; it is no
 
 ## Android
 
-The Android half is the same Go service, linked into the application instead of started beside it, and the same Flutter pages. What differs is what the platform insists on. The current v0.2.6 ARM64 APK is available from the [GitHub release](https://github.com/FORSTNOVA/VPN/releases/tag/v0.2.6); it uses the existing debug-signing configuration for sideloading.
+The Android app links the shared Go service into the application and uses the same Flutter pages as Windows. The ARM64 APK is available from the download link above.
 
 - The service is a library inside the app, not a process. Since Android 10 an app may not execute anything in its private directory, and the only executables it has are the native libraries the installer unpacked; the kernel is compiled in as well, so there is nothing to exec and nothing to fetch at run time. `android.ps1` builds that library for the device's architecture first and the package around it second — `flutter build apk` alone produces a package that installs and then fails at the first call.
 - The kernel is built with `-tags cmfa,with_gvisor`, and neither tag is optional. Without `cmfa` the kernel builds its own Android routing rules when its TUN starts, which means reading the system's package list — a file no ordinary app may open. The listener then fails, the interface it was given has nobody reading it, and every application on the device loses its network while the window reports a connection. With it, the kernel leaves routing to the VpnService that made the tunnel, which is where routing belongs. `with_gvisor` is needed because the generated tunnel uses the gvisor stack and `cmfa` drops it, which shows up as the kernel refusing to start the listener and saying so.
