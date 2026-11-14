@@ -4,6 +4,7 @@ This repository implements the SmartVPN Windows and Android client described in 
 
 **Download v0.2.13** · [Android ARM64 APK](https://github.com/FORSTNOVA/VPN/releases/download/v0.2.13/SmartVPN-0.2.13-android-arm64.apk) · [Windows x64 portable ZIP](https://github.com/FORSTNOVA/VPN/releases/download/v0.2.13/SmartVPN-0.2.13-portable.zip) · [Release notes and checksums](https://github.com/FORSTNOVA/VPN/releases/tag/v0.2.13). This is a binary-only update. The public source corresponds to v0.2.11.
 
+- **v0.2.13 (release packages only)** uses the subscription’s DNS-over-HTTPS resolver for node hostnames during single-node latency tests and connections. Both platforms can try multiple node addresses concurrently and display the subscription’s proxy groups and routing rules. On phones, the route tools move into a separate panel to leave more room for the node list. The Windows package retains the previous release’s optimized kernel.
 - **v0.2.11** adds saved multi-hop proxy chains and HTTPS latency tests for individual nodes, all nodes, and chain paths on Windows and Android. Test results persist across restarts.
 - **v0.2.8** lets Windows users save a fixed local SOCKS5 port for other applications and reuse it after reconnecting.
 - **v0.2.7** makes Android tunnel DNS return routable addresses so apps can reuse cached answers after moving to the bypass list. Both platforms route DNS for `cdn.max-c.com` through domestic encrypted resolvers.
