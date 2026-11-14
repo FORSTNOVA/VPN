@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -122,4 +123,9 @@ func (a *app) checkKernelConfig(configPath string) error {
 		return fmt.Errorf("%v: %s", err, lastLine(string(output)))
 	}
 	return nil
+}
+
+func (a *app) applyLiveConfig(payload string) error {
+	_, err := a.mihomoRequest(http.MethodPut, "/configs", map[string]string{"payload": payload})
+	return err
 }

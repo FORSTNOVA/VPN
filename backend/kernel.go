@@ -84,45 +84,11 @@ func (a *app) startMihomoLocked() error {
 	if err != nil && a.settings.SubscriptionURL != "" {
 		return errors.New("could not read the downloaded subscription")
 	}
-	// Only the cached list is consulted here: a rule-provider file that is
-	// missing is a configuration the kernel refuses to start with, and a
-	// download has no place in the path the user is waiting on.
-	a.chinaDirect = a.chinaIPListStatus(chinaListCached)
-	options := configOptions{
-		MixedPort:            a.mixedPort,
-		ControllerPort:       a.ctrlPort,
-		ProviderPath:         filepath.Join("providers", "subscription.yaml"),
-		ControllerSecret:     a.ctrlSecret,
-		Rules:                subscriptionRules(profile),
-		EntryDNS:             entryDNS(profile),
-		TUN:                  a.connectionModeLocked() != modeSystemProxy,
-		trafficPolicy:        a.settings.trafficPolicy,
-		SubscriptionProvider: a.settings.SubscriptionURL != "",
-		ManualProvider:       len(a.manualNodes) > 0,
-		ChinaDirect:          a.chinaDirect.Available && a.chinaRuleSupported(),
-	}
-	if a.settings.ImportPolicy {
-		options.SourceRuleOrder = true
-		var p sourcePolicy
-		if a.settings.SubscriptionURL != "" {
-			if yaml.Unmarshal(profile, &p) != nil {
-				return errors.New("无法解析订阅规则")
-			}
-		}
-		_, options.Rules = supportedRules(p)
-	}
-	if options.TUN && options.DomesticWeb && !options.ChinaDirect {
-		return errors.New("国内加速需要可用的国内直连列表，请获取或更新列表后重试")
-	}
-	options.ChainProxies, err = a.buildChain(a.settings.Chain, profile)
+	options, err := a.kernelConfigOptions(profile, a.settings.SubscriptionURL != "")
 	if err != nil {
 		return err
 	}
 	a.chinaDirectActive = options.ChinaDirect && (!options.TUN || !options.active() || options.DomesticWeb)
-	if options.TUN {
-		options.ProxyServerDomains = mergeProxyServerDomains(
-			proxyServerDomains(profile), manualServerDomains(a.manualNodes))
-	}
 	var relay *adaptiveDNS
 	if options.TUN && options.DNSProtection {
 		relay, err = newAdaptiveDNS(a.mixedPort)
@@ -174,6 +140,49 @@ func (a *app) startMihomoLocked() error {
 		go relay.monitor()
 	}
 	return nil
+}
+
+func (a *app) kernelConfigOptions(profile []byte, hasSubscription bool) (configOptions, error) {
+	// Only the cached list is consulted here: a rule-provider file that is
+	// missing is a configuration the kernel refuses to start with, and a
+	// download has no place in the path the user is waiting on.
+	a.chinaDirect = a.chinaIPListStatus(chinaListCached)
+	options := configOptions{
+		MixedPort:            a.mixedPort,
+		ControllerPort:       a.ctrlPort,
+		ProviderPath:         filepath.Join("providers", "subscription.yaml"),
+		ControllerSecret:     a.ctrlSecret,
+		Rules:                subscriptionRules(profile),
+		EntryDNS:             entryDNS(profile),
+		TUN:                  a.connectionModeLocked() != modeSystemProxy,
+		trafficPolicy:        a.settings.trafficPolicy,
+		SubscriptionProvider: hasSubscription,
+		ManualProvider:       len(a.manualNodes) > 0,
+		ChinaDirect:          a.chinaDirect.Available && a.chinaRuleSupported(),
+	}
+	if a.settings.ImportPolicy {
+		options.SourceRuleOrder = true
+		var p sourcePolicy
+		if hasSubscription {
+			if yaml.Unmarshal(profile, &p) != nil {
+				return options, errors.New("无法解析订阅规则")
+			}
+		}
+		_, options.Rules = supportedRules(p)
+	}
+	if options.TUN && options.DomesticWeb && !options.ChinaDirect {
+		return options, errors.New("国内加速需要可用的国内直连列表，请获取或更新列表后重试")
+	}
+	var err error
+	options.ChainProxies, err = a.buildChain(a.settings.Chain, profile)
+	if err != nil {
+		return options, err
+	}
+	if options.TUN {
+		options.ProxyServerDomains = mergeProxyServerDomains(
+			proxyServerDomains(profile), manualServerDomains(a.manualNodes))
+	}
+	return options, nil
 }
 
 func proxyListenPort(saved int) (int, error) {

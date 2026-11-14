@@ -19,8 +19,7 @@ extension _SubscriptionPage on _HomePageState {
           runSpacing: 6,
           children: [
             OutlinedButton.icon(
-              onPressed:
-                  _busy || _connected ? null : _showAddSubscriptionDialog,
+              onPressed: _busy ? null : _showAddSubscriptionDialog,
               icon: const Icon(Icons.add_rounded, size: 16),
               label: const Text('添加订阅'),
             ),
@@ -32,7 +31,7 @@ extension _SubscriptionPage on _HomePageState {
                 label: const Text('切回合并主源'),
               ),
             FilledButton.icon(
-              onPressed: (_busy || _connected || enabledCount == 0)
+              onPressed: (_busy || enabledCount == 0)
                   ? null
                   : _mergeAllSubscriptions,
               icon: const Icon(Icons.merge_type_rounded, size: 16),
@@ -89,6 +88,7 @@ extension _SubscriptionPage on _HomePageState {
               ],
             ),
             const SizedBox(height: 10),
+            const Text('新增订阅默认不参与合并。勾选后点击「一键合并更新」即可应用。', style: Tokens.hint),
             const Divider(),
             const SizedBox(height: 6),
             for (final entry in _savedSubscriptions) _subscriptionRow(entry),
@@ -316,7 +316,7 @@ extension _SubscriptionPage on _HomePageState {
           Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
             Checkbox(
               value: entry.enabled,
-              onChanged: blocked
+              onChanged: _busy
                   ? null
                   : (v) =>
                       unawaited(_toggleSubscriptionEnabled(entry, v ?? false)),
@@ -351,7 +351,7 @@ extension _SubscriptionPage on _HomePageState {
                         )
                       else if (isPartInMerged)
                         const _Badge(
-                          label: '已并入主源',
+                          label: '已勾选合并',
                           color: Tokens.yellow,
                           tint: Tokens.yellowTint,
                           showDot: true,

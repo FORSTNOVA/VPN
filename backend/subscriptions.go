@@ -373,9 +373,6 @@ func (a *app) autoMergeTickLocked() {
 		return
 	}
 	log.Printf("auto-merge completed: merged %d nodes", len(nodes))
-	if a.kernelRunningLocked() {
-		_, _ = a.mihomoRequest(http.MethodPut, "/providers/proxies/SmartVPNSubscription", nil)
-	}
 }
 
 func (a *app) setAutoMergeHours(w http.ResponseWriter, r *http.Request) {
@@ -692,13 +689,51 @@ func (a *app) writeMergedSourcesLocked(sources []SubscriptionSource) ([]proxyNod
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return nil, errors.New("无法创建本地配置目录")
 	}
-	tempPath := path + ".tmp"
-	if err := os.WriteFile(tempPath, mergedYAML, 0600); err != nil {
-		return nil, errors.New("无法保存合并配置")
+	var liveConfig string
+	var previous []byte
+	running := a.kernelRunningLocked()
+	if running {
+		if selected := a.selectedChoice(); selected != "" && selected != autoGroup && selected != fallbackGroup && selected != chainExit && selected != "REJECT" {
+			found := false
+			for _, node := range mergedNodes {
+				found = found || node.Name == selected
+			}
+			for _, node := range a.manualNodes {
+				found = found || node.Name == selected
+			}
+			if !found {
+				return nil, fmt.Errorf("合并会移除当前线路 %s，请勾选其订阅或先切换线路", selected)
+			}
+		}
+		// A missing provider is expected when the connection started with only manual nodes.
+		previous, err = os.ReadFile(path)
+		if err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
+		options, err := a.kernelConfigOptions(mergedYAML, true)
+		if err != nil {
+			return nil, err
+		}
+		if a.dnsRelay != nil {
+			options.dnsRelayAddr = a.dnsRelay.listener.Addr().String()
+		}
+		liveConfig = generatedConfig(options)
 	}
-	if err := os.Rename(tempPath, path); err != nil {
-		_ = os.Remove(tempPath)
-		return nil, errors.New("无法更新合并配置")
+	if err := replaceSubscriptionProfile(path, mergedYAML); err != nil {
+		return nil, err
+	}
+	if running {
+		// Updating just the provider misses merged rules, DNS policies, and groups
+		// created when a manual-only connection gains its first subscription.
+		if err := a.applyLiveConfig(liveConfig); err != nil {
+			var restoreErr error
+			if previous == nil {
+				restoreErr = os.Remove(path)
+			} else {
+				restoreErr = replaceSubscriptionProfile(path, previous)
+			}
+			return nil, errors.Join(fmt.Errorf("内核未确认合并配置：%w", err), restoreErr)
+		}
 	}
 	_ = os.WriteFile(path+".source", []byte(mergedSubscriptionURL), 0600)
 	_ = os.WriteFile(path+".format", []byte("merged"), 0600)
@@ -712,6 +747,18 @@ func (a *app) writeMergedSourcesLocked(sources []SubscriptionSource) ([]proxyNod
 	a.cachedNodes = append([]proxyNode(nil), mergedNodes...)
 	_ = a.saveCachedNodesLocked(mergedNodes)
 	return mergedNodes, nil
+}
+
+func replaceSubscriptionProfile(path string, body []byte) error {
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, body, 0600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func (a *app) addSubscription(w http.ResponseWriter, r *http.Request) {
@@ -750,7 +797,7 @@ func (a *app) addSubscription(w http.ResponseWriter, r *http.Request) {
 	if label == "" {
 		label = subscriptionLabel(rawURL)
 	}
-	enabled := true
+	enabled := false
 	if body.Enabled != nil {
 		enabled = *body.Enabled
 	}
@@ -764,6 +811,7 @@ func (a *app) addSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	a.subscriptions = append(a.subscriptions, newEntry)
 	if err := a.saveSubscriptionsLocked(); err != nil {
+		a.subscriptions = a.subscriptions[:len(a.subscriptions)-1]
 		http.Error(w, "保存订阅列表失败", http.StatusInternalServerError)
 		return
 	}
@@ -773,11 +821,11 @@ func (a *app) addSubscription(w http.ResponseWriter, r *http.Request) {
 
 func (a *app) updateSubscription(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ID      string `json:"id"`
-		URL     string `json:"url,omitempty"`
-		Label   string `json:"label"`
-		Prefix  string `json:"prefix"`
-		Enabled *bool  `json:"enabled"`
+		ID      string  `json:"id"`
+		URL     string  `json:"url,omitempty"`
+		Label   string  `json:"label"`
+		Prefix  *string `json:"prefix"`
+		Enabled *bool   `json:"enabled"`
 	}
 	if err := decodeJSON(r.Body, &body); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
@@ -799,7 +847,9 @@ func (a *app) updateSubscription(w http.ResponseWriter, r *http.Request) {
 			if strings.TrimSpace(body.Label) != "" {
 				a.subscriptions[i].Label = strings.TrimSpace(body.Label)
 			}
-			a.subscriptions[i].Prefix = strings.TrimSpace(body.Prefix)
+			if body.Prefix != nil {
+				a.subscriptions[i].Prefix = strings.TrimSpace(*body.Prefix)
+			}
 			if body.Enabled != nil {
 				a.subscriptions[i].Enabled = *body.Enabled
 			}
@@ -828,10 +878,6 @@ func (a *app) updateSubscription(w http.ResponseWriter, r *http.Request) {
 func (a *app) mergeSubscriptions(w http.ResponseWriter, _ *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.kernelRunningLocked() {
-		http.Error(w, "断开连接后再进行合并更新", http.StatusConflict)
-		return
-	}
 
 	nodes, err := a.mergeAllEnabledSubscriptionsLocked()
 	if err != nil {

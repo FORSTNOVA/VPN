@@ -1779,12 +1779,12 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         'url': rawURL,
         'label': label,
         'prefix': prefix,
-        'enabled': true,
+        'enabled': false,
       });
       await _loadSubscriptions();
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('已添加新订阅'),
+        content: Text('已保存订阅。勾选后可手动合并。'),
       ));
     } catch (e) {
       if (mounted) {

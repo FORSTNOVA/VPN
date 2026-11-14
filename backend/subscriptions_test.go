@@ -514,4 +514,49 @@ func TestFetchProfileFallsBackToCacheWhenNetworkFails(t *testing.T) {
 	}
 }
 
-
+func TestLiveSubscriptionMergeThroughMihomo(t *testing.T) {
+	bin := os.Getenv("SMARTVPN_TEST_MIHOMO")
+	if bin == "" {
+		t.Skip("set SMARTVPN_TEST_MIHOMO to exercise the installed kernel")
+	}
+	a := storeApp(t)
+	a.settings.ConnectionMode = modeSystemProxy
+	a.settings.MihomoPath = bin
+	a.manualNodes = []manualNode{{Name: "original", Proxy: map[string]any{"name": "original", "type": "http", "server": "127.0.0.1", "port": 9}}}
+	if err := a.startMihomoLocked(); err != nil {
+		t.Fatal(err)
+	}
+	defer a.stopMihomoLocked()
+	if err := a.switchGroupLocked("original"); err != nil {
+		t.Fatal(err)
+	}
+	a.settings.SelectedNode = "original"
+	a.settings.SelectionMode = "manual"
+	started := a.started
+	post := func(handler http.HandlerFunc, body string) {
+		t.Helper()
+		r := httptest.NewRecorder()
+		handler(r, httptest.NewRequest("POST", "/", strings.NewReader(body)))
+		if r.Code != 200 {
+			t.Fatalf("status %d: %s", r.Code, r.Body.String())
+		}
+	}
+	post(a.addSubscription, `{"url":"trojan://example@127.0.0.1:8443#incoming","prefix":"demo"}`)
+	if len(a.subscriptions) != 1 || a.subscriptions[0].Enabled || a.settings.SubscriptionURL != "" {
+		t.Fatal("adding changed active subscription or merge selection")
+	}
+	post(a.updateSubscription, fmt.Sprintf(`{"id":%q,"enabled":true}`, a.subscriptions[0].ID))
+	if a.subscriptions[0].Prefix != "demo" {
+		t.Fatal("selection erased source prefix")
+	}
+	post(a.mergeSubscriptions, "")
+	if a.activeNodeLocked() != "original" || a.started != started {
+		t.Fatal("merge changed the current route")
+	}
+	if len(a.cachedNodes) != 1 {
+		t.Fatal("missing merged node")
+	}
+	if err := a.switchGroupLocked(a.cachedNodes[0].Name); err != nil {
+		t.Fatal("merged node unavailable in live kernel:", err)
+	}
+}

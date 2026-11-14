@@ -192,3 +192,14 @@ func (k *embeddedKernel) stopLogging() {
 		_ = file.Close()
 	}
 }
+
+// The CMFA build disables PUT /configs. Keep the VpnService descriptor
+// and listeners while applying the parsed configuration in-process.
+func (a *app) applyLiveConfig(payload string) error {
+	cfg, err := executor.ParseWithBytes([]byte(payload))
+	if err != nil {
+		return err
+	}
+	executor.ApplyConfig(cfg, false)
+	return nil
+}
