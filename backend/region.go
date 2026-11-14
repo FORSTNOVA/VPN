@@ -378,6 +378,7 @@ func (a *app) regionReport(w http.ResponseWriter, _ *http.Request) {
 		LatencyMs           int    `json:"latencyMs"`
 		ConsecutiveFailures int    `json:"consecutiveFailures"`
 		CooldownUntil       string `json:"cooldownUntil,omitempty"`
+		UpdatedAt           string `json:"updatedAt,omitempty"`
 	}
 	healthPayloads := make(map[string]healthPayload, len(a.health))
 	for name, record := range a.health {
@@ -386,6 +387,7 @@ func (a *app) regionReport(w http.ResponseWriter, _ *http.Request) {
 			LatencyMs:           record.LatencyMs,
 			ConsecutiveFailures: record.ConsecutiveFailures,
 			CooldownUntil:       timestamp(record.CooldownUntil),
+			UpdatedAt:           timestamp(record.UpdatedAt),
 		}
 	}
 	writeJSON(w, map[string]any{

@@ -32,6 +32,8 @@ func (a *app) probeChain(w http.ResponseWriter, r *http.Request) {
 	}
 	a.mu.Lock()
 	index, err := a.currentProxyIndexLocked()
+	tun := a.connectionModeLocked() != modeSystemProxy
+	strictDNS := tun && a.settings.DNSProtection
 	var policy map[string][]string
 	if a.settings.SubscriptionURL != "" {
 		profile, _ := os.ReadFile(a.profilePath())
@@ -52,6 +54,12 @@ func (a *app) probeChain(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	result := probeResult{Hops: request.Hops, Target: probeTarget, DiagnosticsVersion: 1}
 	entryURLs := policy[strings.ToLower(stringValue(proxies[0]["server"]))]
+	if len(entryURLs) == 0 && (tun || len(policy) > 0) {
+		entryURLs = []string{entryUDP1, entryUDP2}
+		if strictDNS {
+			entryURLs = []string{entryDoH}
+		}
+	}
 	observation := new(probeObservation)
 	result.Delay, result.WarmDelay, err = measureBoth(ctx, entryURLs, proxies, result.Target, observation)
 	observation.mu.Lock()
@@ -218,7 +226,7 @@ func measureBoth(ctx context.Context, entryURLs []string, proxies []map[string]a
 				defer rs.ResetConnection()
 				// Mihomo otherwise resolves dynamic ECH via its process-wide DNS.
 				// Supply a copy only to this probe, using the same network as its A/AAAA lookup.
-				if ech, ok := p["ech-opts"].(map[string]any); ok && tlsEnabled(ech["enable"]) && stringValue(ech["config"]) == "" {
+				if ech, ok := p["ech-opts"].(map[string]any); len(entryURLs) > 0 && ok && tlsEnabled(ech["enable"]) && stringValue(ech["config"]) == "" {
 					name := stringValue(ech["query-server-name"])
 					if name == "" {
 						name = stringValue(p["servername"])

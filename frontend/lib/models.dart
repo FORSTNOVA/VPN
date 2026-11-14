@@ -217,18 +217,21 @@ class NodeHealth {
     required this.latencyMs,
     required this.consecutiveFailures,
     required this.cooldownUntil,
+    this.updatedAt,
   });
 
   final String state;
   final int latencyMs;
   final int consecutiveFailures;
   final String cooldownUntil;
+  final DateTime? updatedAt;
 
   factory NodeHealth.fromJson(Map<String, dynamic> value) => NodeHealth(
         state: value['state'] as String? ?? '',
         latencyMs: value['latencyMs'] as int? ?? 0,
         consecutiveFailures: value['consecutiveFailures'] as int? ?? 0,
         cooldownUntil: value['cooldownUntil'] as String? ?? '',
+        updatedAt: DateTime.tryParse(value['updatedAt'] as String? ?? ''),
       );
 }
 

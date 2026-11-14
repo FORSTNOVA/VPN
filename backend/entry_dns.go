@@ -61,7 +61,11 @@ func newEntryResolver(urls []string, iface, host string) (*D.Resolver, error) {
 	var main, bootstrap []D.NameServer
 	if len(urls) > 0 {
 		for _, url := range urls {
-			main = append(main, D.NameServer{Net: "https", Addr: url, ProxyName: iface})
+			if net.ParseIP(url) != nil {
+				main = append(main, D.NameServer{Net: "udp", Addr: net.JoinHostPort(url, "53"), ProxyName: iface})
+			} else {
+				main = append(main, D.NameServer{Net: "https", Addr: url, ProxyName: iface})
+			}
 		}
 		for _, server := range []string{"223.5.5.5:53", "119.29.29.29:53"} {
 			bootstrap = append(bootstrap, D.NameServer{Net: "udp", Addr: server, ProxyName: iface})

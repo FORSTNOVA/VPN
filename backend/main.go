@@ -1791,6 +1791,12 @@ var domesticDNSSuffixes string
 
 const parallelDoHServers = "    - \"https://1.1.1.1/dns-query#SmartVPN\"\n    - \"https://8.8.8.8/dns-query#SmartVPN\"\n"
 
+const (
+	entryDoH = "https://223.5.5.5/dns-query"
+	entryUDP1 = "223.5.5.5"
+	entryUDP2 = "119.29.29.29"
+)
+
 func dnsUpstreams(strict bool, relayAddr string) string {
 	if strict {
 		// Node hostnames must resolve before the tunnel can carry DNS. Using IP
@@ -1807,15 +1813,15 @@ func dnsUpstreams(strict bool, relayAddr string) string {
 			servers = fmt.Sprintf("    - \"tcp://%s\"\n", relayAddr)
 		}
 		return policy.String() + `  proxy-server-nameserver:
-    - https://223.5.5.5/dns-query
+    - ` + entryDoH + `
   default-nameserver:
     - https://223.5.5.5/dns-query
   nameserver:
 ` + servers
 	}
 	return `  proxy-server-nameserver:
-    - 223.5.5.5
-    - 119.29.29.29
+    - ` + entryUDP1 + `
+    - ` + entryUDP2 + `
   default-nameserver:
     - 223.6.6.6
     - 119.29.29.29

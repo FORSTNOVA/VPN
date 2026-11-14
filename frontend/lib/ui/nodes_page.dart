@@ -331,10 +331,21 @@ extension _NodesPage on _HomePageState {
     final latencyLabel =
         PathProbeButton(book: _probes, hops: [node.name], title: '测单节点');
 
-    final healthBadge = _Badge(
-      label: nodeHealthLabel(health?.state),
-      color: nodeHealthDot(health?.state),
-      tint: Tokens.idleTint,
+    final updated = health?.updatedAt;
+    final hasPatrol = updated != null && updated.year > 1;
+    final healthBadge = Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        _Badge(
+          label: hasPatrol ? nodeHealthLabel(health?.state) : '待巡检',
+          color: nodeHealthDot(hasPatrol ? health?.state : null),
+          tint: Tokens.idleTint,
+        ),
+        if (hasPatrol)
+          Text('巡检 ${formatHistoryTimestamp(updated.millisecondsSinceEpoch ~/ 1000).substring(5, 16)}',
+              style: Tokens.hint),
+      ],
     );
 
     final markBadge = active
@@ -456,7 +467,7 @@ extension _NodesPage on _HomePageState {
             latencyLabel,
             const SizedBox(width: 10),
             SizedBox(
-              width: 68,
+              width: 120,
               child:
                   Align(alignment: Alignment.centerRight, child: healthBadge),
             ),

@@ -9,6 +9,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+
+	"github.com/metacubex/mihomo/component/resolver"
 )
 
 // registerPlatformRoutes adds the routes only this platform can serve: the one
@@ -17,6 +19,10 @@ import (
 func registerPlatformRoutes(mux *http.ServeMux, token string, a *app) {
 	mux.HandleFunc("POST /api/tun/wintun", a.authorize(token, a.installWintun))
 }
+
+// The standalone Windows probe uses Mihomo without applying a kernel config.
+// Match the live kernel's default dual-stack outbound resolution before serving requests.
+func init() { resolver.DisableIPv6 = false }
 
 func main() {
 	base, err := os.UserConfigDir()
