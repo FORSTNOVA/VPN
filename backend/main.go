@@ -69,6 +69,7 @@ type app struct {
 	home            string
 	settings        settings
 	kernel          kernelRunner
+	dnsRelay        *adaptiveDNS
 	started         time.Time
 	proxyOn         bool
 	ctrlSecret      string
@@ -1523,6 +1524,7 @@ func (a *app) saveSettings() error {
 }
 
 type configOptions struct {
+	dnsRelayAddr     string
 	ChainProxies     []byte
 	MixedPort        int
 	ControllerPort   int
@@ -1600,7 +1602,7 @@ func generatedConfig(options configOptions) string {
 	config.WriteString("profile:\n  store-selected: true\n")
 	if options.TUN {
 		config.WriteString(tunConfigSection(options.DNSProtection))
-		config.WriteString(dnsConfigSection(options.ProxyServerDomains, options.DNSProtection, runtime.GOOS == "android"))
+		config.WriteString(dnsConfigSection(options.ProxyServerDomains, options.DNSProtection, runtime.GOOS == "android", options.dnsRelayAddr))
 	}
 	config.Write(options.ChainProxies)
 	config.WriteString("proxy-providers:\n")
@@ -1638,6 +1640,13 @@ func generatedConfig(options configOptions) string {
 			chinaProviderName, strconv.Quote(filepath.Join("providers", chinaIPListFile)))
 	}
 	config.WriteString("rules:\n")
+	if options.dnsRelayAddr != "" {
+		// The service connects through the kernel's mixed port. Pin the two
+		// DoH destinations ahead of subscription and domestic routing rules.
+		for _, ip := range dohIPs {
+			fmt.Fprintf(&config, "  - AND,((NETWORK,tcp),(DST-PORT,443),(IP-CIDR,%s/32,no-resolve)),SmartVPN\n", ip)
+		}
+	}
 	if options.TUN && findProcessMode == "always" {
 		for _, name := range options.GameBypass {
 			if rule := windowsGameRule(name); rule != "" {
@@ -1715,12 +1724,12 @@ func writeDomesticTCPRules(config *strings.Builder, options configOptions) {
 	add("AND,((NETWORK,tcp),(RULE-SET," + chinaProviderName + ")),DIRECT")
 }
 
-func dnsConfigSection(proxyServerFilters []string, strict, android bool) string {
+func dnsConfigSection(proxyServerFilters []string, strict, android bool, relayAddr string) string {
 	header := "dns:\n  enable: true\n  ipv6: false\n" + dnsListenLine
 	// Android apps can retain an answer when their UID moves outside the VPN.
 	// Return routable addresses even before the user creates a bypass list.
 	if android {
-		return header + "  enhanced-mode: redir-host\n" + dnsUpstreams(strict)
+		return header + "  enhanced-mode: redir-host\n" + dnsUpstreams(strict, relayAddr)
 	}
 	var filters strings.Builder
 	for _, entry := range proxyServerFilters {
@@ -1735,13 +1744,15 @@ func dnsConfigSection(proxyServerFilters []string, strict, android bool) string 
     - "+.msftncsi.com"
     - "www.msftconnecttest.com"
     - "time.*.com"
-%s`, tunFakeIPv4Range, filters.String()) + dnsUpstreams(strict)
+%s`, tunFakeIPv4Range, filters.String()) + dnsUpstreams(strict, relayAddr)
 }
 
 //go:embed domestic_dns_suffixes.txt
 var domesticDNSSuffixes string
 
-func dnsUpstreams(strict bool) string {
+const parallelDoHServers = "    - \"https://1.1.1.1/dns-query#SmartVPN\"\n    - \"https://8.8.8.8/dns-query#SmartVPN\"\n"
+
+func dnsUpstreams(strict bool, relayAddr string) string {
 	if strict {
 		// Node hostnames must resolve before the tunnel can carry DNS. Using IP
 		// endpoints avoids a separate system lookup of a resolver hostname.
@@ -1752,14 +1763,16 @@ func dnsUpstreams(strict bool) string {
 			// never matches a similarly named domain under another suffix.
 			fmt.Fprintf(&policy, "    \"+.%s\": [\"https://223.5.5.5/dns-query#DIRECT\", \"https://223.6.6.6/dns-query#DIRECT\"]\n", suffix)
 		}
+		servers := parallelDoHServers
+		if relayAddr != "" {
+			servers = fmt.Sprintf("    - \"tcp://%s\"\n", relayAddr)
+		}
 		return policy.String() + `  proxy-server-nameserver:
     - https://223.5.5.5/dns-query
   default-nameserver:
     - https://223.5.5.5/dns-query
   nameserver:
-    - "https://1.1.1.1/dns-query#SmartVPN"
-    - "https://8.8.8.8/dns-query#SmartVPN"
-`
+` + servers
 	}
 	return `  proxy-server-nameserver:
     - 223.5.5.5

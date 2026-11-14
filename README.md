@@ -2,7 +2,7 @@
 
 This repository implements the SmartVPN Windows and Android client described in `SmartVPN_Windows_Android_开发文档.docx`, including shared Go scheduling logic, Windows TUN, and Android VpnService. The Word document is a design reference; this README and [CHANGELOG.md](CHANGELOG.md) describe the current implementation.
 
-**Download v0.2.13** · [Android ARM64 APK](https://github.com/FORSTNOVA/VPN/releases/download/v0.2.13/SmartVPN-0.2.13-android-arm64.apk) · [Windows x64 portable ZIP](https://github.com/FORSTNOVA/VPN/releases/download/v0.2.13/SmartVPN-0.2.13-portable.zip) · [Release notes and checksums](https://github.com/FORSTNOVA/VPN/releases/tag/v0.2.13). This is a binary-only update. The public source corresponds to v0.2.11.
+**Windows x64** · [v0.2.14 standalone portable ZIP](https://github.com/FORSTNOVA/VPN/releases/download/v0.2.14/SmartVPN-0.2.14-portable.zip) · [Release notes and checksum](https://github.com/FORSTNOVA/VPN/releases/tag/v0.2.14). **Android ARM64** · [v0.2.13 APK](https://github.com/FORSTNOVA/VPN/releases/download/v0.2.13/SmartVPN-0.2.13-android-arm64.apk).
 
 - **v0.2.13 (release packages only)** uses the subscription’s DNS-over-HTTPS resolver for node hostnames during single-node latency tests and connections. Both platforms can try multiple node addresses concurrently and display the subscription’s proxy groups and routing rules. On phones, the route tools move into a separate panel to leave more room for the node list. The Windows package retains the previous release’s optimized kernel.
 - **v0.2.11** adds saved multi-hop proxy chains and HTTPS latency tests for individual nodes, all nodes, and chain paths on Windows and Android. Test results persist across restarts.

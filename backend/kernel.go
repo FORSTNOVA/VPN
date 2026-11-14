@@ -111,6 +111,19 @@ func (a *app) startMihomoLocked() error {
 		options.ProxyServerDomains = mergeProxyServerDomains(
 			proxyServerDomains(profile), manualServerDomains(a.manualNodes))
 	}
+	var relay *adaptiveDNS
+	if options.TUN && options.DNSProtection {
+		relay, err = newAdaptiveDNS(a.mixedPort)
+		if err != nil {
+			return err
+		}
+		options.dnsRelayAddr = relay.listener.Addr().String()
+		defer func() {
+			if a.dnsRelay != relay {
+				relay.close()
+			}
+		}()
+	}
 	if err := os.WriteFile(configPath, []byte(generatedConfig(options)), 0600); err != nil {
 		return errors.New("could not write Mihomo configuration")
 	}
@@ -144,6 +157,10 @@ func (a *app) startMihomoLocked() error {
 		}
 	}
 	a.startTrafficHistoryLocked()
+	a.dnsRelay = relay
+	if relay != nil {
+		go relay.monitor()
+	}
 	return nil
 }
 
@@ -162,6 +179,10 @@ func proxyListenPort(saved int) (int, error) {
 // stopMihomoLocked ends the kernel and leaves nothing of the configuration in
 // place, so a later run cannot mistake a stale file for a live one.
 func (a *app) stopMihomoLocked() error {
+	if a.dnsRelay != nil {
+		a.dnsRelay.close()
+		a.dnsRelay = nil
+	}
 	if a.trafficHistoryCancel != nil {
 		a.collectTrafficHistoryLocked()
 		a.stopTrafficHistoryLocked()
@@ -189,6 +210,10 @@ func (a *app) kernelExited(which kernelRunner) {
 	defer a.mu.Unlock()
 	if a.kernel != which {
 		return
+	}
+	if a.dnsRelay != nil {
+		a.dnsRelay.close()
+		a.dnsRelay = nil
 	}
 	a.stopTrafficHistoryLocked()
 	a.kernel = nil
