@@ -30,6 +30,25 @@ void main() {
     await tester.pumpAndSettle();
     expect(dialog, findsNothing);
   }, variant: TargetPlatformVariant.only(TargetPlatform.windows), skip: !Platform.isWindows);
+  testWidgets('phone keeps route actions in a dismissible sheet', (tester) async {
+    tester.view.physicalSize=const Size(360,640);
+    tester.view.devicePixelRatio=1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(const SmartVpnApp());
+    await tester.pumpAndSettle();
+    await tester.tap(find.descendant(of:find.byType(NavigationBar), matching:find.text('线路')));
+    await tester.pumpAndSettle();
+    expect(find.text('测全部节点'),findsNothing);
+    await tester.tap(find.byTooltip('线路工具'));
+    await tester.pumpAndSettle();
+    expect(find.text('订阅分组与分流'),findsOneWidget);
+    expect(find.text('测全部节点'),findsOneWidget);
+    await tester.tap(find.text('按来源'));
+    await tester.pumpAndSettle();
+    expect(find.text('测全部节点'),findsNothing);
+    expect(tester.takeException(),isNull);
+  });
   for (final size in [
     const Size(390, 844),
     const Size(800, 900),

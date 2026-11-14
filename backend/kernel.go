@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"gopkg.in/yaml.v3"
 	"log"
 	"net"
 	"os"
@@ -93,11 +94,22 @@ func (a *app) startMihomoLocked() error {
 		ProviderPath:         filepath.Join("providers", "subscription.yaml"),
 		ControllerSecret:     a.ctrlSecret,
 		Rules:                subscriptionRules(profile),
+		EntryDNS:             entryDNS(profile),
 		TUN:                  a.connectionModeLocked() != modeSystemProxy,
 		trafficPolicy:        a.settings.trafficPolicy,
 		SubscriptionProvider: a.settings.SubscriptionURL != "",
 		ManualProvider:       len(a.manualNodes) > 0,
 		ChinaDirect:          a.chinaDirect.Available && a.chinaRuleSupported(),
+	}
+	if a.settings.ImportPolicy {
+		options.SourceRuleOrder = true
+		var p sourcePolicy
+		if a.settings.SubscriptionURL != "" {
+			if yaml.Unmarshal(profile, &p) != nil {
+				return errors.New("无法解析订阅规则")
+			}
+		}
+		_, options.Rules = supportedRules(p)
 	}
 	if options.TUN && options.DomesticWeb && !options.ChinaDirect {
 		return errors.New("国内加速需要可用的国内直连列表，请获取或更新列表后重试")

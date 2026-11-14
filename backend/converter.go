@@ -631,6 +631,9 @@ func parseSubscriptionBodyToProxies(body []byte) ([]map[string]any, []proxyNode,
 // ensureClashYAML ensures that the subscription body stored in providers/subscription.yaml
 // is valid Clash YAML that Mihomo can always parse without error.
 func ensureClashYAML(body []byte) ([]byte, []proxyNode, error) {
+	if decoded, err := decodeSubscriptionBase64(string(body)); err == nil && len(yamlProfileNodes(decoded)) > 0 {
+		return decoded, yamlProfileNodes(decoded), nil
+	}
 	text := strings.TrimSpace(string(body))
 	// If already a valid Clash YAML with proxies, keep it
 	if (strings.HasPrefix(text, "proxies:") || strings.Contains(text, "\nproxies:")) &&
@@ -667,11 +670,27 @@ func mergeSubscriptionSources(sources []SubscriptionSource) ([]byte, []proxyNode
 	var allNodes []proxyNode
 	usedNames := make(map[string]struct{})
 
-	for _, src := range sources {
+	policies := map[string][]string{}
+	var merged sourcePolicy
+	labels := map[string]string{}
+	usedLabels := map[string]struct{}{}
+	var sections []policySection
+	for index, src := range sources {
 		proxies, nodes, err := parseSubscriptionBodyToProxies(src.Body)
 		if err != nil || len(proxies) == 0 {
 			continue
 		}
+		for host, urls := range entryDNS(src.Body) {
+			if _, exists := policies[host]; !exists {
+				policies[host] = urls
+			}
+		}
+		label := strings.TrimSpace(src.Label)
+		if label == "" {
+			label = fmt.Sprintf("订阅%d", index+1)
+		}
+		label = uniqueMergedNodeName(label, usedLabels)
+		names := map[string]string{}
 		prefix := strings.TrimSpace(src.Prefix)
 		for i, p := range proxies {
 			name := stringValue(p["name"])
@@ -682,11 +701,52 @@ func mergeSubscriptionSources(sources []SubscriptionSource) ([]byte, []proxyNode
 				name = prefix + " " + name
 			}
 			name = uniqueMergedNodeName(name, usedNames)
+			names[stringValue(p["name"])] = name
 			p["name"] = name
+			labels[name] = label
 			if i < len(nodes) {
 				nodes[i].Name = name
+				nodes[i].SourceLabel = label
 			}
 			allProxies = append(allProxies, p)
+		}
+		var p sourcePolicy
+		if yaml.Unmarshal(src.Body, &p) == nil {
+			sections = append(sections, policySection{Label: label, Groups: p.Groups, Rules: append(append([]string{}, p.Rules...), p.MergedRules...)})
+			p.Groups = append([]sourceGroup(nil), p.Groups...)
+			for i := range p.Groups {
+				p.Groups[i].Members = append([]string(nil), p.Groups[i].Members...)
+			}
+			if len(sources) > 1 {
+				for i, g := range p.Groups {
+					alias := label + " / " + g.Name
+					names[g.Name] = alias
+					p.Groups[i].Name = alias
+				}
+			}
+			for i, g := range p.Groups {
+				for j, m := range g.Members {
+					if alias, ok := names[m]; ok && m != "DIRECT" && m != "REJECT" {
+						p.Groups[i].Members[j] = alias
+					}
+				}
+			}
+			merged.Groups = append(merged.Groups, p.Groups...)
+			for _, r := range append(p.Rules, p.MergedRules...) {
+				parts := strings.Split(r, ",")
+				j := len(parts) - 1
+				if j > 0 && strings.TrimSpace(parts[j]) == "no-resolve" {
+					j--
+				}
+				if j > 0 {
+					t := strings.TrimSpace(parts[j])
+					if alias, ok := names[t]; ok && t != "DIRECT" && t != "REJECT" {
+						parts[j] = alias
+						r = strings.Join(parts, ",")
+					}
+				}
+				merged.Rules = append(merged.Rules, r)
+			}
 		}
 		allNodes = append(allNodes, nodes...)
 	}
@@ -694,7 +754,17 @@ func mergeSubscriptionSources(sources []SubscriptionSource) ([]byte, []proxyNode
 	if len(allProxies) == 0 {
 		return nil, nil, errNoUsableNodes
 	}
-	mergedYAML, err := yaml.Marshal(map[string]any{"proxies": allProxies})
+	out := map[string]any{"proxies": allProxies, "smartvpn-source-labels": labels, "smartvpn-policy-sections": sections}
+	if len(policies) > 0 {
+		out["dns"] = map[string]any{"nameserver-policy": policies}
+	}
+	if len(merged.Groups) > 0 {
+		out["proxy-groups"] = merged.Groups
+	}
+	if len(merged.Rules) > 0 {
+		out["smartvpn-source-rules"] = merged.Rules
+	}
+	mergedYAML, err := yaml.Marshal(out)
 	if err != nil {
 		return nil, nil, errors.New("could not marshal merged proxies")
 	}

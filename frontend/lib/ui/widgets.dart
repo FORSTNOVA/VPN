@@ -938,18 +938,16 @@ class _PowerSwitchHero extends StatelessWidget {
     required this.connected,
     required this.busy,
     required this.port,
-    required this.latency,
+    required this.probe,
     required this.onToggle,
-    required this.onMeasure,
     required this.statusDetail,
   });
 
   final bool connected;
   final bool busy;
   final int? port;
-  final int? latency;
+  final Widget probe;
   final VoidCallback onToggle;
-  final VoidCallback onMeasure;
   final String statusDetail;
 
   @override
@@ -974,11 +972,7 @@ class _PowerSwitchHero extends StatelessWidget {
                   connected ? Icons.stop_rounded : Icons.arrow_forward_rounded),
               label: Text(busy ? '正在处理…' : (connected ? '断开代理连接' : '启动代理连接')),
             ),
-            OutlinedButton.icon(
-              onPressed: busy || !connected ? null : onMeasure,
-              icon: const Icon(Icons.speed_rounded, size: 18),
-              label: Text(latency == null ? '测试延迟' : '$latency ms'),
-            ),
+            probe,
           ]),
         ]),
       );

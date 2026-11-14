@@ -1,5 +1,6 @@
 import 'ui/game_bypass_dialog.dart';
 import 'ui/chain_editor.dart';
+import 'ui/subscription_policy_page.dart';
 import 'ui/probe_book.dart';
 import 'ui/desktop_pet_settings_dialog.dart';
 import 'dart:async';
@@ -101,7 +102,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   bool _hasFetchedNodes = false;
   String _savedSubscriptionUrl = '';
   String? _error;
-  int? _latency;
   List<ProxyNode> _nodes = const [];
   String? _selectedNode;
   String _activeNode = '';
@@ -148,7 +148,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int _desktopPetHeight = 82;
 
   _AppPage _page = _AppPage.connect;
-  NodeGrouping _nodeGrouping = NodeGrouping.region;
+  NodeGrouping _nodeGrouping = NodeGrouping.source;
+ final _expandedSources=<String>{};
   String _nodeQuery = '';
   late final _probes = ProbeBook((hops) =>
       _request('POST', '/api/nodes/chain/probe', body: {'hops': hops}));
@@ -878,7 +879,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     setState(() {
       _busy = true;
       _error = null;
-      _latency = null;
       _diagnose = null;
       _speed = null;
     });
@@ -1196,23 +1196,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
   }
 
-  Future<void> _measureLatency() async {
-    setState(() {
-      _busy = true;
-      _error = null;
-    });
-    try {
-      final result = await _request('GET', '/api/latency');
-      setState(() => _latency = result['latencyMs'] as int?);
-    } catch (e) {
-      setState(() => _error = e.toString().replaceFirst('Exception: ', ''));
-    } finally {
-      if (mounted) setState(() => _busy = false);
-    }
+  List<String> get _homeProbeHops {
+    if (_chainEnabled) return _chainHops;
+    final node = _connected ? _activeNode : _selectedNode;
+    if (node == null || !_nodes.any((n) => n.name == node)) return const [];
+    return [node];
   }
 
-  /// Measures every node in one kernel call, which is the only way to get
-  /// comparable numbers for nodes the health sweep never touches.
+  Future<void> _measureLatency() async {
+    final hops = _homeProbeHops;
+    if (hops.isNotEmpty) await _probes.run(hops);
+  }
+
   Future<void> _measureAllNodes() async {
     if (_measuringNodes) return;
     final names = _nodes.map((n) => n.name).toSet().toList();

@@ -110,6 +110,14 @@ func openStore(path string) (*store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	var hasDetails int
+	if err = db.QueryRow("SELECT count(*) FROM pragma_table_info('probe_results') WHERE name='details'").Scan(&hasDetails); err == nil && hasDetails == 0 {
+		_, err = db.Exec("ALTER TABLE probe_results ADD COLUMN details TEXT NOT NULL DEFAULT ''")
+	}
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &store{db: db}, nil
 }
 

@@ -53,6 +53,7 @@ func decodeSubscriptionBase64(input string) ([]byte, error) {
 func yamlProfileNodes(body []byte) []proxyNode {
 	var profile struct {
 		Proxies []subscriptionProxy `yaml:"proxies"`
+		Labels  map[string]string   `yaml:"smartvpn-source-labels"`
 	}
 	if yaml.Unmarshal(body, &profile) != nil || len(profile.Proxies) == 0 {
 		return nil
@@ -69,7 +70,7 @@ func yamlProfileNodes(body []byte) []proxyNode {
 			}
 		}
 		nodes = append(nodes, proxyNode{
-			Name: proxy.Name, Type: proxy.Type, Network: proxy.Network,
+			SourceLabel: profile.Labels[proxy.Name], Name: proxy.Name, Type: proxy.Type, Network: proxy.Network,
 			TLS: tlsEnabled(proxy.TLS), WsHost: wsHost, WsPath: proxy.WsOpts.Path != "",
 		})
 	}
@@ -536,6 +537,7 @@ func (a *app) fetchProfileLocked() ([]proxyNode, error) {
 				for i := range nodes {
 					nodes[i].Selected = nodes[i].Name == a.settings.SelectedNode
 				}
+				a.labelSingleSource(nodes)
 				a.cachedNodes = append([]proxyNode(nil), nodes...)
 				a.profileFromCache = true
 				return nodes, nil
@@ -597,6 +599,7 @@ func (a *app) fetchProfileLocked() ([]proxyNode, error) {
 	for i := range nodes {
 		nodes[i].Selected = nodes[i].Name == a.settings.SelectedNode
 	}
+	a.labelSingleSource(nodes)
 	a.cachedNodes = append([]proxyNode(nil), nodes...)
 	if err := a.saveCachedNodesLocked(nodes); err != nil {
 		return nil, errors.New("could not save the fetched node list")

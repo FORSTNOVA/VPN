@@ -29,10 +29,10 @@ import (
 // retries on the same unreachable upstream.
 var (
 	androidDNSServers = []string{
-		"223.5.5.5:53",      // AliDNS primary
+		"223.5.5.5:53",       // AliDNS primary
 		"119.29.29.29:53",    // DNSPod / Tencent primary
 		"114.114.114.114:53", // 114DNS (carrier-friendly nationwide)
-		"223.6.6.6:53",      // AliDNS secondary
+		"223.6.6.6:53",       // AliDNS secondary
 		"180.76.76.76:53",    // Baidu DNS
 	}
 	androidDNSCounter uint32

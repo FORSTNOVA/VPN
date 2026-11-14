@@ -15,7 +15,7 @@ void main() {
             initialName: 'test',
             book: ProbeBook((prefix) async {
               tested = prefix;
-              return {'hops': prefix, 'delay': 123, 'measured': 0};
+              return {'hops': prefix, 'delay': 123, 'warmDelay': 31, 'measured': 0};
             }),
             save: (name, hops) async {
               saved = hops;
@@ -25,7 +25,7 @@ void main() {
     await tester.tap(find.text('测此路径').last);
     await tester.pumpAndSettle();
     expect(tested, ['entry', 'exit']);
-    expect(find.text('测此路径 · 123 ms'), findsOneWidget);
+    expect(find.text('测此路径 · 首次 123 ms · 连接后 31 ms'), findsOneWidget);
     await tester.tap(find.text('exit'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('保存'));

@@ -21,6 +21,7 @@ class ProxyNode {
     required this.wsHostConfigured,
     required this.wsPathConfigured,
     this.manual = false,
+    this.sourceLabel = "",
   });
 
   final String name;
@@ -32,6 +33,7 @@ class ProxyNode {
   final bool wsHostConfigured;
   final bool wsPathConfigured;
   final bool manual;
+  final String sourceLabel;
 
   factory ProxyNode.fromJson(Map<String, dynamic> json) => ProxyNode(
         name: json['name'] as String? ?? '',
@@ -43,6 +45,7 @@ class ProxyNode {
         wsHostConfigured: json['wsHostConfigured'] as bool? ?? false,
         wsPathConfigured: json['wsPathConfigured'] as bool? ?? false,
         // True for a node the user pasted rather than one the subscription lists.
+        sourceLabel: json['sourceLabel'] as String? ?? '',
         manual: json['manual'] as bool? ?? false,
       );
 }
@@ -1403,6 +1406,7 @@ String nodeLineKind(String name) {
 /// Extracts subscription prefix (e.g. "[主力]") from the node name.
 String nodeSourceKind(ProxyNode node) {
   if (node.manual) return '手动节点';
+  if (node.sourceLabel.isNotEmpty) return node.sourceLabel;
   final trimmed = node.name.trim();
   if (trimmed.startsWith('[')) {
     final end = trimmed.indexOf(']');

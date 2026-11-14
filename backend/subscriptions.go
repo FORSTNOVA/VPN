@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"gopkg.in/yaml.v3"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -251,6 +253,7 @@ func (a *app) useCachedProfileLocked(id string) error {
 		_ = os.WriteFile(path+".format", format, 0600)
 	}
 	nodes := parseProfileNodes(body)
+	a.labelSingleSource(nodes)
 	for i := range nodes {
 		nodes[i].Selected = nodes[i].Name == a.settings.SelectedNode
 	}
@@ -672,19 +675,7 @@ func (a *app) mergeAllEnabledSubscriptionsLocked() ([]proxyNode, error) {
 // its own last-good profile, which lets a single-source refresh update the live
 // aggregate while offline sources keep their prior nodes.
 func (a *app) mergeEnabledSubscriptionCachesLocked() ([]proxyNode, error) {
-	var sources []SubscriptionSource
-	for _, entry := range a.subscriptions {
-		if !entry.Enabled || strings.TrimSpace(entry.URL) == "" {
-			continue
-		}
-		body, err := os.ReadFile(a.profileCachePath(entry.ID))
-		if err != nil || len(parseProfileNodes(body)) == 0 {
-			continue
-		}
-		sources = append(sources, SubscriptionSource{
-			ID: entry.ID, Label: entry.Label, Prefix: entry.Prefix, Body: body,
-		})
-	}
+	sources := a.cachedSources()
 	if len(sources) == 0 {
 		return nil, errors.New("没有可用的订阅缓存，请执行「一键合并更新」")
 	}
@@ -1104,4 +1095,110 @@ func (a *app) deleteSubscription(w http.ResponseWriter, r *http.Request) {
 	_ = os.Remove(a.profileCachePath(id))
 	_ = os.Remove(a.profileCachePath(id) + ".format")
 	writeJSON(w, map[string]any{"ok": true, "activeUrl": a.settings.SubscriptionURL})
+}
+
+func (a *app) cachedSources() []SubscriptionSource {
+	var sources []SubscriptionSource
+	for _, entry := range a.subscriptions {
+		if !entry.Enabled || strings.TrimSpace(entry.URL) == "" {
+			continue
+		}
+		body, err := os.ReadFile(a.profileCachePath(entry.ID))
+		if err != nil || len(parseProfileNodes(body)) == 0 {
+			continue
+		}
+		sources = append(sources, SubscriptionSource{
+			ID: entry.ID, Label: entry.Label, Prefix: entry.Prefix, Body: body,
+		})
+	}
+	return sources
+}
+
+func (a *app) labelSingleSource(nodes []proxyNode) {
+	if a.settings.SubscriptionURL == "" || a.settings.SubscriptionURL == mergedSubscriptionURL {
+		return
+	}
+	label := "当前订阅"
+	for _, entry := range a.subscriptions {
+		if entry.URL == a.settings.SubscriptionURL && entry.Label != "" {
+			label = entry.Label
+			break
+		}
+	}
+	for i := range nodes {
+		if !nodes[i].Manual && nodes[i].SourceLabel == "" {
+			nodes[i].SourceLabel = label
+		}
+	}
+}
+
+// Repair only missing metadata. Keep the active proxy list, order, user settings
+// and database intact even if saved subscriptions have since been reordered.
+func (a *app) restoreSourceLabels() {
+	if a.settings.SubscriptionURL != mergedSubscriptionURL {
+		a.labelSingleSource(a.cachedNodes)
+		return
+	}
+	file := a.profilePath()
+	original, err := os.ReadFile(file)
+	if err != nil {
+		return
+	}
+	var current map[string]any
+	if yaml.Unmarshal(original, &current) != nil || current == nil {
+		return
+	}
+	if _, ok := current["smartvpn-policy-sections"]; ok {
+		return
+	}
+	sources := a.cachedSources()
+	enabled := 0
+	for _, sub := range a.subscriptions {
+		if sub.Enabled && strings.TrimSpace(sub.URL) != "" {
+			enabled++
+		}
+	}
+	if len(sources) != enabled {
+		return
+	}
+	rebuilt, _, err := mergeSubscriptionSources(sources)
+	if err != nil {
+		return
+	}
+	old, err := proxyIndex(original, nil)
+	if err != nil {
+		return
+	}
+	fresh, err := proxyIndex(rebuilt, nil)
+	if err != nil || !reflect.DeepEqual(old, fresh) {
+		return
+	}
+	var meta map[string]any
+	if yaml.Unmarshal(rebuilt, &meta) != nil {
+		return
+	}
+	for _, key := range []string{"proxy-groups", "smartvpn-source-rules", "smartvpn-source-labels", "smartvpn-policy-sections", "dns"} {
+		if _, ok := current[key]; !ok && meta[key] != nil {
+			current[key] = meta[key]
+		}
+	}
+	patched, err := yaml.Marshal(current)
+	if err != nil {
+		return
+	}
+	tmp := file + ".repair.tmp"
+	if err = os.WriteFile(tmp, patched, 0600); err != nil {
+		return
+	}
+	if err = os.Rename(tmp, file); err != nil {
+		os.Remove(tmp)
+		return
+	}
+	labels, _ := meta["smartvpn-source-labels"].(map[string]any)
+	for i := range a.cachedNodes {
+		if !a.cachedNodes[i].Manual {
+			a.cachedNodes[i].SourceLabel = stringValue(labels[a.cachedNodes[i].Name])
+		}
+	}
+	_ = a.saveCachedNodesLocked(a.cachedNodes)
 }

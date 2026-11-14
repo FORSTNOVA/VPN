@@ -14,7 +14,16 @@ class ProbeBook extends ChangeNotifier {
     final row = _results[k];
     if (_errors.containsKey(k)) return '测试异常';
     if (row == null) return null;
-    return row['error'] != null ? '未通过' : '${row['delay']} ms';
+    final stage = row['failureStage'];
+    final failed = stage == null ? '未通过' : '未通过（$stage）';
+    if (row['error'] != null) return failed;
+    final warm = row['warmDelay'];
+    final warmText = warm != null
+        ? '$warm ms'
+        : row['warmError'] != null
+            ? failed
+            : '未测';
+    return '首次 ${row['delay']} ms · 连接后 $warmText';
   }
 
   String detail(List<String> hops) {
@@ -25,7 +34,15 @@ class ProbeBook extends ChangeNotifier {
         .toString()
         .split('.')
         .first;
-    return '${hops.join(" → ")}\n$time  ${row['error'] ?? label(hops)}';
+    final ip = row['entryIP'];
+    final entry = row['diagnosticsVersion'] == null
+        ? ''
+        : ip == null
+            ? '\n入口地址：未观测到'
+            : '\n${row['entryAttempt'] == true ? '尝试入口' : '连接入口'}：$ip (${row['entryFamily']})';
+    final stage =
+        row['failureStage'] == null ? '' : '\n失败阶段：${row['failureStage']}';
+    return '${hops.length} 跳 · ${hops.join(" → ")}\n${row["target"] ?? "https://www.gstatic.com/generate_204"}\n$time$entry$stage\n${row["error"] ?? label(hops)}${row["warmError"] == null ? "" : "\n${row["warmError"]}"}';
   }
 
   List<List<String>> pathsTo(String name) => _results.values

@@ -17,95 +17,116 @@ extension _NodesPage on _HomePageState {
     final items = <_NodeListItem>[];
     for (final group in groups) {
       items.add(_NodeListItem.group(group.label, group.nodes.length));
+      if (_nodeGrouping == NodeGrouping.source &&
+          groups.length > 1 &&
+          _nodeQuery.trim().isEmpty &&
+          !_expandedSources.contains(group.label)) continue;
       for (final node in group.nodes) {
         items.add(_NodeListItem.entry(node));
       }
     }
 
+    final mobile = MediaQuery.sizeOf(context).width < Tokens.mobileBreakpoint ||
+        (Platform.isAndroid &&
+            MediaQuery.sizeOf(context).shortestSide < Tokens.mobileBreakpoint);
     return Column(children: [
-      Padding(
-        padding: EdgeInsets.fromLTRB(
-          narrow ? 14 : 28,
-          narrow ? 12 : 20,
-          narrow ? 14 : 28,
-          14,
-        ),
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: Tokens.contentMaxWidth),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Top Search and Grouping Controls
-                if (narrow) ...[
-                  _nodeSearchField(),
-                  const SizedBox(height: 10),
-                  Row(children: [
-                    Expanded(child: _groupingSegmentedButton()),
-                  ]),
-                  const SizedBox(height: 10),
-                  Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
+      if (mobile)
+        Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: Row(children: [
+              Expanded(child: _nodeSearchField()),
+              IconButton(
+                  tooltip: "线路工具",
+                  icon: const Icon(Icons.tune),
+                  onPressed: _mobileRouteTools)
+            ]))
+      else
+        Padding(
+          padding: EdgeInsets.fromLTRB(
+            narrow ? 14 : 28,
+            narrow ? 12 : 20,
+            narrow ? 14 : 28,
+            14,
+          ),
+          child: Center(
+            child: ConstrainedBox(
+              constraints:
+                  const BoxConstraints(maxWidth: Tokens.contentMaxWidth),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  // Top Search and Grouping Controls
+                  if (narrow) ...[
+                    _nodeSearchField(),
+                    const SizedBox(height: 10),
+                    Row(children: [
+                      Expanded(child: _groupingSegmentedButton()),
+                    ]),
+                    const SizedBox(height: 10),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        _measureAllNodesButton(),
+                        _reloadNodesButton(),
+                        _addNodeButton(),
+                      ],
+                    ),
+                  ] else
+                    Row(children: [
+                      _groupingSegmentedButton(),
+                      const SizedBox(width: 14),
+                      Expanded(child: _nodeSearchField()),
+                      const SizedBox(width: 10),
                       _measureAllNodesButton(),
+                      const SizedBox(width: 8),
                       _reloadNodesButton(),
+                      const SizedBox(width: 8),
                       _addNodeButton(),
+                    ]),
+                  const SizedBox(height: 14),
+
+                  // Mode Selection and Lock Hint
+                  Wrap(
+                    spacing: 10,
+                    runSpacing: 8,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      const Text('选择模式', style: Tokens.hint),
+                      if (!_chainEnabled) ...[
+                        _ModeChip(
+                          label: '自动选择',
+                          selected: _lockedRegion.isEmpty &&
+                              _selectedNode == autoGroup,
+                          onTap: () => unawaited(_selectNode(autoGroup)),
+                        ),
+                        _ModeChip(
+                          label: '故障转移',
+                          selected: _lockedRegion.isEmpty &&
+                              _selectedNode == fallbackGroup,
+                          onTap: () => unawaited(_selectNode(fallbackGroup)),
+                        ),
+                        const SizedBox(width: 4),
+                      ],
+                      OutlinedButton.icon(
+                        onPressed: _busy ? null : () => unawaited(_editChain()),
+                        icon: const Icon(Icons.link, size: 16),
+                        label: const Text('代理链'),
+                      ),
+                      if (_chainEnabled)
+                        Text(_chainName.isEmpty
+                            ? _chainHops.join(' → ')
+                            : _chainName),
+                      TextButton(
+                          onPressed: _openPolicy, child: const Text('订阅分组与分流')),
+                      _lockHint(),
                     ],
                   ),
-                ] else
-                  Row(children: [
-                    _groupingSegmentedButton(),
-                    const SizedBox(width: 14),
-                    Expanded(child: _nodeSearchField()),
-                    const SizedBox(width: 10),
-                    _measureAllNodesButton(),
-                    const SizedBox(width: 8),
-                    _reloadNodesButton(),
-                    const SizedBox(width: 8),
-                    _addNodeButton(),
-                  ]),
-                const SizedBox(height: 14),
-
-                // Mode Selection and Lock Hint
-                Wrap(
-                  spacing: 10,
-                  runSpacing: 8,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    const Text('选择模式', style: Tokens.hint),
-                    if (!_chainEnabled) ...[
-                      _ModeChip(
-                        label: '自动选择',
-                        selected:
-                            _lockedRegion.isEmpty && _selectedNode == autoGroup,
-                        onTap: () => unawaited(_selectNode(autoGroup)),
-                      ),
-                      _ModeChip(
-                        label: '故障转移',
-                        selected: _lockedRegion.isEmpty &&
-                            _selectedNode == fallbackGroup,
-                        onTap: () => unawaited(_selectNode(fallbackGroup)),
-                      ),
-                      const SizedBox(width: 4),
-                    ],
-                    OutlinedButton.icon(
-                      onPressed: _busy ? null : () => unawaited(_editChain()),
-                      icon: const Icon(Icons.link, size: 16),
-                      label: const Text('代理链'),
-                    ),
-                    if (_chainEnabled)
-                      Text(_chainName.isEmpty
-                          ? _chainHops.join(' → ')
-                          : _chainName),
-                    _lockHint(),
-                  ],
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
-      ),
       const Divider(height: 1),
       Expanded(
         child: groups.isEmpty
@@ -143,7 +164,21 @@ extension _NodesPage on _HomePageState {
                           maxWidth: Tokens.contentMaxWidth),
                       child: switch (item) {
                         _GroupRow(:final label, :final count) =>
-                          _groupRow(label, count),
+                          _nodeGrouping == NodeGrouping.source &&
+                                  groups.length > 1 &&
+                                  _nodeQuery.trim().isEmpty
+                              ? InkWell(
+                                  onTap: () => _refresh(() {
+                                        if (!_expandedSources.remove(label))
+                                          _expandedSources.add(label);
+                                      }),
+                                  child: Row(children: [
+                                    Icon(_expandedSources.contains(label)
+                                        ? Icons.expand_more
+                                        : Icons.chevron_right),
+                                    Expanded(child: _groupRow(label, count))
+                                  ]))
+                              : _groupRow(label, count),
                         _EntryRow(:final node) => _nodeRow(node),
                       },
                     ),
@@ -152,6 +187,94 @@ extension _NodesPage on _HomePageState {
               ),
       ),
     ]);
+  }
+
+  Future<void> _mobileRouteTools() async {
+    final action = await showModalBottomSheet<String>(
+        context: context,
+        useSafeArea: true,
+        isScrollControlled: true,
+        builder: (sheet) => SingleChildScrollView(
+            padding: const EdgeInsets.all(16),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              _groupingSegmentedButtonForSheet(sheet),
+              for (final item in <(String, bool)>[
+                ('订阅分组与分流', true),
+                ('代理链', !_busy),
+                ('测全部节点', !_measuringNodes && _nodes.isNotEmpty),
+                (_connected ? '刷新' : '获取节点', !_busy),
+                ('添加节点', !_busy),
+                if (!_chainEnabled) ...[('自动选择', !_busy), ('故障转移', !_busy)]
+              ])
+                ListTile(
+                    dense: true,
+                    title: Text(item.$1),
+                    enabled: item.$2,
+                    onTap: () => Navigator.pop(sheet, item.$1)),
+            ])));
+    if (!mounted || action == null) return;
+    switch (action) {
+      case '订阅分组与分流':
+        await _openPolicy();
+        break;
+      case '代理链':
+        await _editChain();
+        break;
+      case '测全部节点':
+        await _measureAllNodes();
+        break;
+      case '刷新':
+        await _refreshNodes();
+        break;
+      case '获取节点':
+        await _fetchNodes();
+        break;
+      case '添加节点':
+        await _showAddNodeDialog();
+        break;
+      case '自动选择':
+        await _selectNode(autoGroup);
+        break;
+      case '故障转移':
+        await _selectNode(fallbackGroup);
+        break;
+    }
+  }
+
+  Widget _groupingSegmentedButtonForSheet(BuildContext sheet) =>
+      Wrap(children: [
+        for (final mode in NodeGrouping.values)
+          Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 3),
+              child: ChoiceChip(
+                  label: Text(switch (mode) {
+                    NodeGrouping.region => '按地区',
+                    NodeGrouping.line => '按线路',
+                    NodeGrouping.source => '按来源'
+                  }),
+                  selected: _nodeGrouping == mode,
+                  onSelected: (_) {
+                    _refresh(() => _nodeGrouping = mode);
+                    Navigator.pop(sheet);
+                  }))
+      ]);
+
+  Future<void> _openPolicy() async {
+    try {
+      final data = await _request('GET', '/api/subscription/policy');
+      if (!mounted) return;
+      await Navigator.of(context).push<void>(MaterialPageRoute(
+          builder: (_) => SubscriptionPolicyPage(
+              data: data,
+              toggle: (enabled) async {
+                await _request('PUT', '/api/settings',
+                    body: {'importPolicy': enabled});
+              })));
+    } catch (e) {
+      if (mounted)
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(e.toString())));
+    }
   }
 
   Widget _groupingSegmentedButton() => SegmentedButton<NodeGrouping>(
@@ -186,7 +309,7 @@ extension _NodesPage on _HomePageState {
             color: Tokens.yellow,
           ),
           const SizedBox(width: 6),
-          Text(label, style: Tokens.section),
+          Flexible(child: Text(label, style: Tokens.section)),
           const SizedBox(width: 8),
           _Badge(
             label: '$count',
@@ -311,17 +434,18 @@ extension _NodesPage on _HomePageState {
                     }),
                 if (narrow) ...[
                   const SizedBox(height: 6),
-                  Row(children: [
-                    latencyLabel,
-                    const SizedBox(width: 8),
-                    healthBadge,
-                    if (active || selected) ...[
-                      const SizedBox(width: 8),
-                      markBadge,
-                    ],
-                    const Spacer(),
-                    if (deleteButton != null) deleteButton,
-                  ]),
+                  Wrap(
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        latencyLabel,
+                        const SizedBox(width: 8),
+                        healthBadge,
+                        if (active || selected) ...[
+                          const SizedBox(width: 8),
+                          markBadge,
+                        ],
+                        if (deleteButton != null) deleteButton,
+                      ]),
                 ],
               ],
             ),

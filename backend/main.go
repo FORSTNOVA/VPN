@@ -37,6 +37,7 @@ func (p trafficPolicy) active() bool {
 }
 
 type settings struct {
+	ImportPolicy bool `json:"importPolicy,omitempty"`
 	trafficPolicy
 	Chains          map[string][]string `json:"chains,omitempty"`
 	Chain           proxyChain          `json:"chain,omitempty"`
@@ -149,14 +150,15 @@ type bootstrap struct {
 }
 
 type proxyNode struct {
-	Name     string `json:"name"`
-	Type     string `json:"type"`
-	Network  string `json:"network,omitempty"`
-	TLS      bool   `json:"tls"`
-	WsHost   bool   `json:"wsHostConfigured"`
-	WsPath   bool   `json:"wsPathConfigured"`
-	Alive    bool   `json:"alive"`
-	Selected bool   `json:"selected"`
+	SourceLabel string `json:"sourceLabel,omitempty"`
+	Name        string `json:"name"`
+	Type        string `json:"type"`
+	Network     string `json:"network,omitempty"`
+	TLS         bool   `json:"tls"`
+	WsHost      bool   `json:"wsHostConfigured"`
+	WsPath      bool   `json:"wsPathConfigured"`
+	Alive       bool   `json:"alive"`
+	Selected    bool   `json:"selected"`
 	// True for a node the user pasted rather than one the subscription lists.
 	Manual bool `json:"manual,omitempty"`
 }
@@ -273,6 +275,7 @@ func newService(home, bundleDir string, portable, elevated bool) *app {
 		}
 		a.loadManualNodesLocked()
 		a.loadSubscriptionsLocked()
+		a.restoreSourceLabels()
 	}
 	return a
 }
@@ -350,6 +353,7 @@ func (a *app) routes(token string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/identify", a.identify)
 	mux.HandleFunc("GET /api/state", a.authorize(token, a.state))
+	mux.HandleFunc("GET /api/subscription/policy", a.authorize(token, a.subscriptionPolicy))
 	mux.HandleFunc("PUT /api/settings", a.authorize(token, a.updateSettings))
 	mux.HandleFunc("POST /api/connect", a.authorize(token, a.connect))
 	mux.HandleFunc("POST /api/disconnect", a.authorize(token, a.disconnect))
@@ -517,6 +521,7 @@ func (a *app) reapplyProxy(w http.ResponseWriter, _ *http.Request) {
 // page shows are accepted here; the selection, the region lock and the path
 // monitor are owned by their own routes and cannot be changed through this one.
 type settingsPatch struct {
+	ImportPolicy     *bool     `json:"importPolicy"`
 	SocksPort        *int      `json:"socksPort"`
 	GameBypass       *[]string `json:"gameBypass"`
 	DomesticWeb      *bool     `json:"domesticWeb"`
@@ -588,6 +593,13 @@ func (a *app) updateSettings(w http.ResponseWriter, r *http.Request) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	next := a.settings
+	if patch.ImportPolicy != nil {
+		if a.kernelRunningLocked() {
+			http.Error(w, "请先断开连接再更改订阅分流", 409)
+			return
+		}
+		next.ImportPolicy = *patch.ImportPolicy
+	}
 	if patch.SocksPort != nil {
 		if runtime.GOOS != "windows" || *patch.SocksPort < 0 || *patch.SocksPort > 65535 {
 			http.Error(w, "Windows SOCKS5 端口须为 1–65535，或设为 0 自动分配", http.StatusBadRequest)
@@ -1232,7 +1244,9 @@ func (a *app) listNodes() ([]proxyNode, error) {
 	// details) comes from the files the kernel is reading, by name.
 	details := map[string]proxyNode{}
 	if profile, readErr := os.ReadFile(a.profilePath()); readErr == nil {
-		for _, node := range parseProfileNodes(profile) {
+		parsed := parseProfileNodes(profile)
+		a.labelSingleSource(parsed)
+		for _, node := range parsed {
 			details[node.Name] = node
 		}
 	}
@@ -1270,7 +1284,7 @@ func (a *app) listNodes() ([]proxyNode, error) {
 				}
 			}
 			nodes = append(nodes, proxyNode{
-				Name: name, Type: kind, Network: network, TLS: extra.TLS,
+				Name: name, Type: kind, Network: network, TLS: extra.TLS, SourceLabel: extra.SourceLabel,
 				WsHost: extra.WsHost, WsPath: extra.WsPath, Alive: alive,
 				Selected: name == selected, Manual: extra.Manual,
 			})
@@ -1525,6 +1539,7 @@ func (a *app) saveSettings() error {
 
 type configOptions struct {
 	dnsRelayAddr     string
+	SourceRuleOrder  bool
 	ChainProxies     []byte
 	MixedPort        int
 	ControllerPort   int
@@ -1540,6 +1555,7 @@ type configOptions struct {
 	// Hostname suffixes of the subscription's own node servers, which must stay
 	// out of the fake-ip pool.
 	ProxyServerDomains []string
+	EntryDNS           map[string][]string
 	// Whether the cached list of the country's own addresses is in place, which
 	// is what keeps domestic traffic from being carried by the proxy.
 	ChinaDirect bool
@@ -1589,6 +1605,7 @@ func generatedConfig(options configOptions) string {
 	var config strings.Builder
 	fmt.Fprintf(&config, "mixed-port: %d\n", options.MixedPort)
 	config.WriteString("allow-lan: false\n")
+	config.WriteString("tcp-concurrent: true\n")
 	config.WriteString("bind-address: 127.0.0.1\n")
 	config.WriteString("mode: rule\n")
 	config.WriteString("log-level: info\n")
@@ -1603,6 +1620,9 @@ func generatedConfig(options configOptions) string {
 	if options.TUN {
 		config.WriteString(tunConfigSection(options.DNSProtection))
 		config.WriteString(dnsConfigSection(options.ProxyServerDomains, options.DNSProtection, runtime.GOOS == "android", options.dnsRelayAddr))
+		config.WriteString(entryDNSSection(options.EntryDNS))
+	} else if len(options.EntryDNS) > 0 {
+		config.WriteString("dns:\n  enable: true\n" + dnsUpstreams(false, "") + entryDNSSection(options.EntryDNS))
 	}
 	config.Write(options.ChainProxies)
 	config.WriteString("proxy-providers:\n")
@@ -1669,8 +1689,27 @@ func generatedConfig(options configOptions) string {
 		if options.DomesticWeb && options.ChinaDirect {
 			writeDomesticTCPRules(&config, options)
 		}
+		if options.SourceRuleOrder {
+			for _, rule := range proxied {
+				fmt.Fprintf(&config, "  - %s\n", strconv.Quote(rule))
+			}
+		}
 		config.WriteString("  - MATCH,SmartVPN\n")
 		if options.WebRTCProtection || len(options.ChainProxies) > 0 {
+			config.WriteString("  - MATCH,REJECT\n")
+		}
+		return config.String()
+	}
+	if options.SourceRuleOrder {
+		if options.ChinaDirect {
+			fmt.Fprintf(&config, "  - %s\n", strconv.Quote(chinaDirectRule))
+		}
+		for _, rule := range options.Rules {
+			fmt.Fprintf(&config, "  - %s\n", strconv.Quote(rule))
+		}
+		fmt.Fprintf(&config, "  - %s\n", strconv.Quote(quicRejectRule))
+		config.WriteString("  - MATCH,SmartVPN\n")
+		if len(options.ChainProxies) > 0 {
 			config.WriteString("  - MATCH,REJECT\n")
 		}
 		return config.String()

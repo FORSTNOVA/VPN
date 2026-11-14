@@ -52,7 +52,10 @@ extension _ConnectPage on _HomePageState {
     }
   }
 
-  Widget _connectPage() {
+  Widget _connectPage() => ListenableBuilder(listenable: _probes, builder: (_, __) => _overview());
+
+  Widget _overview() {
+    final hops = _homeProbeHops;
     final tunMode = _connectionMode == 'tun';
     final hasNoNodes = _nodes.isEmpty && _savedSubscriptions.isEmpty;
 
@@ -81,7 +84,7 @@ extension _ConnectPage on _HomePageState {
               ipv4: _diagnose?.egress.ipv4 ?? '',
               ipv4Error: _diagnose?.egress.error ?? '')
         ),
-        ('延迟', _latency == null ? '—' : '$_latency ms'),
+        ('真连接延迟', _probes.label(hops) ?? '未测'),
         ('锁定地区', _lockedRegion.isEmpty ? '未锁定' : _lockedRegion),
         ('候选节点', '$_poolSize'),
       ],
@@ -90,9 +93,8 @@ extension _ConnectPage on _HomePageState {
       connected: _connected,
       busy: _busy,
       port: _port,
-      latency: _latency,
+      probe: hops.isEmpty ? const Tooltip(message: '选择具体节点或连接后可测当前路径', child: TextButton(onPressed: null, child: Text('测试真连接延迟'))) : PathProbeButton(book: _probes, hops: hops, title: '测试真连接延迟'),
       onToggle: _toggleConnection,
-      onMeasure: _measureLatency,
       statusDetail: protectionStateDetail(
         connected: _connected,
         blocked: _blocked,
