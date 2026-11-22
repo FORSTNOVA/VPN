@@ -1,5 +1,43 @@
 # 更新记录
 
+## v0.4.0-alpha.5 — 2026-11-22（纯 Rust + `clash-rs` 预览轨道）
+
+独立纯 Rust 轨道（`smartvpn-rust/`，零 Go 运行时、零嵌入式 Mihomo，Apache-2.0 内核）迎来真机问题集中修复与全功能对齐，Android `arm64-v8a` APK 体积缩减至 **~16.7 MiB**、Windows 便携 ZIP 缩减至 **~27.1 MiB**：
+
+- **订阅拉取与 Android 17 兼容**：补齐 `User-Agent: clash.meta`、301/302 重定向、UTF-8 BOM 与纯公告 `cla=1` 自动重试；Android 端新增显式直连 UDP DNS 解析（`223.5.5.5` / `119.29.29.29` + 保留 TLS SNI）与已连接状态下的拉取流程，修复手机端拉取订阅红字报错。
+- **国内直连列表更新**：实现 `POST /api/direct/refresh`、IPv4/IPv6 CIDR 逐行校验、7 天缓存、失败保留旧表与 `SmartVPNChina` 自动挂载。
+- **连接后测速与全页接口补齐**：补齐 `/api/latency`、`/api/nodes/chain/probe`、`/api/diagnose`、`/api/tun*`、`/api/path-checks*`、`/api/speedtest`、`/api/events`、`/api/health/params`、`/api/subscriptions/update` 等接口，消除连接后测试失败与页面 404。
+- **海外站点延迟优化**：强制 `dns.ipv6: false`、补齐 `UDP/443` QUIC 拦截回退 TCP、`redir-host`、DNS 劫持与 MTU 1500，显著降低 YouTube 等海外站点在 IPv4-only / 无 UDP 节点上的超时卡顿。
+- **真实订阅协议与日志加固**：修复 Hysteria2 缺省 `skip-cert-verify`、Trojan `network: tcp` 运行时拒启与 VLESS/URI 参数解析；收紧服务日志脱敏。
+- **代理链节点选择优化**：追加/替换跳节点面板新增实时搜索（节点名与订阅分组名）与按订阅分组横向快捷筛选/折叠。
+- **验证**：已在 Android 17（API 37、16 KB 页大小）模拟器完成全 6 页巡检、订阅拉取、直连列表更新、代理链 UI、真实 `VpnService` 隧道流量与 0 fd 泄漏 7 项实测，并通过 Hysteria2 / VLESS / Trojan 真实订阅 HTTPS 204 验收。
+
+## v0.3.0-dev.3 — 2026-11-21
+
+修复国内直连加速、WebRTC/DNS 防泄露与订阅分流规则之间的 5 项交互冲突（Go 与 Rust 核心同步更新）：
+
+- **导入订阅分流顺序**：开启「导入订阅分流」且未启用防泄露/国内加速时，`SmartVPNChina` 国内 IP 表改为置于订阅规则之后作为兜底直连，不再抢跑覆盖订阅中的 `REJECT` 广告拦截或 `SmartVPN` 代理规则。
+- **国内加速与订阅分流协作**：在防泄露/国内加速模式下，导入订阅的代理规则提前至国内加速规则之前，允许显式代理规则覆盖国内直连；开启国内加速时，订阅中合法的 `DIRECT` 规则（`DOMAIN`/`DOMAIN-SUFFIX`/`DOMAIN-KEYWORD`/`IP-CIDR`/`IP-CIDR6`）自动降级为 TCP-only 直连并置于 DNS 与 STUN 保护规则之后，兼顾分流且绝不泄露 UDP/STUN/DNS。
+- **DNS 防泄露与国内加速联动**：国内加密 DNS 白名单分流（`nameserver-policy`）改为仅在同时开启「DNS 防泄露」与「国内加速」时生效；仅开 DNS 防泄露且关闭国内加速时，全部域名统一经代理节点加密解析，消除「国内 DNS 解析国内 CDN → 经境外节点绕路访问」错配。
+- **扩充国内加密 DNS 白名单**：补齐抖音/字节、小红书、拼多多、美团/点评、斗鱼/虎牙、爱奇艺/优酷/芒果、网易、阿里/腾讯 CDN、高德、快手、钉钉、WPS、小米、华为及 `steamcontent.com` 等高频国内后缀。
+- **补齐国内 QUIC（UDP/443）回退**：Windows 端在 Chrome/Edge/Firefox 基础上补充 `brave.exe`、`opera.exe`、`vivaldi.exe`、`arc.exe`；Android 端在同时开启国内加速与 WebRTC 防泄露时拦截发往国内地址表的 UDP/443 以回退国内直连 TCP（直连名单内游戏已在 VpnService UID 层排除）。
+
+验证：Rust `config_core` 单测、`TestRustConfigParity`（512 组标志位 Go/Rust 逐字节一致）、`TestPrivacyWithPackagedKernel` 与新增独立回环内核冲突矩阵 `TestRoutingConflictsWithPackagedKernel`（`S1`–`S4`）全部通过。
+
+## v0.3.0-dev.2
+
+Windows 可在总览的「代理模式与分流」中开启登录自启。Android 从同一位置进入系统设置启用「始终开启 VPN」。启动连接会恢复手动选择、代理链或地区锁；使用自动策略时优先恢复仍在当前节点列表中的上次实际节点。
+
+## v0.3.0-dev.1（开发中）
+
+新内核以 SmartVPN 0.2.20 的 Windows 和 Android 客户端现有功能为兼容基线，包含已支持的节点导入、订阅合并、代理链、路由与 DNS、系统代理、TUN 和连接诊断。
+
+独立 Rust 内核已实现 SOCKS5 TCP 和明文 HTTP CONNECT 出站，两者可按顺序组成代理链。已用两个独立的本机 Mihomo 实例验证 HTTP → SOCKS5 与 SOCKS5 → HTTP 两种顺序的双向数据传输。Windows x64 便携包和 Android 双架构 APK 包含该实验传输库，客户端的 VPN 流量仍由 Mihomo 转发。
+
+## v0.2.20 — 2026-11-20
+
+Windows 便携包和 Android APK 默认使用 Rust 核心、HTTP 宿主及 SQLite 存储。两端提供同版本 Go 回滚包，沿用原有设置、节点和数据库。Android 默认同时打包 arm64-v8a 与 x86_64。
+
 ## v0.2.19 — 2026-11-15
 
 Windows 单节点测试支持 IPv6 入口。Windows 和 Android 的探测器按连接模式选择入口 DNS，并保留订阅指定的解析策略，减少动态 ECH 查询误判。节点列表在健康状态下方显示最近巡检的本地日期和时间，无记录时显示「待巡检」。
