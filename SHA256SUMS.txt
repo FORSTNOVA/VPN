@@ -1,0 +1,2 @@
+f4a3f159d86b42d9ab23120e780924ba0c3ed020d72a16a5a01a491cdf91858a  SmartVPN-0.5.0-dev.1-portable.zip
+8a4d154ae07a2b59a9dc104c60344fa2571ea7b79ff8d142b2f8906298419fc5  SmartVPN-0.5.0-dev.1-release-arm64-v8a.apk
