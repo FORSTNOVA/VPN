@@ -1,0 +1,2 @@
+2f9d13ab144322c1ee44f5c93ca633161b70550288384f7b255729f40d3858eb  SmartVPN-0.4.0-alpha.8-rust-pure-windows-x64.zip
+680a3a467d2abab7e49fb31b8bbabebc94d3eb2e08cbe16f913ac01323d9bbc8  SmartVPN-0.4.0-alpha.8-rust-pure-arm64-v8a.apk
