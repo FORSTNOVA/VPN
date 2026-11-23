@@ -18,12 +18,12 @@ func storeApp(t *testing.T) *app {
 	}
 	// A writing connection keeps the database file open, which would stop the
 	// temporary directory from being cleaned up.
-	t.Cleanup(func() { _ = opened.db.Close() })
-	return &app{
-		home: home, store: opened,
-		health: map[string]nodeHealth{}, regions: map[string]regionRecord{},
-		healthParams: defaultHealthParams(),
-	}
+	t.Cleanup(func() { _ = opened.Close() })
+	return testHealthApp(&app{home: home, store: opened}, func(p *healthDomainProjection) {
+		p.Health = map[string]nodeHealth{}
+		p.Regions = map[string]regionRecord{}
+		p.Params = defaultHealthParams()
+	})
 }
 
 func TestManualNodeRoundTrip(t *testing.T) {

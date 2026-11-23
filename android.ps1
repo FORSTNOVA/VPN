@@ -22,6 +22,8 @@ param(
   [string[]]$Abi = @('arm64-v8a'),
   [string]$NdkVersion = '27.2.12479018',
   [string]$ApiLevel = '26',
+  [ValidateSet('Rust','Go')][string]$BackendMode='Rust',
+  [switch]$NoPub,
   [switch]$Release
 )
 
@@ -31,7 +33,10 @@ $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 $backend = Join-Path $root 'backend'
 $frontend = Join-Path $root 'frontend'
 $tools = Join-Path $root '.tools'
-$jniLibs = Join-Path $frontend 'android\app\src\main\jniLibs'
+$jniLibs = Join-Path $tools "distribution-native/android/$BackendMode"
+$Abi = @($Abi | ForEach-Object { $_ -split ',' } | Select-Object -Unique)
+$tags = 'cmfa,with_gvisor'
+if ($BackendMode -eq 'Rust') { $tags += ',rustcore' }
 
 $sdk = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } else { Join-Path $env:LOCALAPPDATA 'Android\Sdk' }
 $ndkBin = Join-Path $sdk "ndk\$NdkVersion\toolchains\llvm\prebuilt\windows-x86_64\bin"
@@ -45,6 +50,23 @@ $env:GOTOOLCHAIN = 'local'
 $env:GOOS = 'android'
 $env:CGO_ENABLED = '1'
 
+$supportedAbis = @('arm64-v8a', 'x86_64')
+foreach ($requestedAbi in $Abi) {
+  if ($requestedAbi -cnotin $supportedAbis) { throw "unknown ABI $requestedAbi (expected $($supportedAbis -join ', '))" }
+}
+
+if (Test-Path -LiteralPath $jniLibs) {
+  $nativeRoot = (Resolve-Path -LiteralPath $jniLibs).Path
+  foreach ($dir in Get-ChildItem -LiteralPath $nativeRoot -Directory -Force) {
+    if ($dir.Name -in ($supportedAbis + @('armeabi-v7a', 'x86')) -and $dir.Name -notin $Abi) {
+      if ($dir.Parent.FullName -ne $nativeRoot -or ($dir.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "Unsafe ABI cleanup path: $($dir.FullName)"
+      }
+      Remove-Item -LiteralPath $dir.FullName -Recurse -Force
+    }
+  }
+}
+
 foreach ($oneAbi in $Abi) {
   # The variable is not called $abi on purpose: PowerShell gives a loop variable
   # the type of the collection it walks, and the parameter $Abi is [string[]], so
@@ -54,7 +76,6 @@ foreach ($oneAbi in $Abi) {
   switch ($oneAbi) {
     'arm64-v8a' { $arch = 'arm64'; $clang = 'aarch64-linux-android' }
     'x86_64'    { $arch = 'amd64'; $clang = 'x86_64-linux-android' }
-    default     { throw "unknown ABI $oneAbi (arm64-v8a and x86_64 are the known ones)" }
   }
 
   $out = Join-Path $jniLibs $oneAbi
@@ -62,9 +83,12 @@ foreach ($oneAbi in $Abi) {
   $env:GOARCH = $arch
   $env:CC = Join-Path $ndkBin ($clang + $ApiLevel + '-clang.cmd')
 
+  if ($BackendMode -eq 'Rust') { & "$root/backend-rust/build-distribution.ps1" -Destination $out -Platform $oneAbi -Compiler $env:CC }
   Write-Host "== service library for $oneAbi =="
   Push-Location $backend
+  $overlay = New-TemporaryFile
   try {
+    & "$backend/android-tun/overlay.ps1" -GoExe "$tools/go/bin/go.exe" -OutFile $overlay.FullName
     # Stripped for the same reason the Windows service is, and because this one
     # is inside a package someone downloads.
     #
@@ -79,10 +103,11 @@ foreach ($oneAbi in $Abi) {
     # with_gvisor: the tunnel's stack in the generated configuration is gvisor,
     # and the cmfa tag drops it, so the kernel refuses to start the listener
     # with a message saying exactly that.
-    & (Join-Path $tools 'go\bin\go.exe') build -tags cmfa,with_gvisor -buildmode=c-shared -ldflags='-s -w -extldflags=-Wl,-z,max-page-size=16384' `
+    & (Join-Path $tools 'go\bin\go.exe') build "-overlay=$($overlay.FullName)" -tags $tags -buildmode=c-shared -ldflags='-s -w -extldflags=-Wl,-z,max-page-size=16384' `
       -o (Join-Path $out 'libsmartvpn.so') .
     if ($LASTEXITCODE -ne 0) { throw "the library build failed for $oneAbi" }
   } finally {
+    Remove-Item -LiteralPath $overlay.FullName
     Pop-Location
   }
   $size = [math]::Round((Get-Item (Join-Path $out 'libsmartvpn.so')).Length / 1MB, 1)
@@ -99,15 +124,26 @@ try {
       'x86_64' { 'android-x64' }
     }
   }) -join ','
-  & (Join-Path $tools 'flutter\bin\flutter.bat') build apk $mode "--target-platform=$targetPlatforms"
+  $options=@("--android-project-arg=smartvpnNativeDir=$jniLibs",
+             "--android-project-arg=smartvpnAndroidAbi=$($Abi -join ',')",
+             "--android-project-arg=smartvpnRustCoreEnabled=$(($BackendMode -eq 'Rust').ToString().ToLowerInvariant())",
+             "--android-project-arg=disable-abi-filtering=true")
+  if($NoPub){$options+='--no-pub'}
+  & (Join-Path $tools 'flutter/bin/flutter.bat') build apk $mode "--target-platform=$targetPlatforms" @options
   if ($LASTEXITCODE -ne 0) { throw 'the Flutter build failed' }
+
 } finally {
   Pop-Location
 }
 
-$apk = Get-ChildItem (Join-Path $frontend 'build\app\outputs\flutter-apk') -Filter '*.apk' |
-  Sort-Object LastWriteTime -Descending | Select-Object -First 1
-$size = [math]::Round($apk.Length / 1MB, 1)
-Write-Host ''
-Write-Host "package: $($apk.FullName) ($size MB, $($Abi -join ', '))"
-Write-Host 'install: adb install -r <the apk above>'
+$variant=if($Release){'release'}else{'debug'}
+$apk=Get-Item (Join-Path $frontend "build/app/outputs/flutter-apk/app-$variant.apk")
+& python "$root/backend-rust/verify_distribution_apk.py" $apk.FullName $BackendMode ($Abi -join ',')
+if($LASTEXITCODE){throw 'APK backend/ABI verification failed'}
+$version=(Select-String -Path "$frontend/pubspec.yaml" -Pattern '^version:\s*([\w.-]+)').Matches[0].Groups[1].Value
+$out=Join-Path $root 'dist/android'
+New-Item -ItemType Directory -Path $out -Force | Out-Null
+$suffix=if($BackendMode -eq 'Go'){'-go-rollback'}else{''}
+$dest=Join-Path $out "SmartVPN-$version-$variant-$($Abi -join '_')$suffix.apk"
+Copy-Item -LiteralPath $apk.FullName -Destination $dest -Force
+Write-Output "package: $dest"

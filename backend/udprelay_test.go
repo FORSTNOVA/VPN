@@ -65,7 +65,41 @@ func startFakeRelay(t *testing.T, mode string) string {
 			}
 			envelope := buffer[:read-len(payload)]
 			switch mode {
+			case "stun", "stun-bad-cookie":
+				if len(payload) != stunHeaderLength {
+					continue
+				}
+				id := [12]byte(payload[8:20])
+				stale := id
+				stale[11] ^= 1
+				if mode == "stun-bad-cookie" {
+					bad := stunResponse(id[:], stunAttributeXor, stunAddressIPv4, net.IPv4(192, 0, 2, 3), 5678, true)
+					bad[4] ^= 1
+					_, _ = socket.WriteTo(append(append([]byte{}, envelope...), bad...), from)
+				}
+				for _, response := range [][]byte{
+					stunResponse(stale[:], stunAttributeXor, stunAddressIPv4, net.IPv4(192, 0, 2, 1), 1234, true),
+					stunResponse(id[:], stunAttributeXor, stunAddressIPv4, net.IPv4(192, 0, 2, 2), 5678, true),
+				} {
+					_, _ = socket.WriteTo(append(append([]byte{}, envelope...), response...), from)
+				}
 			case "answer":
+				_, _ = socket.WriteTo(append(append([]byte{}, envelope...), dnsAnswerFor(payload, false)...), from)
+			case "mixed-dns", "matched-short":
+				if len(payload) < 12 {
+					continue
+				}
+				// A fragmented SOCKS datagram, a one-byte DNS payload and a
+				// stale transaction must all be ignored on the same socket.
+				fragment := append(append([]byte{}, envelope...), payload...)
+				fragment[2] = 1
+				_, _ = socket.WriteTo(fragment, from)
+				for _, reply := range [][]byte{payload[:1], dnsAnswerFor(payload, true)} {
+					_, _ = socket.WriteTo(append(append([]byte{}, envelope...), reply...), from)
+				}
+				if mode == "matched-short" {
+					_, _ = socket.WriteTo(append(append([]byte{}, envelope...), payload[:2]...), from)
+				}
 				_, _ = socket.WriteTo(append(append([]byte{}, envelope...), dnsAnswerFor(payload, false)...), from)
 			case "stale":
 				_, _ = socket.WriteTo(append(append([]byte{}, envelope...), dnsAnswerFor(payload, true)...), from)
@@ -115,6 +149,21 @@ func TestProbeUDPRelayReportsAForwardedAnswer(t *testing.T) {
 	}
 	if result.LatencyMs < 0 {
 		t.Fatalf("latency = %d", result.LatencyMs)
+	}
+}
+
+func TestProbeUDPRelayMatchesBeforeDNSParsing(t *testing.T) {
+	for _, mode := range []string{"mixed-dns", "matched-short"} {
+		t.Run(mode, func(t *testing.T) {
+			result := probeUDPRelay(startFakeRelay(t, mode), udpRelayTarget, time.Second)
+			if mode == "matched-short" {
+				if result.Reachable || result.Reason != "DNS 应答过短" {
+					t.Fatalf("expected the matching short reply to reach the DNS parser: %+v", result)
+				}
+			} else if !result.Reachable || result.Answer != "10.20.30.40" {
+				t.Fatalf("expected the valid reply after unrelated packets: %+v", result)
+			}
+		})
 	}
 }
 

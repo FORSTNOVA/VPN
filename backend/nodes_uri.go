@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -36,40 +35,10 @@ var defaultPorts = map[string]int{
 
 // parseNodeURI turns one pasted link into the node the kernel will run.
 func parseNodeURI(raw string) (manualNode, error) {
-	text := strings.TrimSpace(raw)
-	if text == "" {
-		return manualNode{}, errors.New("请先粘贴节点链接")
-	}
-	scheme, _, found := strings.Cut(text, "://")
-	if !found {
-		return manualNode{}, errLinkUnsupported
-	}
-	scheme = strings.ToLower(scheme)
-	if scheme == "vmess" {
-		return parseVmessLink(text)
-	}
-	parsed, err := url.Parse(text)
-	if err != nil {
-		return manualNode{}, errors.New("节点链接无法解析")
-	}
-	switch scheme {
-	case "vless":
-		return parseVlessLink(parsed)
-	case "trojan":
-		return parseTrojanLink(parsed)
-	case "hysteria2", "hy2":
-		return parseHysteria2Link(parsed)
-	case "hysteria":
-		return parseHysteriaLink(parsed)
-	case "tuic":
-		return parseTuicLink(parsed)
-	case "ss":
-		return parseShadowsocksLink(text, parsed)
-	case "ssr":
-		return parseSSRLink(text)
-	default:
-		return manualNode{}, errLinkUnsupported
-	}
+	q := nodeFrontRequest{Op: "dispatch", Path: raw}
+	fx := &appNodeFrontEffects{q: q}
+	r := runSelectedNodeFront(q, fx)
+	return fx.node, r.Err
 }
 
 // --------------------------------------------------------------------------
@@ -124,44 +93,9 @@ func insecureValue(value string) bool {
 // transportOptions writes the network settings the kernel needs for the
 // transport the link asked for.
 func transportOptions(proxy map[string]any, network, path, host, serviceName string) error {
-	switch strings.ToLower(strings.TrimSpace(network)) {
-	case "", "tcp":
-		return nil
-	case "ws", "websocket":
-		proxy["network"] = "ws"
-		options := map[string]any{}
-		if path != "" {
-			options["path"] = path
-		}
-		if host != "" {
-			options["headers"] = map[string]any{"Host": host}
-		}
-		if len(options) > 0 {
-			proxy["ws-opts"] = options
-		}
-		return nil
-	case "grpc":
-		proxy["network"] = "grpc"
-		if serviceName != "" {
-			proxy["grpc-opts"] = map[string]any{"grpc-service-name": serviceName}
-		}
-		return nil
-	case "h2", "http":
-		proxy["network"] = "h2"
-		options := map[string]any{}
-		if path != "" {
-			options["path"] = path
-		}
-		if host != "" {
-			options["host"] = []string{host}
-		}
-		if len(options) > 0 {
-			proxy["h2-opts"] = options
-		}
-		return nil
-	default:
-		return fmt.Errorf("暂不支持 %q 传输方式", network)
-	}
+	q := nodeFrontRequest{Op: "transport"}
+	fx := &appNodeFrontEffects{q: q, proxy: proxy, network: network, path: path, host: host, service: serviceName}
+	return runSelectedNodeFront(q, fx).Err
 }
 
 // --------------------------------------------------------------------------
@@ -184,54 +118,13 @@ type vmessLink struct {
 	FP      string `json:"fp"`
 }
 
-func parseVmessLink(text string) (manualNode, error) {
-	encoded := strings.TrimPrefix(text, "vmess://")
-	if cut := strings.IndexAny(encoded, "#?"); cut >= 0 {
-		encoded = encoded[:cut]
-	}
-	decoded, err := decodeSubscriptionBase64(encoded)
-	if err != nil {
-		return manualNode{}, errors.New("vmess 链接的 Base64 无法解码")
-	}
-	var link vmessLink
-	if err := json.Unmarshal(decoded, &link); err != nil {
-		return manualNode{}, errors.New("vmess 链接的 JSON 无法解析")
-	}
-	server := strings.TrimSpace(link.Server)
-	port, err := portValue(link.Port)
-	if server == "" || port == 0 || strings.TrimSpace(link.ID) == "" {
-		return manualNode{}, errLinkFields
-	}
-	name := strings.TrimSpace(link.Name)
-	if name == "" {
-		name = fmt.Sprintf("%s:%d", server, port)
-	}
-	proxy := map[string]any{
-		"name":    name,
-		"type":    "vmess",
-		"server":  server,
-		"port":    port,
-		"uuid":    strings.TrimSpace(link.ID),
-		"alterId": intValue(link.AlterID),
-		"cipher":  vmessCipher(link.Cipher),
-		"udp":     true,
-	}
-	if tls := strings.ToLower(strings.TrimSpace(link.TLS)); tls != "" && tls != "none" && tls != "false" {
-		proxy["tls"] = true
-		if sni := firstNonEmpty(link.SNI, link.Host); sni != "" {
-			proxy["servername"] = sni
-		}
-	}
-	if fingerprint := strings.TrimSpace(link.FP); fingerprint != "" {
-		proxy["client-fingerprint"] = fingerprint
-	}
-	if alpn := stringList(link.Alpn); len(alpn) > 0 {
-		proxy["alpn"] = alpn
-	}
-	if err := transportOptions(proxy, link.Network, link.Path, link.Host, link.Path); err != nil {
-		return manualNode{}, err
-	}
-	return finishManualNode(text, name, "vmess", server, port, proxy)
+func parseVmessLinkGo(text string) (manualNode, error) { return parseVmessLinkWithFields(text, false) }
+
+func parseVmessLinkWithFields(text string, useRust bool) (manualNode, error) {
+	q := nodeFrontRequest{Op: "vmess", Path: text}
+	fx := &appNodeFrontEffects{q: q, useRust: useRust}
+	r := runSelectedNodeFront(q, fx)
+	return fx.node, r.Err
 }
 
 func vmessCipher(value string) string {
@@ -246,7 +139,7 @@ func vmessCipher(value string) string {
 // --------------------------------------------------------------------------
 // vless / trojan / hysteria2, which are all URL-shaped
 
-func parseVlessLink(parsed *url.URL) (manualNode, error) {
+func parseVlessLinkGo(parsed *url.URL) (manualNode, error) {
 	server, port, err := linkEndpoint(parsed, "vless")
 	if err != nil {
 		return manualNode{}, err
@@ -304,7 +197,7 @@ func parseVlessLink(parsed *url.URL) (manualNode, error) {
 	return finishManualNode(parsed.String(), stringValue(proxy["name"]), "vless", server, port, proxy)
 }
 
-func parseTrojanLink(parsed *url.URL) (manualNode, error) {
+func parseTrojanLinkGo(parsed *url.URL) (manualNode, error) {
 	server, port, err := linkEndpoint(parsed, "trojan")
 	if err != nil {
 		return manualNode{}, err
@@ -339,7 +232,7 @@ func parseTrojanLink(parsed *url.URL) (manualNode, error) {
 	return finishManualNode(parsed.String(), stringValue(proxy["name"]), "trojan", server, port, proxy)
 }
 
-func parseHysteria2Link(parsed *url.URL) (manualNode, error) {
+func parseHysteria2LinkGo(parsed *url.URL) (manualNode, error) {
 	server, port, err := linkEndpoint(parsed, "hysteria2")
 	if err != nil {
 		return manualNode{}, err
@@ -381,7 +274,11 @@ func parseHysteria2Link(parsed *url.URL) (manualNode, error) {
 // parseShadowsocksLink handles both link shapes in the wild: SIP002, where only
 // the userinfo is base64, and the older form where method, password, host and
 // port are all wrapped together.
-func parseShadowsocksLink(text string, parsed *url.URL) (manualNode, error) {
+func parseShadowsocksLinkGo(text string, parsed *url.URL) (manualNode, error) {
+	return parseShadowsocksLinkWithFields(text, parsed, false)
+}
+
+func parseShadowsocksLinkWithFields(text string, parsed *url.URL, useRust bool) (manualNode, error) {
 	body := strings.TrimPrefix(strings.TrimSpace(text), "ss://")
 	if queryAt := strings.IndexAny(body, "?"); queryAt >= 0 {
 		if plugin := parsed.Query().Get("plugin"); plugin != "" {
@@ -425,6 +322,11 @@ func parseShadowsocksLink(text string, parsed *url.URL) (manualNode, error) {
 	if host == "" || value == 0 {
 		return manualNode{}, errLinkFields
 	}
+	if useRust {
+		if node, err, ok := rustLegacyNodeFields(parsed.String(), "ss", host, value, linkName(parsed, host), password, map[string]string{"__smartvpn_cipher": cipher}); ok {
+			return node, err
+		}
+	}
 	proxy := map[string]any{
 		"name":     linkName(parsed, host),
 		"type":     "ss",
@@ -440,7 +342,9 @@ func parseShadowsocksLink(text string, parsed *url.URL) (manualNode, error) {
 // --------------------------------------------------------------------------
 // ssr / tuic / hysteria
 
-func parseSSRLink(text string) (manualNode, error) {
+func parseSSRLinkGo(text string) (manualNode, error) { return parseSSRLinkWithFields(text, false) }
+
+func parseSSRLinkWithFields(text string, useRust bool) (manualNode, error) {
 	encoded := strings.TrimPrefix(strings.TrimSpace(text), "ssr://")
 	decodedBytes, err := decodeSubscriptionBase64(encoded)
 	if err != nil {
@@ -499,6 +403,12 @@ func parseSSRLink(text string) (manualNode, error) {
 		}
 	}
 
+	if useRust {
+		fields := map[string]string{"__smartvpn_cipher": method, "__smartvpn_protocol": protocol, "__smartvpn_obfs": obfs, "__smartvpn_obfs_param": obfsparam, "__smartvpn_proto_param": protoparam}
+		if node, err, ok := rustLegacyNodeFields(text, "ssr", host, port, name, password, fields); ok {
+			return node, err
+		}
+	}
 	proxy := map[string]any{
 		"name":     name,
 		"type":     "ssr",
@@ -519,7 +429,7 @@ func parseSSRLink(text string) (manualNode, error) {
 	return finishManualNode(text, name, "ssr", host, port, proxy)
 }
 
-func parseTuicLink(parsed *url.URL) (manualNode, error) {
+func parseTuicLinkGo(parsed *url.URL) (manualNode, error) {
 	server, port, err := linkEndpoint(parsed, "tuic")
 	if err != nil {
 		return manualNode{}, err
@@ -565,7 +475,7 @@ func parseTuicLink(parsed *url.URL) (manualNode, error) {
 	return finishManualNode(parsed.String(), name, "tuic", server, port, proxy)
 }
 
-func parseHysteriaLink(parsed *url.URL) (manualNode, error) {
+func parseHysteriaLinkGo(parsed *url.URL) (manualNode, error) {
 	server, port, err := linkEndpoint(parsed, "hysteria")
 	if err != nil {
 		return manualNode{}, err
@@ -607,13 +517,10 @@ func parseHysteriaLink(parsed *url.URL) (manualNode, error) {
 // Helpers
 
 func finishManualNode(uri, name, kind, server string, port int, proxy map[string]any) (manualNode, error) {
-	if strings.TrimSpace(name) == "" {
-		name = fmt.Sprintf("%s:%d", server, port)
-	}
-	proxy["name"] = name
-	return manualNode{
-		Name: name, URI: uri, Type: kind, Server: server, Port: port, Proxy: proxy,
-	}, nil
+	q := nodeFrontRequest{Op: "finish"}
+	fx := &appNodeFrontEffects{q: q, uri: uri, name: name, kind: kind, server: server, port: port, proxy: proxy}
+	r := runSelectedNodeFront(q, fx)
+	return fx.node, r.Err
 }
 
 func firstNonEmpty(values ...string) string {

@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/base64"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -72,7 +74,7 @@ func TestSelectedChoice(t *testing.T) {
 		{"unexpected", "x", autoGroup},
 	}
 	for _, tc := range cases {
-		a := &app{settings: settings{SelectionMode: tc.mode, SelectedNode: tc.selected}}
+		a := testControlApp(&app{}, func(a *app) { testSetSettings(a, settings{SelectionMode: tc.mode, SelectedNode: tc.selected}) })
 		if got := a.selectedChoice(); got != tc.want {
 			t.Errorf("mode %q selected %q = %q, want %q", tc.mode, tc.selected, got, tc.want)
 		}
@@ -282,8 +284,8 @@ func TestGeneratedConfigCarriesOneMeasuringLoop(t *testing.T) {
 func TestLoadSettingsLeavesTheKernelPathUnset(t *testing.T) {
 	a := &app{home: t.TempDir()}
 	a.loadSettings()
-	if a.settings.MihomoPath != "" {
-		t.Fatalf("MihomoPath = %q, want it left unset", a.settings.MihomoPath)
+	if a.settingsLocked().MihomoPath != "" {
+		t.Fatalf("MihomoPath = %q, want it left unset", a.settingsLocked().MihomoPath)
 	}
 	if filepath.Dir(a.mihomoPath()) != a.home {
 		t.Fatalf("the kernel resolves beside the rest of the service's files, got %q", a.mihomoPath())
@@ -298,8 +300,8 @@ func TestLoadSettingsLeavesTheKernelPathUnset(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.loadSettings()
-	if a.settings.MihomoPath != `D:\tools\mihomo.exe` {
-		t.Fatalf("MihomoPath = %q, want the saved value", a.settings.MihomoPath)
+	if a.settingsLocked().MihomoPath != `D:\tools\mihomo.exe` {
+		t.Fatalf("MihomoPath = %q, want the saved value", a.settingsLocked().MihomoPath)
 	}
 }
 
@@ -495,7 +497,7 @@ func TestFreeLoopbackPort(t *testing.T) {
 func TestProfileMatchesSubscription(t *testing.T) {
 	home := t.TempDir()
 	subscriptionURL := "https://example.com/sub?token=abc"
-	a := &app{home: home, settings: settings{SubscriptionURL: subscriptionURL}}
+	a := testControlApp(&app{home: home}, func(a *app) { testSetSettings(a, settings{SubscriptionURL: subscriptionURL}) })
 	if a.profileMatchesSubscription() {
 		t.Fatal("a missing profile must not match")
 	}
@@ -526,7 +528,7 @@ func TestProfileMatchesSubscription(t *testing.T) {
 func TestProfileMatchesSubscriptionIgnoresNodeFreeProfile(t *testing.T) {
 	home := t.TempDir()
 	subscriptionURL := "https://example.com/sub"
-	a := &app{home: home, settings: settings{SubscriptionURL: subscriptionURL}}
+	a := testControlApp(&app{home: home}, func(a *app) { testSetSettings(a, settings{SubscriptionURL: subscriptionURL}) })
 	if err := os.MkdirAll(filepath.Dir(a.profilePath()), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -595,14 +597,14 @@ func TestRemoveConfigLocked(t *testing.T) {
 }
 
 func TestUpdateSettingsKeepsTheRegionLock(t *testing.T) {
-	a := &app{
-		home: t.TempDir(), health: map[string]nodeHealth{}, regions: map[string]regionRecord{},
-		settings: settings{
-			SubscriptionURL: "https://example.com/sub",
-			SelectionMode:   "auto", ConnectionMode: modeTUN, WintunPath: `C:\dll\wintun.dll`,
-		},
-		lockedRegion: "JP", lockedNode: "jp-a",
-	}
+	a := testHealthApp(testControlApp(&app{home: t.TempDir()}, func(a *app) {
+		testSetSettings(a, settings{SubscriptionURL: "https://example.com/sub", SelectionMode: "auto", ConnectionMode: modeTUN, WintunPath: `C:\dll\wintun.dll`})
+		a.patchControlLocked(controlRuntimeLockedRegion, serviceControlState{RuntimeLockedRegion: "JP"})
+		a.patchControlLocked(controlRuntimeLockedNode, serviceControlState{RuntimeLockedNode: "jp-a"})
+	}), func(p *healthDomainProjection) {
+		p.Health = map[string]nodeHealth{}
+		p.Regions = map[string]regionRecord{}
+	})
 	// The UI saves settings right before every connect, and it does not resend
 	// the mode or the lock, so all of them have to survive the overwrite. The
 	// subscription is the one that was already in use.
@@ -612,29 +614,33 @@ func TestUpdateSettingsKeepsTheRegionLock(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200: %s", recorder.Code, recorder.Body.String())
 	}
-	if a.settings.LockedRegion != "JP" || a.settings.LockedNode != "jp-a" {
-		t.Fatalf("the lock was dropped: region=%q node=%q", a.settings.LockedRegion, a.settings.LockedNode)
+	if a.settingsLocked().LockedRegion != "JP" || a.settingsLocked().LockedNode != "jp-a" {
+		t.Fatalf("the lock was dropped: region=%q node=%q", a.settingsLocked().LockedRegion, a.settingsLocked().LockedNode)
 	}
-	if a.settings.ConnectionMode != modeTUN || a.settings.WintunPath == "" {
-		t.Fatalf("an omitted field must not be reset: %+v", a.settings)
+	if a.settingsLocked().ConnectionMode != modeTUN || a.settingsLocked().WintunPath == "" {
+		t.Fatalf("an omitted field must not be reset: %+v", a.settingsLocked())
 	}
 
-	reloaded := &app{home: a.home, health: map[string]nodeHealth{}, regions: map[string]regionRecord{}}
+	reloaded := testHealthApp(&app{home: a.home}, func(p *healthDomainProjection) {
+		p.Health = map[string]nodeHealth{}
+		p.Regions = map[string]regionRecord{}
+	})
 	reloaded.loadSettings()
-	if reloaded.settings.LockedRegion != "JP" || reloaded.settings.LockedNode != "jp-a" {
-		t.Fatalf("the lock must survive a restart: %+v", reloaded.settings)
+	if reloaded.settingsLocked().LockedRegion != "JP" || reloaded.settingsLocked().LockedNode != "jp-a" {
+		t.Fatalf("the lock must survive a restart: %+v", reloaded.settingsLocked())
 	}
-	if reloaded.settings.ConnectionMode != modeTUN {
-		t.Fatalf("the mode must survive a restart: %+v", reloaded.settings)
+	if reloaded.settingsLocked().ConnectionMode != modeTUN {
+		t.Fatalf("the mode must survive a restart: %+v", reloaded.settingsLocked())
 	}
 }
 
 func TestDisconnectWithoutAConnectionLeavesTheRegistryAlone(t *testing.T) {
 	// The proxy helper is not installed next to this test binary, so a stray
 	// PowerShell restore call would fail the request instead of reporting ok.
-	a := &app{
-		home: t.TempDir(), health: map[string]nodeHealth{}, regions: map[string]regionRecord{},
-	}
+	a := testHealthApp(&app{home: t.TempDir()}, func(p *healthDomainProjection) {
+		p.Health = map[string]nodeHealth{}
+		p.Regions = map[string]regionRecord{}
+	})
 	recorder := httptest.NewRecorder()
 	a.disconnect(recorder, httptest.NewRequest(http.MethodPost, "/api/disconnect", nil))
 	if recorder.Code != http.StatusOK {
@@ -645,7 +651,9 @@ func TestDisconnectWithoutAConnectionLeavesTheRegistryAlone(t *testing.T) {
 func TestCachedNodesRoundTrip(t *testing.T) {
 	home := t.TempDir()
 	subscriptionURL := "https://example.com/sub?token=abc"
-	a := &app{home: home, settings: settings{SubscriptionURL: subscriptionURL, SelectedNode: "日本 02"}}
+	a := testControlApp(&app{home: home}, func(a *app) {
+		testSetSettings(a, settings{SubscriptionURL: subscriptionURL, SelectedNode: "日本 02"})
+	})
 	nodes := []proxyNode{
 		{Name: "香港 01", Type: "vmess", Network: "ws", TLS: true, WsHost: true, WsPath: true, Alive: true},
 		{Name: "日本 02", Type: "trojan"},
@@ -654,7 +662,8 @@ func TestCachedNodesRoundTrip(t *testing.T) {
 		t.Fatalf("saveCachedNodesLocked: %v", err)
 	}
 
-	reloaded := &app{home: home, settings: a.settings}
+	savedSettings := a.settingsLocked()
+	reloaded := testControlApp(&app{home: home}, func(a *app) { testSetSettings(a, savedSettings) })
 	reloaded.loadCachedNodes()
 	if len(reloaded.cachedNodes) != 2 {
 		t.Fatalf("got %d cached nodes, want 2", len(reloaded.cachedNodes))
@@ -670,11 +679,11 @@ func TestCachedNodesRoundTrip(t *testing.T) {
 
 func TestCachedNodesDiscardedWhenSubscriptionChanges(t *testing.T) {
 	home := t.TempDir()
-	a := &app{home: home, settings: settings{SubscriptionURL: "https://example.com/sub?token=abc"}}
+	a := testControlApp(&app{home: home}, func(a *app) { testSetSettings(a, settings{SubscriptionURL: "https://example.com/sub?token=abc"}) })
 	if err := a.saveCachedNodesLocked([]proxyNode{{Name: "香港 01", Type: "vmess"}}); err != nil {
 		t.Fatal(err)
 	}
-	other := &app{home: home, settings: settings{SubscriptionURL: "https://example.com/sub?token=def"}}
+	other := testControlApp(&app{home: home}, func(a *app) { testSetSettings(a, settings{SubscriptionURL: "https://example.com/sub?token=def"}) })
 	other.loadCachedNodes()
 	if len(other.cachedNodes) != 0 {
 		t.Fatalf("a cache from another subscription must be dropped, got %+v", other.cachedNodes)
@@ -686,7 +695,7 @@ func TestCachedNodesDiscardedWhenSubscriptionChanges(t *testing.T) {
 
 func TestClearCachedNodesLocked(t *testing.T) {
 	home := t.TempDir()
-	a := &app{home: home, settings: settings{SubscriptionURL: "https://example.com/sub"}}
+	a := testControlApp(&app{home: home}, func(a *app) { testSetSettings(a, settings{SubscriptionURL: "https://example.com/sub"}) })
 	if err := a.saveCachedNodesLocked([]proxyNode{{Name: "香港 01", Type: "vmess"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -719,27 +728,27 @@ func TestGameBypassSettingsRoundTrip(t *testing.T) {
 	update(`{"gameBypass":["*,DIRECT"]}`, 400)
 	update(`{"dnsProtection":true}`, 200)
 	a.loadSettings()
-	if len(a.settings.GameBypass) != 1 || a.settings.GameBypass[0] != "StarRail.exe" {
+	if len(a.settingsLocked().GameBypass) != 1 || a.settingsLocked().GameBypass[0] != "StarRail.exe" {
 		t.Fatal("saved exception changed")
 	}
 	update(`{"gameBypass":[]}`, 200)
 	a.loadSettings()
-	if len(a.settings.GameBypass) != 0 {
+	if len(a.settingsLocked().GameBypass) != 0 {
 		t.Fatal("cleared exception still active")
 	}
 }
 
 func TestUpdateSettingsChangesOnlyWhatTheRequestCarries(t *testing.T) {
 	a := storeApp(t)
-	a.settings = settings{
+	testSetSettings(a, settings{
 		SubscriptionURL: "https://example.com/sub",
 		MihomoPath:      `C:\tools\mihomo.exe`,
 		WintunPath:      `C:\dll\wintun.dll`,
 		ConnectionMode:  modeTUN,
 		SelectionMode:   "manual",
 		SelectedNode:    "节点一",
-	}
-	a.lockedRegion, a.lockedNode = "JP", "jp-a"
+	})
+	a.patchControlLocked(controlRuntimeLockedRegion|controlRuntimeLockedNode, serviceControlState{RuntimeLockedRegion: "JP", RuntimeLockedNode: "jp-a"})
 	if err := os.MkdirAll(filepath.Dir(a.profilePath()), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -754,20 +763,20 @@ func TestUpdateSettingsChangesOnlyWhatTheRequestCarries(t *testing.T) {
 		t.Fatalf("code = %d, want 200: %s", recorder.Code, recorder.Body.String())
 	}
 
-	if a.settings.ConnectionMode != modeSystemProxy {
-		t.Fatalf("the mode that was sent must be applied: %+v", a.settings)
+	if a.settingsLocked().ConnectionMode != modeSystemProxy {
+		t.Fatalf("the mode that was sent must be applied: %+v", a.settingsLocked())
 	}
-	if a.settings.SubscriptionURL != "https://example.com/sub" {
-		t.Fatalf("the subscription must survive a mode change: %q", a.settings.SubscriptionURL)
+	if a.settingsLocked().SubscriptionURL != "https://example.com/sub" {
+		t.Fatalf("the subscription must survive a mode change: %q", a.settingsLocked().SubscriptionURL)
 	}
-	if a.settings.MihomoPath == "" || a.settings.WintunPath == "" {
-		t.Fatalf("the paths must survive too: %+v", a.settings)
+	if a.settingsLocked().MihomoPath == "" || a.settingsLocked().WintunPath == "" {
+		t.Fatalf("the paths must survive too: %+v", a.settingsLocked())
 	}
-	if a.settings.SelectedNode != "节点一" || a.settings.SelectionMode != "manual" {
-		t.Fatalf("the selection is not this route's to change: %+v", a.settings)
+	if a.settingsLocked().SelectedNode != "节点一" || a.settingsLocked().SelectionMode != "manual" {
+		t.Fatalf("the selection is not this route's to change: %+v", a.settingsLocked())
 	}
-	if a.lockedRegion != "JP" || a.lockedNode != "jp-a" {
-		t.Fatalf("the lock is not this route's to change: %q %q", a.lockedRegion, a.lockedNode)
+	if a.controlLocked().RuntimeLockedRegion != "JP" || a.controlLocked().RuntimeLockedNode != "jp-a" {
+		t.Fatalf("the lock is not this route's to change: %q %q", a.controlLocked().RuntimeLockedRegion, a.controlLocked().RuntimeLockedNode)
 	}
 	if _, err := os.Stat(a.profilePath()); err != nil {
 		t.Fatalf("the cached profile must survive a mode change: %v", err)
@@ -781,11 +790,11 @@ func TestUpdateSettingsChangesOnlyWhatTheRequestCarries(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200: %s", recorder.Code, recorder.Body.String())
 	}
-	if a.settings.SubscriptionURL != "" || a.settings.MihomoPath != "" {
-		t.Fatalf("an empty field means cleared: %+v", a.settings)
+	if a.settingsLocked().SubscriptionURL != "" || a.settingsLocked().MihomoPath != "" {
+		t.Fatalf("an empty field means cleared: %+v", a.settingsLocked())
 	}
-	if a.settings.WintunPath == "" || a.settings.ConnectionMode != modeSystemProxy {
-		t.Fatalf("only the fields that were sent may change: %+v", a.settings)
+	if a.settingsLocked().WintunPath == "" || a.settingsLocked().ConnectionMode != modeSystemProxy {
+		t.Fatalf("only the fields that were sent may change: %+v", a.settingsLocked())
 	}
 	if _, err := os.Stat(a.profilePath()); !os.IsNotExist(err) {
 		t.Fatal("clearing the subscription must drop the profile that belonged to it")
@@ -794,7 +803,7 @@ func TestUpdateSettingsChangesOnlyWhatTheRequestCarries(t *testing.T) {
 
 func TestUpdateSettingsRefusesWhatItCannotApply(t *testing.T) {
 	a := storeApp(t)
-	a.settings = settings{SubscriptionURL: "https://example.com/sub", ConnectionMode: modeTUN}
+	testSetSettings(a, settings{SubscriptionURL: "https://example.com/sub", ConnectionMode: modeTUN})
 	for name, body := range map[string]string{
 		"an unknown mode":                `{"connectionMode":"tun2"}`,
 		"an empty mode":                  `{"connectionMode":""}`,
@@ -810,9 +819,30 @@ func TestUpdateSettingsRefusesWhatItCannotApply(t *testing.T) {
 			if recorder.Code != http.StatusBadRequest {
 				t.Fatalf("code = %d, want 400: %s", recorder.Code, recorder.Body.String())
 			}
-			if a.settings.SubscriptionURL != "https://example.com/sub" ||
-				a.settings.ConnectionMode != modeTUN {
-				t.Fatalf("a refused request must change nothing: %+v", a.settings)
+			if a.settingsLocked().SubscriptionURL != "https://example.com/sub" ||
+				a.settingsLocked().ConnectionMode != modeTUN {
+				t.Fatalf("a refused request must change nothing: %+v", a.settingsLocked())
+			}
+		})
+	}
+}
+
+func TestSwitchGroupSuccessfulStatus(t *testing.T) {
+	for _, status := range []int{200, 202, 204, 299} {
+		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			svc := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != "PUT" || r.URL.Path != "/proxies/SmartVPN" {
+					t.Errorf("unexpected %s %s", r.Method, r.URL)
+				}
+				w.WriteHeader(status)
+				if status != 204 {
+					fmt.Fprint(w, "accepted")
+				}
+			}))
+			defer svc.Close()
+			a := &app{ctrlPort: svc.Listener.Addr().(*net.TCPAddr).Port}
+			if err := a.switchGroupLocked("node"); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}

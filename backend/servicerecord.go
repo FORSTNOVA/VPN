@@ -1,8 +1,6 @@
 package main
 
 import (
-	"encoding/json"
-	"os"
 	"path/filepath"
 )
 
@@ -19,33 +17,25 @@ type serviceRecord struct {
 	ExeSize  int64 `json:"exeSize,omitempty"`
 	ExeMtime int64 `json:"exeMtime,omitempty"`
 }
+
 func serviceRecordPath(home string) string {
 	return filepath.Join(home, "service.json")
 }
 
-
 func writeServiceRecord(home string, record serviceRecord) error {
-	body, err := json.Marshal(record)
-	if err != nil {
-		return err
-	}
-	path := serviceRecordPath(home)
-	temp := path + ".tmp"
-	if err := os.WriteFile(temp, body, 0600); err != nil {
-		return err
-	}
-	return os.Rename(temp, path)
+	e := newBootstrapEffects(bootstrapServiceRequest{Op: "write-record"})
+	e.home = home
+	e.record = record
+	return runBootstrapWithEffects(e.q, e).Err
 }
 
-
 func removeServiceRecord(home string, pid int) {
-	body, err := os.ReadFile(serviceRecordPath(home))
-	if err != nil {
-		return
+	e := newBootstrapEffects(bootstrapServiceRequest{Op: "remove-record"})
+	e.home = home
+	e.hooks = map[string]func(bootstrapServiceEffect) bootstrapServiceReply{"record-own": func(bootstrapServiceEffect) bootstrapServiceReply {
+		return bootstrapServiceReply{Flag: e.record.PID == pid}
+	}}
+	if r := runBootstrapWithEffects(e.q, e); r.Err != nil {
+		panic(r.Err)
 	}
-	var record serviceRecord
-	if json.Unmarshal(body, &record) == nil && record.PID != pid {
-		return
-	}
-	_ = os.Remove(serviceRecordPath(home))
 }

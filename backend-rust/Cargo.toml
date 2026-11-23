@@ -1,0 +1,19 @@
+[package]
+name = "smartvpn-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+serde_yaml_ng = "0.10"
+yaml-rust2 = { version = "0.10", default-features = false }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

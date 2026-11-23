@@ -86,8 +86,20 @@ func TestSplitDNSProtectsUnclassifiedNames(t *testing.T) {
 			Fallback []string            `yaml:"fallback"`
 		}
 	}
-	if err := yaml.Unmarshal([]byte(dnsConfigSection(nil, true, false, "")), &config); err != nil {
+	if err := yaml.Unmarshal([]byte(dnsConfigSection(nil, true, true, false, "")), &config); err != nil {
 		t.Fatal(err)
+	}
+	var strictOnly struct {
+		DNS struct {
+			Servers []string            `yaml:"nameserver"`
+			Policy  map[string][]string `yaml:"nameserver-policy"`
+		}
+	}
+	if err := yaml.Unmarshal([]byte(dnsConfigSection(nil, true, false, false, "")), &strictOnly); err != nil {
+		t.Fatal(err)
+	}
+	if len(strictOnly.DNS.Policy) != 0 || len(strictOnly.DNS.Servers) == 0 {
+		t.Fatalf("pure DNS protection without DomesticWeb must not emit domestic nameserver-policy: %+v", strictOnly.DNS)
 	}
 	if len(config.DNS.Servers) == 0 || len(config.DNS.Fallback) != 0 {
 		t.Fatal("unclassified names require a protected default without fallback")
@@ -136,18 +148,20 @@ func TestIsFakeAddress(t *testing.T) {
 
 func TestAndroidDNSAnswersSurviveVPNBypass(t *testing.T) {
 	for _, strict := range []bool{false, true} {
-		section := dnsConfigSection([]string{"+.node.test"}, strict, true, "")
-		var cfg struct {
-			DNS map[string]interface{} `yaml:"dns"`
-		}
-		if err := yaml.Unmarshal([]byte(section), &cfg); err != nil {
-			t.Fatal(err)
-		}
-		if cfg.DNS["enhanced-mode"] != "redir-host" || strings.Contains(section, "fake-ip") {
-			t.Fatal("Android returned tunnel-only addresses")
-		}
-		if !strings.Contains(section, dnsUpstreams(strict, "")) {
-			t.Fatal("Android DNS upstream policy changed")
+		for _, domestic := range []bool{false, true} {
+			section := dnsConfigSection([]string{"+.node.test"}, strict, domestic, true, "")
+			var cfg struct {
+				DNS map[string]interface{} `yaml:"dns"`
+			}
+			if err := yaml.Unmarshal([]byte(section), &cfg); err != nil {
+				t.Fatal(err)
+			}
+			if cfg.DNS["enhanced-mode"] != "redir-host" || strings.Contains(section, "fake-ip") {
+				t.Fatal("Android returned tunnel-only addresses")
+			}
+			if !strings.Contains(section, dnsUpstreams(strict, domestic, "")) {
+				t.Fatal("Android DNS upstream policy changed")
+			}
 		}
 	}
 }
@@ -313,11 +327,11 @@ func TestConnectionModeDefaultsToSystemProxy(t *testing.T) {
 	if got := a.connectionModeLocked(); got != modeSystemProxy {
 		t.Fatalf("got %q, want %q", got, modeSystemProxy)
 	}
-	a.settings.ConnectionMode = modeTUN
+	testEditSettings(a, func(s *settings) { s.ConnectionMode = modeTUN })
 	if got := a.connectionModeLocked(); got != modeTUN {
 		t.Fatalf("got %q, want %q", got, modeTUN)
 	}
-	a.settings.ConnectionMode = "nonsense"
+	testEditSettings(a, func(s *settings) { s.ConnectionMode = "nonsense" })
 	if got := a.connectionModeLocked(); got != modeSystemProxy {
 		t.Fatalf("an unknown mode must fall back to the system proxy, got %q", got)
 	}
@@ -335,7 +349,7 @@ func TestProbeDomainIsFreshEveryTime(t *testing.T) {
 	// The probe zone must not be inside the fake-ip bypass list, otherwise the
 	// check would never see a fake address.
 	filters := proxyServerDomains([]byte("proxies:\n  - name: node\n    server: abc123.qos.onl\n"))
-	section := dnsConfigSection(filters, false, false, "")
+	section := dnsConfigSection(filters, false, false, false, "")
 	if strings.Contains(section, "smartvpn-probe") {
 		t.Fatal("the probe zone must not be excluded from fake-ip")
 	}

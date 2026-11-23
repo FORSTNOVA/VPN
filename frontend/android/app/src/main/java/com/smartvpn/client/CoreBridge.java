@@ -1,5 +1,6 @@
 package com.smartvpn.client;
 
+import android.content.Context;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 import android.util.Base64;
@@ -44,13 +45,35 @@ public final class CoreBridge {
     private static final int GCM_IV_BYTES = 12;
 
     /** The service whose tunnel is up, and which can protect a socket for it. */
-    private static SmartVpnService service;
+    private static volatile SmartVpnService service;
 
     static {
         System.loadLibrary("smartvpn");
     }
 
     private CoreBridge() {}
+
+    private static final RustCoreStartup STARTUP = new RustCoreStartup();
+    private static final RustCoreStartup.NativeCalls NATIVE_CALLS = new RustCoreStartup.NativeCalls() {
+        @Override public int configure(byte[] path, boolean enabled) {
+            return configureRustCore(path, enabled);
+        }
+        @Override public String start(String dataDir, String bridgeClass) {
+            return CoreBridge.start(dataDir, bridgeClass);
+        }
+    };
+
+    /** Only the installed application's bundled library directory is accepted. */
+    public static String startConfigured(Context context) {
+        return STARTUP.start(BuildConfig.SMARTVPN_RUST_CORE_ENABLED,
+                context.getApplicationInfo().nativeLibraryDir,
+                context.getFilesDir().getAbsolutePath(), CLASS_NAME, NATIVE_CALLS);
+    }
+
+    /** Request state only: rust_requested does not assert successful native loading. */
+    public static String rustCoreStartupStatus() { return STARTUP.status(); }
+
+    private static native int configureRustCore(byte[] path, boolean enabled);
 
     // ---------------------------------------------------------------- native
 
@@ -82,6 +105,12 @@ public final class CoreBridge {
     public static boolean protect(int fd) {
         SmartVpnService current = service;
         return current != null && current.protectSocket(fd);
+    }
+
+    public static boolean systemOwnsVpn() {
+        SmartVpnService current = service;
+        return current != null && (current.systemStarted ||
+                (android.os.Build.VERSION.SDK_INT >= 29 && current.isAlwaysOn()));
     }
 
     /**

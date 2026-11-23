@@ -41,7 +41,7 @@ func TestChainSettingsRoundTrip(t *testing.T) {
 	if got := put(`{"enabled":true,"hops":["出口","出口"]}`); got != 400 {
 		t.Fatal(got)
 	}
-	a.settings = settings{}
+	testSetSettings(a, settings{})
 	a.loadSettings()
 	if !a.settings.Chain.Enabled || strings.Join(a.settings.Chain.Hops, ",") != "入口,出口" {
 		t.Fatal("saved order lost")
@@ -146,7 +146,7 @@ func TestChainThroughMihomo(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "subscription.yaml"), profile, 0600); err != nil {
 		t.Fatal(err)
 	}
-	a := app{settings: settings{SubscriptionURL: "fixture"}}
+	a := *testControlApp(&app{}, func(a *app) { testSetSettings(a, settings{SubscriptionURL: "fixture"}) })
 	proxies, err := a.buildChain(proxyChain{Enabled: true, Hops: []string{"entry", "exit"}}, profile)
 	if err != nil {
 		t.Fatal(err)
@@ -210,15 +210,15 @@ func TestPersonalChainProbe(t *testing.T) {
 	}
 	a := app{home: dir}
 	b, err := os.ReadFile(filepath.Join(dir, "settings.json"))
-	if err != nil || json.Unmarshal(b, &a.settings) != nil || len(a.settings.Chain.Hops) < 2 {
+	if err != nil || a.decodeSettingsDocumentLocked(b) != nil || len(a.settings.Chain.Hops) < 2 {
 		t.Fatal("cannot read selected chain")
 	}
-	db, err := sql.Open("sqlite", "file:"+filepath.ToSlash(filepath.Join(dir, "smartvpn.db"))+"?mode=ro")
+	db, err := sql.Open(storeDriverName, "file:"+filepath.ToSlash(filepath.Join(dir, "smartvpn.db"))+"?mode=ro")
 	if err != nil {
 		t.Fatal("cannot open profile database")
 	}
 	defer db.Close()
-	a.store = &store{db: db}
+	a.store = &store{backend: &goStoreBackend{db: db}}
 	a.loadManualNodesLocked()
 	profile, err := os.ReadFile(a.profilePath())
 	if err != nil {

@@ -243,3 +243,19 @@ JNIEXPORT jstring JNICALL Java_com_smartvpn_client_CoreBridge_setTunnel(
     free(answer);
     return result;
 }
+
+/* Standard UTF-8 bytes, not JNI modified UTF-8. No load/start occurs here. */
+JNIEXPORT jint JNICALL Java_com_smartvpn_client_CoreBridge_configureRustCore(
+    JNIEnv *env, jclass clazz, jbyteArray path, jboolean enabled) {
+    (void)clazz;
+    if (path == NULL) return -1;
+    jsize length = (*env)->GetArrayLength(env, path);
+    if (length < 0 || length > 4096) return -1;
+    char bytes[4096];
+    if (length > 0) {
+        (*env)->GetByteArrayRegion(env, path, 0, length, (jbyte *)bytes);
+        if ((*env)->ExceptionCheck(env)) return -1;
+    }
+    return (jint)SmartVPNRustCoreConfigureN(bytes, (size_t)length,
+                                          enabled == JNI_TRUE ? 1 : 0);
+}

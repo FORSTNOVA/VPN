@@ -9,7 +9,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
-	"os"
 	"strings"
 )
 
@@ -84,22 +83,8 @@ func probeDomain() string {
 // the fake-ip pool rather than a real recursive resolver. A fresh name cannot be
 // in any resolver cache, so a fake answer really proves interception.
 func dnsHijackCheck() tunCheck {
-	check := tunCheck{Name: "DNS 接管（fake-ip）", State: "fail"}
-	addresses, err := net.LookupHost(probeDomain())
-	if err != nil || len(addresses) == 0 {
-		check.Detail = "域名解析失败，无法确认 DNS 是否经过内核"
-		return check
-	}
-	check.Value = strings.Join(addresses, ", ")
-	for _, address := range addresses {
-		if isFakeAddress(address) {
-			check.State = "ok"
-			check.Detail = "解析结果落在 fake-ip 网段，DNS 查询已由内核接管"
-			return check
-		}
-	}
-	check.Detail = "解析结果不是 fake-ip，DNS 可能绕过内核（存在 DNS 泄漏风险）"
-	return check
+	q := tunReportRequest{Op: "dns"}
+	return tunReportCheck(runTunReportWithEffects(q, newAppTunReportEffects(nil, q)))
 }
 
 // nodeDomainCheck proves the counterpart of the hijack above: the tunnel must
@@ -107,39 +92,10 @@ func dnsHijackCheck() tunCheck {
 // resolve to real addresses — a fake answer sends the kernel's connection back
 // into the tunnel, and no node can ever be reached that way.
 func (a *app) nodeDomainCheck(lookup func(string) ([]string, error)) tunCheck {
-	check := tunCheck{Name: "节点域名解析", State: "warn"}
-	body, err := os.ReadFile(a.profilePath())
-	if err != nil {
-		check.Detail = "读不到订阅文件，无法确认节点域名"
-		return check
-	}
-	// A node's own hostname rather than the suffix its hostnames share: what the
-	// kernel has to resolve is the host in the profile, and a suffix like
-	// `+.qos.onl` is not a name that answers anywhere.
-	host := proxyServerHostname(body)
-	if host == "" {
-		check.State = "ok"
-		check.Detail = "订阅里的节点使用 IP 直连，没有需要排除的域名"
-		return check
-	}
-	check.Value = host
-	addresses, err := lookup(host)
-	if err != nil || len(addresses) == 0 {
-		check.State = "fail"
-		check.Detail = "节点域名无法解析，节点会因此不可达"
-		return check
-	}
-	check.Value = host + " → " + strings.Join(addresses, ", ")
-	for _, address := range addresses {
-		if isFakeAddress(address) {
-			check.State = "fail"
-			check.Detail = "节点域名被 fake-ip 接管：代理自身到节点的连接会被吸回隧道"
-			return check
-		}
-	}
-	check.State = "ok"
-	check.Detail = "节点域名解析为真实地址，代理自身的连接不会进入隧道"
-	return check
+	q := tunReportRequest{Op: "node"}
+	fx := newAppTunReportEffects(a, q)
+	fx.lookup = lookup
+	return tunReportCheck(runTunReportWithEffects(q, fx))
 }
 
 func shortDigest(digest string) string {

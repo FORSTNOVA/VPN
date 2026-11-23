@@ -3,16 +3,13 @@
 package main
 
 import (
+	"bytes"
 	"context"
-	"errors"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
-	"strconv"
-	"strings"
-	"syscall"
 	"time"
 )
 
@@ -21,84 +18,73 @@ import (
 // administrator token to create its TUN adapter, and the window must not have
 // to hold one; the child inherits only what it needs.
 type execKernel struct {
-	app    *app
-	path   string
-	cmd    *exec.Cmd
-	exited chan struct{}
-	log    *os.File
-	config string
+	clashRS bool
+	app     *app
+	path    string
+	cmd     *exec.Cmd
+	exited  chan struct{}
+	log     *os.File
+	config  string
+	managed *managedKernelProcess
 }
 
 // newKernel finds the kernel this copy will run: what the user chose, otherwise
 // the copy that came with the package, otherwise the profile.
 func (a *app) newKernel() (kernelRunner, error) {
-	kernel := a.mihomoPath()
-	if _, err := os.Stat(kernel); err != nil {
-		return nil, fmt.Errorf("没找到 Mihomo 内核：%s（把它放在这个位置，或在「订阅与内核」里填写路径）", kernel)
+	q := kernelAdmissionRequest{Op: "new"}
+	e, w := newWindowsKernelAdmission(a, nil, q)
+	r := runKernelAdmissionWithEffects(q, e)
+	if r.Err != nil {
+		return nil, r.Err
 	}
-	return &execKernel{app: a, path: kernel, config: a.configPath()}, nil
+	return w.runner, nil
 }
 
 func (k *execKernel) Running() bool {
-	return k.cmd != nil && k.cmd.Process != nil
+	if k.managed != nil {
+		select {
+		case <-k.exited:
+			return false
+		default:
+			return true
+		}
+	}
+	r := k.app.runWindowsKernelAdmission(k, kernelAdmissionRequest{Op: "running"})
+	if r.Err != nil {
+		panic(r.Err)
+	}
+	return r.Bool
+}
+
+func kernelArgs(clashRS bool, args ...string) []string {
+	if clashRS {
+		return append([]string{"--compatibility"}, args...)
+	}
+	return args
 }
 
 func (k *execKernel) Start() error {
-	cmd := exec.Command(k.path, "-d", k.app.home, "-f", k.config)
-	cmd.Dir = k.app.home
-	logFile, err := os.OpenFile(filepath.Join(k.app.home, "mihomo.log"),
-		os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	host, err := managedHostPath()
 	if err != nil {
-		return errors.New("could not open Mihomo log")
+		return err
 	}
-	cmd.Stdout, cmd.Stderr = logFile, logFile
-	if err := cmd.Start(); err != nil {
-		_ = logFile.Close()
-		return errors.New("could not start Mihomo")
+	if host != "" {
+		return k.startManaged(host)
 	}
-	k.cmd, k.log = cmd, logFile
-	k.exited = make(chan struct{})
-	go func() {
-		_ = cmd.Wait()
-		_ = logFile.Close()
-		close(k.exited)
-		k.app.kernelExited(k)
-	}()
-	return nil
+	return k.app.runWindowsKernelAdmission(k, kernelAdmissionRequest{Op: "start"}).Err
 }
 
 func (k *execKernel) Stop() error {
-	if !k.Running() {
-		return nil
+	if k.managed != nil {
+		return k.stopManaged()
 	}
-	err := k.cmd.Process.Kill()
-	if err == nil {
-		// Kill on Windows returns before the process releases its listener.
-		// Reconnect must be able to bind that same port immediately.
-		<-k.exited
-	}
-	return err
+	return k.app.runWindowsKernelAdmission(k, kernelAdmissionRequest{Op: "stop"}).Err
 }
 
 // A successful dial can belong to another program that bound the fixed port
 // after our availability check. Only publish the proxy once its PID matches.
 func (k *execKernel) verifyPortOwner(port int) error {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, filepath.Join(os.Getenv("SystemRoot"), "System32", "netstat.exe"), "-ano", "-p", "tcp")
-	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	out, err := cmd.Output()
-	if err != nil {
-		return fmt.Errorf("无法核对 SOCKS5 端口 %d 的监听进程：%w", port, err)
-	}
-	addr := "127.0.0.1:" + strconv.Itoa(port)
-	for _, line := range strings.Split(string(out), "\n") {
-		f := strings.Fields(line)
-		if len(f) == 5 && f[1] == addr && f[2] == "0.0.0.0:0" && f[4] == strconv.Itoa(k.cmd.Process.Pid) {
-			return nil
-		}
-	}
-	return fmt.Errorf("内核未能监听 SOCKS5 端口 %s，请检查端口占用后重连", addr)
+	return k.app.runWindowsKernelAdmission(k, kernelAdmissionRequest{Op: "owner", Port: port}).Err
 }
 
 // checkKernelConfig hands a configuration to the kernel and reports whether it
@@ -110,22 +96,33 @@ func (k *execKernel) verifyPortOwner(port int) error {
 // go on. An extra process is a real cost on Windows, so it is spent only where
 // the answer can change what is generated — the domestic address rules.
 func (a *app) checkKernelConfig(configPath string) error {
-	kernel := a.mihomoPath()
-	if kernel == "" {
-		return errors.New("no kernel to check the configuration with")
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, kernel, "-t", "-d", a.home, "-f", configPath)
-	cmd.Dir = a.home
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%v: %s", err, lastLine(string(output)))
-	}
-	return nil
+	return a.runWindowsKernelAdmission(nil, kernelAdmissionRequest{Op: "check-config", Name: configPath}).Err
 }
 
 func (a *app) applyLiveConfig(payload string) error {
+	if k, ok := a.kernel.(*execKernel); ok && k.managed != nil && k.managed.reloadKey != "" {
+		m := k.managed
+		ctx, cancel := context.WithTimeout(m.target.lifetime, 5*time.Second)
+		defer cancel()
+		b, err := json.Marshal(map[string]string{"payload": payload})
+		if err != nil {
+			return err
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodPut, "http://"+m.target.addr+"/managed/config", bytes.NewReader(b))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+m.reloadKey)
+		res, err := localMonitorClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer res.Body.Close()
+		if res.StatusCode < 200 || res.StatusCode >= 300 {
+			return fmt.Errorf("Mihomo returned HTTP %d", res.StatusCode)
+		}
+		return nil
+	}
 	_, err := a.mihomoRequest(http.MethodPut, "/configs", map[string]string{"payload": payload})
 	return err
 }

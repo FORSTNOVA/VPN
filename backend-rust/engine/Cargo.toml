@@ -1,0 +1,18 @@
+[package]
+name = "smartvpn-engine"
+version = "0.3.0-dev.1"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+base64 = "0.22"
+httparse = "1"
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

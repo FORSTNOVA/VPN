@@ -3,10 +3,7 @@
 package main
 
 import (
-	"log"
 	"os"
-	"path/filepath"
-	"strings"
 )
 
 // A copy of the app turns self-contained by carrying a marker beside the
@@ -23,38 +20,21 @@ const (
 // written: a copy unpacked into a read-only place, or opened from inside an
 // archive, has to fall back to the profile rather than fail to start.
 func portableHome(exeDir string) (string, bool) {
-	if exeDir == "" {
-		return "", false
-	}
-	if _, err := os.Stat(filepath.Join(exeDir, portableMarker)); err != nil {
-		return "", false
-	}
-	home := filepath.Join(exeDir, portableDataDir)
-	if err := os.MkdirAll(home, 0700); err != nil {
-		log.Printf("this copy carries %s but %s cannot be created (%v); using the profile instead",
-			portableMarker, home, err)
-		return "", false
-	}
-	probe := filepath.Join(home, ".write-probe")
-	if err := os.WriteFile(probe, []byte("ok"), 0600); err != nil {
-		log.Printf("this copy carries %s but %s is not writable (%v); using the profile instead",
-			portableMarker, home, err)
-		return "", false
-	}
-	_ = os.Remove(probe)
-	return home, true
+	e := newBootstrapEffects(bootstrapServiceRequest{Op: "portable"})
+	e.bundleDir = exeDir
+	r := runBootstrapWithEffects(e.q, e)
+	return e.home, r.Err == nil && r.Bool
 }
 
 // lookFor prefers a file that came with the package over one in the service's own
 // directory. A portable copy therefore runs the kernel where it lies instead of
 // duplicating sixty megabytes into its profile.
 func (a *app) lookFor(name string) string {
-	if a.bundleDir != "" {
-		if bundled := filepath.Join(a.bundleDir, name); fileExists(bundled) {
-			return bundled
-		}
+	r := a.runKernelAdmission(kernelAdmissionRequest{Op: "look-for", Name: name})
+	if r.Err != nil {
+		panic(r.Err)
 	}
-	return filepath.Join(a.home, name)
+	return r.Text
 }
 
 // mihomoPath is the kernel the service will actually run: what the user chose,
@@ -62,10 +42,11 @@ func (a *app) lookFor(name string) string {
 // in the profile. It is resolved on every use rather than stored, so a folder
 // that is moved keeps working.
 func (a *app) mihomoPath() string {
-	if saved := strings.TrimSpace(a.settings.MihomoPath); saved != "" {
-		return saved
+	r := a.runKernelAdmission(kernelAdmissionRequest{Op: "path"})
+	if r.Err != nil {
+		panic(r.Err)
 	}
-	return a.lookFor("mihomo.exe")
+	return r.Text
 }
 
 func fileExists(path string) bool {

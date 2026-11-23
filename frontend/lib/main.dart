@@ -1,4 +1,5 @@
 import 'ui/game_bypass_dialog.dart';
+import 'ui/startup_tile.dart';
 import 'ui/chain_editor.dart';
 import 'ui/subscription_policy_page.dart';
 import 'ui/probe_book.dart';
@@ -24,7 +25,8 @@ part 'ui/subscription_page.dart';
 part 'ui/traffic_page.dart';
 part 'ui/widgets.dart';
 
-void main() => runApp(const SmartVpnApp());
+void main(List<String> args) => runApp(SmartVpnApp(
+    startupConnect: Platform.isWindows && args.contains('--startup-connect')));
 
 /// The sub-pages of the rail, in the order they are offered:
 /// 总览, 线路, 订阅, 流量, 保护策略, 工具.
@@ -60,7 +62,8 @@ extension on _AppPage {
 }
 
 class SmartVpnApp extends StatelessWidget {
-  const SmartVpnApp({super.key});
+  const SmartVpnApp({super.key, this.startupConnect = false});
+  final bool startupConnect;
 
   @override
   Widget build(BuildContext context) {
@@ -68,13 +71,14 @@ class SmartVpnApp extends StatelessWidget {
       title: 'SmartVPN',
       debugShowCheckedModeBanner: false,
       theme: Tokens.theme(),
-      home: const HomePage(),
+      home: HomePage(startupConnect: startupConnect),
     );
   }
 }
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  const HomePage({super.key, this.startupConnect = false});
+  final bool startupConnect;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -94,6 +98,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int? _port;
   String? _token;
   bool _connected = false;
+  bool? _startupEnabled;
   bool _proxyEnabled = false;
   Timer? _stateTimer;
   int _mixedPort = 0;
@@ -232,13 +237,38 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _lifecycle.setMethodCallHandler(_handleLifecycleCall);
     unawaited(_loadDesktopPetSettings());
     unawaited(_startService());
+    if (Platform.isWindows) unawaited(_startupSetting());
+  }
+
+  Future<void> _startupSetting([bool? enabled]) async {
+    try {
+      if (Platform.isAndroid) {
+        await _host.invokeMethod<void>('openVpnSettings');
+        return;
+      }
+      final result = await _lifecycle.invokeMethod<bool>('startupConnect', enabled);
+      if (mounted) setState(() => _startupEnabled = result);
+    } on MissingPluginException {
+      // Widget tests do not have a Windows runner.
+    } catch (error) {
+      if (mounted) setState(() => _error = error.toString());
+    }
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.detached && _port != null) {
-      unawaited(_request('POST', '/api/shutdown')
-          .catchError((_) => <String, dynamic>{}));
+      unawaited(_shutdownDetachedService());
+    }
+  }
+
+  Future<void> _shutdownDetachedService() async {
+    try {
+      if (Platform.isAndroid &&
+          await _host.invokeMethod<bool>('systemOwnsVpn') == true) return;
+      await _request('POST', '/api/shutdown');
+    } catch (_) {
+      // The platform channel or the service may already have detached.
     }
   }
 
@@ -541,6 +571,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           .first
           .timeout(const Duration(seconds: 30));
       await _adoptBootstrap(line);
+      if (widget.startupConnect && !_connected && mounted) {
+        setState(() => _busy = true);
+        try {
+          await _request('POST', '/api/connect?resume=last');
+          await _loadState();
+        } finally {
+          if (mounted) setState(() => _busy = false);
+        }
+      }
     } catch (e) {
       if (mounted) {
         setState(() => _error = e.toString().replaceFirst('Exception: ', ''));
@@ -1078,6 +1117,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                         builder: (_) => ChainEditor(
                               available:
                                   _nodes.map((n) => n.name).toSet().toList(),
+                              nodeGroups: {
+                                for (final n in _nodes) n.name: nodeSourceKind(n),
+                              },
                               initialHops: _chains[original] ?? [],
                               tunnelActive: Platform.isWindows && _kernelRunning &&
                                   _connectionMode != 'system-proxy',

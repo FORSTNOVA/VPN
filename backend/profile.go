@@ -3,18 +3,13 @@ package main
 import (
 	"encoding/base64"
 	"errors"
-	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 type subscriptionProxy struct {
@@ -37,7 +32,7 @@ var (
 	errNoSubscriptionUserInfo = errors.New("subscription response did not include usage information")
 )
 
-func decodeSubscriptionBase64(input string) ([]byte, error) {
+func decodeSubscriptionBase64Go(input string) ([]byte, error) {
 	input = strings.Join(strings.Fields(input), "")
 	for _, encoding := range []*base64.Encoding{base64.StdEncoding, base64.RawStdEncoding, base64.URLEncoding, base64.RawURLEncoding} {
 		if decoded, err := encoding.DecodeString(input); err == nil {
@@ -51,38 +46,41 @@ func decodeSubscriptionBase64(input string) ([]byte, error) {
 // profile. A body that carries only notices yields no nodes, which keeps the
 // caller on the last good profile.
 func yamlProfileNodes(body []byte) []proxyNode {
-	var profile struct {
-		Proxies []subscriptionProxy `yaml:"proxies"`
-		Labels  map[string]string   `yaml:"smartvpn-source-labels"`
+	if nodes, ok := nativeProfileNodes(body); ok {
+		return nodes
 	}
-	if yaml.Unmarshal(body, &profile) != nil || len(profile.Proxies) == 0 {
+	return yamlProfileNodesGo(body)
+}
+func yamlProfileNodesGo(body []byte) []proxyNode {
+	q := nodeFrontRequest{Op: "yaml", Body: body}
+	fx := &appNodeFrontEffects{q: q}
+	r := runSelectedNodeFront(q, fx)
+	indices := r.Data["indices"].([]int)
+	bits := r.Data["bits"].([]int)
+	if indices == nil {
 		return nil
 	}
-	nodes := make([]proxyNode, 0, len(profile.Proxies))
-	for _, proxy := range profile.Proxies {
-		if proxy.Name == "" || proxy.Type == "" || isInformationalNode(proxy.Name) {
-			continue
-		}
-		wsHost := false
-		for key, value := range proxy.WsOpts.Headers {
-			if strings.EqualFold(key, "host") && strings.TrimSpace(stringValue(value)) != "" {
-				wsHost = true
-			}
-		}
-		nodes = append(nodes, proxyNode{
-			SourceLabel: profile.Labels[proxy.Name], Name: proxy.Name, Type: proxy.Type, Network: proxy.Network,
-			TLS: tlsEnabled(proxy.TLS), WsHost: wsHost, WsPath: proxy.WsOpts.Path != "",
-		})
+	nodes := make([]proxyNode, 0, len(indices))
+	for i, index := range indices {
+		p := fx.profile.Proxies[index]
+		nodes = append(nodes, proxyNode{SourceLabel: fx.profile.Labels[p.Name], Name: p.Name, Type: p.Type, Network: p.Network, TLS: bits[i]&1 != 0, WsHost: bits[i]&2 != 0, WsPath: bits[i]&4 != 0})
 	}
-	return uniqueNodes(nodes)
+	return nodes
 }
 
 func parseProfileNodes(body []byte) []proxyNode {
-	_, nodes, err := parseSubscriptionBodyToProxies(body)
-	if err != nil {
+	if nodes, ok := nativeQueryNodes(body); ok {
+		return nodes
+	}
+	return parseProfileNodesViaConverter(body)
+}
+func parseProfileNodesViaConverter(body []byte) []proxyNode {
+	q := nodeFrontRequest{Op: "parse-profile", Body: body}
+	fx := &appNodeFrontEffects{q: q}
+	if runSelectedNodeFront(q, fx).Status == 0 {
 		return nil
 	}
-	return nodes
+	return fx.nodes
 }
 
 // domesticGroupHints name the services a subscription keeps in a group of
@@ -142,40 +140,12 @@ func mapGroupTarget(target string) string {
 // are mapped by mapGroupTarget; the subscription cannot replace the local
 // controller.
 func subscriptionRules(body []byte) []string {
-	var profile struct {
-		Rules []string `yaml:"rules"`
-	}
-	if yaml.Unmarshal(body, &profile) != nil {
-		return nil
-	}
-	allowed := map[string]bool{
-		"DOMAIN": true, "DOMAIN-SUFFIX": true, "DOMAIN-KEYWORD": true,
-		"IP-CIDR": true, "IP-CIDR6": true,
-	}
-	rules := make([]string, 0, len(profile.Rules))
-	for _, rule := range profile.Rules {
-		parts := strings.Split(rule, ",")
-		if len(parts) < 3 || !allowed[strings.TrimSpace(parts[0])] {
-			continue
-		}
-		matcher := strings.TrimSpace(parts[1])
-		if matcher == "" || strings.ContainsAny(matcher, "\r\n") {
-			continue
-		}
-		target := mapGroupTarget(parts[2])
-		if target == "" {
-			continue
-		}
-		clean := strings.TrimSpace(parts[0]) + "," + matcher + "," + target
-		if len(parts) > 3 && strings.TrimSpace(parts[3]) == "no-resolve" {
-			clean += ",no-resolve"
-		}
-		rules = append(rules, clean)
-		if len(rules) == 3000 {
-			break
-		}
-	}
-	return rules
+	return subscriptionRulesParsed(body, nativeSubscriptionPolicy(body))
+}
+func subscriptionRulesParsed(body []byte, parsed *decodedSubscriptionPolicy) []string {
+	q := policyDnsRequest{Op: "subrules", Body: body}
+	fx := &appPolicyDnsEffects{q: q, parsed: parsed}
+	return runSelectedPolicyDns(q, fx).Data["rules"].([]string)
 }
 
 // ruleTarget reads the outbound a generated rule names.
@@ -225,14 +195,13 @@ func tlsEnabled(value any) bool {
 }
 
 func uniqueNodes(nodes []proxyNode) []proxyNode {
-	seen := make(map[string]bool, len(nodes))
-	result := make([]proxyNode, 0, len(nodes))
-	for _, node := range nodes {
-		if seen[node.Name] {
-			continue
-		}
-		seen[node.Name] = true
-		result = append(result, node)
+	q := nodeFrontRequest{Op: "unique"}
+	fx := &appNodeFrontEffects{q: q, nodes: nodes}
+	r := runSelectedNodeFront(q, fx)
+	indices := r.Data["indices"].([]int)
+	result := make([]proxyNode, 0, len(indices))
+	for _, i := range indices {
+		result = append(result, nodes[i])
 	}
 	return result
 }
@@ -257,22 +226,12 @@ func clashFormatURL(raw string) (string, bool) {
 }
 
 func (a *app) profileMatchesSubscription() bool {
-	profile, err := os.ReadFile(a.profilePath())
-	if err != nil || len(parseProfileNodes(profile)) == 0 {
-		return false
-	}
-	actual, err := os.ReadFile(a.profilePath() + ".source")
-	if err != nil {
-		return false
-	}
-	actualStr := strings.TrimSpace(string(actual))
-	if a.settings.SubscriptionURL == mergedSubscriptionURL {
-		return actualStr == mergedSubscriptionURL
-	}
-	return actualStr == subscriptionHash(a.settings.SubscriptionURL)
+	q := nodeFrontRequest{Op: "matches"}
+	fx := &appNodeFrontEffects{q: q, a: a}
+	return runSelectedNodeFront(q, fx).Status == 1
 }
 
-func parseSubscriptionUserInfo(header string) *subscriptionUserInfo {
+func parseSubscriptionUserInfoGo(header string) *subscriptionUserInfo {
 	if strings.TrimSpace(header) == "" {
 		return nil
 	}
@@ -409,200 +368,17 @@ func downloadProfile(subscriptionURL, proxyAddress string) ([]byte, []proxyNode,
 }
 
 func (a *app) proxyAddressesForDownloadLocked() []string {
-	var list []string
-	if a.kernelRunningLocked() && a.mixedPort > 0 {
-		list = append(list, net.JoinHostPort("127.0.0.1", strconv.Itoa(a.mixedPort)))
-		list = append(list, "direct")
-		return list
-	}
-	list = append(list, "direct")
-	if enabled, srv, err := a.proxyState(); err == nil && enabled && strings.TrimSpace(srv) != "" {
-		list = append(list, strings.TrimSpace(srv))
-	}
-	list = append(list, "")
-	return list
+	return a.runProfileService(profileServiceRequest{Op: "proxies"}).Proxies
 }
 
 func (a *app) downloadSubscriptionWithFallback(subscriptionURL string) ([]byte, []proxyNode, *subscriptionUserInfo, error) {
-	candidates := []string{subscriptionURL}
-	if alt, ok := clashFormatURL(subscriptionURL); ok {
-		candidates = append(candidates, alt)
-	}
-	proxies := a.proxyAddressesForDownloadLocked()
-	var lastErr error
-	for _, proxy := range proxies {
-		for _, u := range candidates {
-			body, nodes, uinfo, err := downloadProfileWithInfo(u, proxy)
-			if err == nil && len(nodes) > 0 {
-				return body, nodes, uinfo, nil
-			}
-			if err != nil {
-				lastErr = err
-			}
-		}
-	}
-	if lastErr != nil {
-		return nil, nil, nil, lastErr
-	}
-	return nil, nil, nil, errSubscriptionNetwork
+	r := a.runProfileService(profileServiceRequest{Op: "download", URL: subscriptionURL})
+	return r.Body, r.Nodes, r.Info, r.Err
 }
 
 // fetchProfileLocked keeps the last good profile when a provider returns notices.
 // The caller holds a.mu while changing the selected subscription or node list.
 func (a *app) fetchProfileLocked() ([]proxyNode, error) {
-	if a.settings.SubscriptionURL == "" {
-		return nil, errors.New("set a subscription URL first")
-	}
-	if a.settings.SubscriptionURL == mergedSubscriptionURL {
-		return a.mergeAllEnabledSubscriptionsLocked()
-	}
-	remoteURLs, inlineLines := categorizeSubscriptionInput(a.settings.SubscriptionURL)
-	if len(remoteURLs) == 0 && len(inlineLines) == 0 {
-		return nil, errors.New("set a subscription URL first")
-	}
-
-	var body []byte
-	var nodes []proxyNode
-	chosenFormat := ""
-	hadNoNodes := false
-
-	if len(remoteURLs) == 0 && len(inlineLines) > 0 {
-		// Pure inline node link(s) pasted directly into the subscription box
-		inlineBody := []byte(strings.Join(inlineLines, "\n"))
-		clashBody, clashNodes, err := ensureClashYAML(inlineBody)
-		if err == nil && len(clashNodes) > 0 {
-			body = clashBody
-			nodes = clashNodes
-			chosenFormat = "inline"
-		} else {
-			hadNoNodes = true
-		}
-	} else if len(remoteURLs) == 1 && len(inlineLines) == 0 {
-		// Single remote HTTP(S) subscription
-		targetURL := remoteURLs[0]
-		type candidate struct{ address, format string }
-		candidates := []candidate{{targetURL, "original"}}
-		if alternate, ok := clashFormatURL(targetURL); ok {
-			candidates = append(candidates, candidate{alternate, "cla=1"})
-		}
-		for _, proxyAddress := range a.proxyAddressesForDownloadLocked() {
-			for _, attempt := range candidates {
-				response, parsed, err := downloadProfile(attempt.address, proxyAddress)
-				if err == nil {
-					clashBody, clashNodes, convErr := ensureClashYAML(response)
-					if convErr == nil && len(clashNodes) > 0 {
-						body, nodes, chosenFormat = clashBody, clashNodes, attempt.format
-					} else {
-						body, nodes, chosenFormat = response, parsed, attempt.format
-					}
-					break
-				}
-				if errors.Is(err, errNoUsableNodes) {
-					hadNoNodes = true
-				}
-			}
-			if chosenFormat != "" {
-				break
-			}
-		}
-	} else {
-		// Multiple remote subscriptions and/or mixed remote + inline nodes
-		var downloaded [][]byte
-		for _, u := range remoteURLs {
-			resp, _, _, err := a.downloadSubscriptionWithFallback(u)
-			if err == nil && len(resp) > 0 {
-				downloaded = append(downloaded, resp)
-			} else if errors.Is(err, errNoUsableNodes) {
-				hadNoNodes = true
-			}
-		}
-		if len(inlineLines) > 0 {
-			downloaded = append(downloaded, []byte(strings.Join(inlineLines, "\n")))
-		}
-		if len(downloaded) > 0 {
-			mergedBody, mergedNodes, err := mergeSubscriptionProfiles(downloaded)
-			if err == nil && len(mergedNodes) > 0 {
-				body = mergedBody
-				nodes = mergedNodes
-				chosenFormat = fmt.Sprintf("merged-%d", len(downloaded))
-			}
-		}
-	}
-
-	if chosenFormat == "" {
-		if a.profileMatchesSubscription() {
-			profile, readErr := os.ReadFile(a.profilePath())
-			if readErr == nil {
-				nodes = parseProfileNodes(profile)
-				for i := range nodes {
-					nodes[i].Selected = nodes[i].Name == a.settings.SelectedNode
-				}
-				a.labelSingleSource(nodes)
-				a.cachedNodes = append([]proxyNode(nil), nodes...)
-				a.profileFromCache = true
-				return nodes, nil
-			}
-		}
-		if entry, ok := a.findSubscriptionByURL(a.settings.SubscriptionURL); ok {
-			if cached, readErr := os.ReadFile(a.profileCachePath(entry.ID)); readErr == nil && len(cached) > 0 {
-				nodes = parseProfileNodes(cached)
-				if len(nodes) > 0 {
-					_ = a.useCachedProfileLocked(entry.ID)
-					a.profileFromCache = true
-					return nodes, nil
-				}
-			}
-		}
-		if profile, readErr := os.ReadFile(a.profilePath()); readErr == nil && len(profile) > 0 {
-			nodes = parseProfileNodes(profile)
-			if len(nodes) > 0 {
-				for i := range nodes {
-					nodes[i].Selected = nodes[i].Name == a.settings.SelectedNode
-				}
-				a.cachedNodes = append([]proxyNode(nil), nodes...)
-				a.profileFromCache = true
-				return nodes, nil
-			}
-		}
-		if len(a.cachedNodes) > 0 {
-			a.profileFromCache = true
-			return a.cachedNodes, nil
-		}
-		if hadNoNodes {
-			return nil, errNoUsableNodes
-		}
-		return nil, errSubscriptionNetwork
-	}
-	path := a.profilePath()
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return nil, errors.New("could not create the local profile directory")
-	}
-	tempPath := path + ".tmp"
-	if err := os.WriteFile(tempPath, body, 0600); err != nil {
-		return nil, errors.New("could not save the local profile")
-	}
-	if err := os.Rename(tempPath, path); err != nil {
-		_ = os.Remove(tempPath)
-		return nil, errors.New("could not update the local profile")
-	}
-	if err := os.WriteFile(path+".source", []byte(subscriptionHash(a.settings.SubscriptionURL)), 0600); err != nil {
-		return nil, errors.New("could not save the profile source")
-	}
-	if err := os.WriteFile(path+".format", []byte(chosenFormat), 0600); err != nil {
-		return nil, errors.New("could not save the profile format")
-	}
-	// A fresh copy is what a later switch falls back to, and the subscription
-	// list shows when it was last good.
-	a.profileFromCache = false
-	a.cacheProfileLocked(body, chosenFormat)
-	a.recordSubscriptionUseLocked(subscriptionHash(a.settings.SubscriptionURL), len(nodes), "")
-	for i := range nodes {
-		nodes[i].Selected = nodes[i].Name == a.settings.SelectedNode
-	}
-	a.labelSingleSource(nodes)
-	a.cachedNodes = append([]proxyNode(nil), nodes...)
-	if err := a.saveCachedNodesLocked(nodes); err != nil {
-		return nil, errors.New("could not save the fetched node list")
-	}
-	return nodes, nil
+	r := a.runProfileService(profileServiceRequest{Op: "fetch"})
+	return r.Nodes, r.Err
 }

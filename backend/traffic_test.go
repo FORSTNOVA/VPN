@@ -248,8 +248,8 @@ func TestTrafficReportsAnUnreadableKernel(t *testing.T) {
 		t.Fatalf("an unreadable table must be reported: %v", body)
 	}
 	// The baseline is dropped, so a later reading cannot be mistaken for a burst.
-	if !a.lastTraffic.at.IsZero() {
-		t.Fatalf("the baseline should have been cleared: %+v", a.lastTraffic)
+	if !testTrafficBaseline(a).at.IsZero() {
+		t.Fatalf("the baseline should have been cleared: %+v", testTrafficBaseline(a))
 	}
 }
 

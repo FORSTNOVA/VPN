@@ -3,7 +3,6 @@ package main
 import (
 	"github.com/metacubex/mihomo/component/dialer"
 	"net"
-	"net/url"
 	"strings"
 
 	D "github.com/metacubex/mihomo/dns"
@@ -15,43 +14,12 @@ func init() { dialer.SetTcpConcurrent(true) }
 
 // Only exact node hostnames can inherit a subscription's HTTPS resolvers.
 func entryDNS(profile []byte) map[string][]string {
-	var source struct {
-		Proxies []subscriptionProxy
-		DNS     struct {
-			Policy map[string]any `yaml:"nameserver-policy"`
-		}
-	}
-	if yaml.Unmarshal(profile, &source) != nil || len(source.DNS.Policy) == 0 {
-		return nil
-	}
-	out := map[string][]string{}
-	for _, p := range source.Proxies {
-		host := strings.ToLower(p.Server)
-		if _, ok := hostnameSuffix(host); !ok {
-			continue
-		}
-		if _, ok := out[host]; ok {
-			continue
-		}
-		var values []any
-		switch v := source.DNS.Policy[host].(type) {
-		case string:
-			values = []any{v}
-		case []any:
-			values = v
-		}
-		for _, v := range values {
-			raw, ok := v.(string)
-			if !ok {
-				continue
-			}
-			u, err := url.Parse(raw)
-			if err == nil && u.Scheme == "https" && u.Hostname() != "" && u.User == nil && u.Fragment == "" {
-				out[host] = append(out[host], raw)
-			}
-		}
-	}
-	return out
+	return entryDNSParsed(profile, nativeSubscriptionPolicy(profile))
+}
+func entryDNSParsed(profile []byte, parsed *decodedSubscriptionPolicy) map[string][]string {
+	q := policyDnsRequest{Op: "entrydns", Body: profile}
+	fx := &appPolicyDnsEffects{q: q, parsed: parsed}
+	return runSelectedPolicyDns(q, fx).Data["policy"].(map[string][]string)
 }
 
 func newEntryResolver(urls []string, iface, host string) (*D.Resolver, error) {

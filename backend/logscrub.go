@@ -2,11 +2,7 @@ package main
 
 import (
 	"bytes"
-	"fmt"
 	"io"
-	"log"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -48,18 +44,9 @@ func (r *logRedactor) Write(line []byte) (int, error) {
 	r.mu.Lock()
 	secrets := r.secrets
 	r.mu.Unlock()
-	stripped := line
-	for _, secret := range secrets {
-		if bytes.Contains(stripped, secret) {
-			stripped = bytes.ReplaceAll(stripped, secret, []byte(redacted))
-		}
-	}
-	if _, err := r.out.Write(stripped); err != nil {
-		return 0, err
-	}
-	// The count is the caller's bytes, not the shortened line's: a writer reports
-	// what it consumed, and log.Printf would treat anything less as a short write.
-	return len(line), nil
+	fx := &appPrivacyLogEffects{line: line, rawSecrets: secrets, out: r.out}
+	result := runSelectedPrivacyLog(privacyLogRequest{Op: "write"}, fx)
+	return result.Status, result.Err
 }
 
 // logScrubCap bounds how much of the kernel's log is kept, in bytes. The kernel
@@ -72,23 +59,14 @@ const logScrubCap = 8 << 20
 // active one and every saved one, because a log may have been written while a
 // different subscription was in use.
 func (a *app) subscriptionSecrets() []string {
-	secrets := []string{a.settings.SubscriptionURL}
-	for _, entry := range a.subscriptions {
-		secrets = append(secrets, entry.URL)
+	fx := &appPrivacyLogEffects{a: a}
+	r := runSelectedPrivacyLog(privacyLogRequest{Op: "secrets"}, fx)
+	indices := r.Data["indices"].([]int)
+	out := make([]string, 0, len(indices))
+	for _, i := range indices {
+		out = append(out, strings.TrimSpace(fx.keptStrings[i]))
 	}
-	// An empty or very short value is not a URL, and removing it would garble
-	// unrelated text.
-	kept := make([]string, 0, len(secrets))
-	seen := map[string]bool{}
-	for _, secret := range secrets {
-		secret = strings.TrimSpace(secret)
-		if len(secret) < 12 || seen[secret] {
-			continue
-		}
-		seen[secret] = true
-		kept = append(kept, secret)
-	}
-	return kept
+	return out
 }
 
 // scrubKernelLog removes subscription URLs from the kernel's log and trims it to
@@ -103,43 +81,8 @@ func (a *app) subscriptionSecrets() []string {
 // be started, while nothing holds the file open: replacing a log that a live
 // process still holds would send that process's later lines into the removed one.
 func (a *app) scrubKernelLog() {
-	secrets := a.subscriptionSecrets()
-	path := filepath.Join(a.home, "mihomo.log")
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return
-	}
-	cleaned := tailFromLine(body, logScrubCap)
-	dropped := body[:len(body)-len(cleaned)]
-	redactedCount, droppedCount := 0, 0
-	for _, secret := range secrets {
-		droppedCount += bytes.Count(dropped, []byte(secret))
-		if count := bytes.Count(cleaned, []byte(secret)); count > 0 {
-			redactedCount += count
-			cleaned = bytes.ReplaceAll(cleaned, []byte(secret), []byte(redacted))
-		}
-	}
-	if bytes.Equal(cleaned, body) {
-		return
-	}
-	temp := path + ".tmp"
-	if err := os.WriteFile(temp, cleaned, 0600); err != nil {
-		log.Printf("could not clean the kernel's log: %v", err)
-		return
-	}
-	if err := os.Rename(temp, path); err != nil {
-		log.Printf("could not clean the kernel's log: %v", err)
-		return
-	}
-	// Say which of the two removed the leak: a log that has been trimmed may no
-	// longer hold a URL that was there, and a reader who sees "0 redacted" alone
-	// would think nothing had been done.
-	droppedNote := ""
-	if droppedCount > 0 {
-		droppedNote = fmt.Sprintf(", and those held %d subscription URL(s)", droppedCount)
-	}
-	log.Printf("kernel log: kept the newest %d kB, dropped %d kB of older lines%s, redacted %d subscription URL(s)",
-		len(cleaned)/1024, len(dropped)/1024, droppedNote, redactedCount)
+	fx := &appPrivacyLogEffects{a: a}
+	runSelectedPrivacyLog(privacyLogRequest{Op: "scrub"}, fx)
 }
 
 // tailFromLine returns the last limit bytes of body or more, always starting at
@@ -147,7 +90,7 @@ func (a *app) scrubKernelLog() {
 // window rather than beginning inside a line. A body with no boundary in it at
 // all is truncated where the limit falls, which is the only thing left to do;
 // real logs are lines.
-func tailFromLine(body []byte, limit int) []byte {
+func tailFromLineGo(body []byte, limit int) []byte {
 	if len(body) <= limit {
 		return body
 	}

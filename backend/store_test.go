@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -231,14 +232,14 @@ func TestStoreUpsertNodes(t *testing.T) {
 	}
 
 	var count int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM nodes`).Scan(&count); err != nil {
+	if err := testGoStoreDB(t, s).QueryRow(`SELECT COUNT(*) FROM nodes`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
 	if count != 2 {
 		t.Fatalf("got %d node rows, want 2", count)
 	}
 	var network string
-	if err := s.db.QueryRow(`SELECT network FROM nodes WHERE name = ?`, "日本 02").Scan(&network); err != nil {
+	if err := testGoStoreDB(t, s).QueryRow(`SELECT network FROM nodes WHERE name = ?`, "日本 02").Scan(&network); err != nil {
 		t.Fatal(err)
 	}
 	if network != "grpc" {
@@ -303,4 +304,13 @@ func TestStoreCloseIsIdempotent(t *testing.T) {
 	if err := nilStore.Close(); err != nil {
 		t.Fatalf("closing a nil store must be safe, got %v", err)
 	}
+}
+
+func testGoStoreDB(t *testing.T, s *store) *sql.DB {
+	t.Helper()
+	backend, ok := s.backend.(*goStoreBackend)
+	if !ok || backend.db == nil {
+		t.Fatal("SQL fixture requires the Go test backend")
+	}
+	return backend.db
 }

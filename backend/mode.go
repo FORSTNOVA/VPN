@@ -21,10 +21,12 @@ const (
 // default rather than being refused, so a synced profile cannot leave the app
 // unable to connect.
 func (a *app) connectionModeLocked() string {
-	if mode := a.settings.ConnectionMode; connectionModeSupported(mode) {
-		return mode
+	fx := &appMetadataProjectionEffects{a: a}
+	r := runMetadataProjectionWithEffects(metadataProjectionRequest{Op: "mode"}, fx)
+	if r.Err != nil {
+		panic(r.Err)
 	}
-	return defaultConnectionMode()
+	return r.Text
 }
 
 func tunReason(err error) string {

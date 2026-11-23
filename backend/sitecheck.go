@@ -41,32 +41,8 @@ const cloudflareTraceURL = "https://www.cloudflare.com/cdn-cgi/trace"
 // the selector to the user's choice so the check measures the node that would
 // actually be used. The returned flag tells the caller to stop it again.
 func (a *app) ensureKernelForCheckLocked() (bool, error) {
-	if a.kernelRunningLocked() {
-		return false, nil
-	}
-	if err := a.startMihomoLocked(); err != nil {
-		return false, err
-	}
-	choice := a.selectedChoice()
-	if choice == chainExit && a.settings.Chain.Enabled {
-		if err := a.switchGroupLocked(choice); err != nil {
-			_ = a.stopMihomoLocked()
-			return false, err
-		}
-	} else if choice == autoGroup || choice == fallbackGroup {
-		_, _ = a.mihomoRequest(http.MethodPut, "/proxies/SmartVPN", map[string]string{"name": choice})
-	} else if choice != "" {
-		nodes, err := a.listNodes()
-		if err == nil {
-			for _, node := range nodes {
-				if node.Name == choice {
-					_, _ = a.mihomoRequest(http.MethodPut, "/proxies/SmartVPN", map[string]string{"name": node.Name})
-					break
-				}
-			}
-		}
-	}
-	return true, nil
+	r := a.runDiagnoseService(diagnoseServiceRequest{Op: "ensure"}, nil)
+	return r.Temporary, r.Err
 }
 
 func checkExitIP(proxyURL *url.URL, address string, wantIPv6 bool) exitIPResult {

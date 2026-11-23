@@ -83,7 +83,7 @@ func TestTrafficHistoryAtomicRetryAndFullPagination(t *testing.T) {
 		connections[i] = kernelConnection{ID: fmt.Sprint(i), Upload: 10, Download: 20, Metadata: kernelMetadata{Process: "test.exe"}}
 	}
 	// Failure after the hourly increment must also roll that increment back.
-	_, err := s.db.Exec(`CREATE TRIGGER fail_checkpoint BEFORE INSERT ON traffic_checkpoints BEGIN SELECT RAISE(ABORT,'test failure'); END;`)
+	_, err := testGoStoreDB(t, s).Exec(`CREATE TRIGGER fail_checkpoint BEFORE INSERT ON traffic_checkpoints BEGIN SELECT RAISE(ABORT,'test failure'); END;`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +93,7 @@ func TestTrafficHistoryAtomicRetryAndFullPagination(t *testing.T) {
 	if r := historyReport(t, s, "day", "2026-11-05", "app", "", 100, 0); r.UploadTotal != 0 {
 		t.Fatalf("partial write: %+v", r)
 	}
-	if _, err = s.db.Exec("DROP TRIGGER fail_checkpoint"); err != nil {
+	if _, err = testGoStoreDB(t, s).Exec("DROP TRIGGER fail_checkpoint"); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {

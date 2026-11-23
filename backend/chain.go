@@ -1,16 +1,7 @@
 package main
 
 import (
-	"errors"
-	"fmt"
-	"maps"
 	"net/http"
-	"os"
-	"slices"
-	"strings"
-	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 const chainExit = "SmartVPNChain"
@@ -24,127 +15,46 @@ type proxyChain struct {
 // Build private copies. A provider refresh or an ordinary single-node
 // connection must never inherit the dialer of a chain member.
 func chainProxies(hops []string, profile []byte, manual []manualNode) ([]map[string]any, error) {
-	if len(hops) < 2 || len(hops) > 8 {
-		return nil, errors.New("请选择 2 至 8 个不同的节点")
-	}
-	return prefixProxies(hops, profile, manual)
+	r := (*app)(nil).runChainService(chainServiceRequest{Op: "chain", Hops: hops, Profile: profile, Manual: manual})
+	return r.Proxies, r.Err
 }
 
 func prefixProxies(hops []string, profile []byte, manual []manualNode) ([]map[string]any, error) {
-	index, err := proxyIndex(profile, manual)
-	if err != nil {
-		return nil, err
-	}
-	return compilePrefix(hops, index)
+	r := (*app)(nil).runChainService(chainServiceRequest{Op: "prefix", Hops: hops, Profile: profile, Manual: manual})
+	return r.Proxies, r.Err
 }
 
 func proxyIndex(profile []byte, manual []manualNode) (map[string][]map[string]any, error) {
-	var source struct {
-		Proxies []map[string]any `yaml:"proxies"`
-	}
-	if err := yaml.Unmarshal(profile, &source); err != nil {
-		return nil, errors.New("无法读取订阅节点")
-	}
-	for _, m := range manual {
-		source.Proxies = append(source.Proxies, m.Proxy)
-	}
-	byName := make(map[string][]map[string]any)
-	for _, p := range source.Proxies {
-		name := stringValue(p["name"])
-		byName[name] = append(byName[name], p)
-	}
-	return byName, nil
+	fx := &appMetadataProjectionEffects{body: profile, manual: manual}
+	r := runMetadataProjectionWithEffects(metadataProjectionRequest{Op: "index"}, fx)
+	return fx.index, r.Err
 }
-func compilePrefix(hops []string, byName map[string][]map[string]any) ([]map[string]any, error) {
-	if len(hops) < 1 || len(hops) > 8 {
-		return nil, errors.New("请选择 1 至 8 个节点")
-	}
-	seen := make(map[string]bool)
-	var result []map[string]any
-	var previous string
-	for i, name := range hops {
-		if seen[name] {
-			return nil, fmt.Errorf("第 %d 跳重复选择了同一个节点", i+1)
-		}
-		seen[name] = true
-		if name == "" || len(byName[name]) != 1 {
-			return nil, fmt.Errorf("第 %d 跳节点缺失或重名，请重新选择", i+1)
-		}
-		p := maps.Clone(byName[name][0])
-		if stringValue(p["dialer-proxy"]) != "" {
-			return nil, fmt.Errorf("第 %d 跳已有前置代理，请选择独立节点", i+1)
-		}
-		if stringValue(p["server"]) == "" || stringValue(p["type"]) == "" {
-			return nil, fmt.Errorf("第 %d 跳缺少代理服务器配置", i+1)
-		}
-		alias := fmt.Sprintf("SmartVPNChainHop%d", i+1)
-		if i == len(hops)-1 {
-			alias = chainExit
-		}
-		if len(byName[alias]) != 0 {
-			return nil, fmt.Errorf("节点名称与链路保留名称 %s 冲突", alias)
-		}
-		p["name"] = alias
-		if i > 0 {
-			p["dialer-proxy"] = previous
-		}
-		result = append(result, p)
-		previous = alias
-	}
-	return result, nil
+func compilePrefix(hops []string, index map[string][]map[string]any) ([]map[string]any, error) {
+	r := (*app)(nil).runChainService(chainServiceRequest{Op: "compile", Hops: hops, Index: index})
+	return r.Proxies, r.Err
 }
 
-func (a *app) buildChain(chain proxyChain, profile []byte) ([]byte, error) {
-	if !chain.Enabled {
-		return nil, nil
-	}
-	if a.settings.SubscriptionURL == "" {
-		profile = nil
-	}
-	proxies, err := chainProxies(chain.Hops, profile, a.manualNodes)
-	if err != nil {
-		return nil, err
-	}
-	if a.lockedRegion != "" {
-		exit := a.regions[chain.Hops[len(chain.Hops)-1]]
-		if exit.Status != regionVerified || exit.Country != a.lockedRegion || time.Since(exit.VerifiedAt) > regionTTL {
-			return nil, errors.New("链路出口未验证为已锁定地区，请先解除地区锁或选择已验证的同地区出口")
-		}
-	}
-	return yaml.Marshal(map[string]any{"proxies": proxies})
+func (a *app) buildChain(next proxyChain, profile []byte) ([]byte, error) {
+	r := a.runChainService(chainServiceRequest{Op: "build", Next: next, Profile: profile})
+	return r.Body, r.Err
 }
 
 func (a *app) updateChain(w http.ResponseWriter, r *http.Request) {
 	var next proxyChain
 	if err := decodeJSON(r.Body, &next); err != nil || len(next.Hops) > 8 {
-		http.Error(w, "无效的链式代理设置", http.StatusBadRequest)
+		http.Error(w, chainHTTPMessage0(), 400)
 		return
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.kernelRunningLocked() || a.regionJobRunningLocked() {
-		http.Error(w, "请先断开连接并结束地区检测，再修改链式代理", http.StatusConflict)
-		return
-	}
-	if next.Enabled {
-		if next.Name != "" && !slices.Equal(next.Hops, a.settings.Chains[next.Name]) {
-			http.Error(w, "代理链已修改，请重新选择", 409)
-			return
+	result := a.runChainService(chainServiceRequest{Op: "update", Next: next})
+	if result.Err != nil {
+		status := result.Status
+		if status < 400 {
+			status = 500
 		}
-		profile, _ := os.ReadFile(a.profilePath())
-		if _, err := a.buildChain(next, profile); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-	}
-	old := a.settings.Chain
-	a.settings.Chain = next
-	if err := a.saveSettings(); err != nil {
-		a.settings.Chain = old
-		http.Error(w, "未能保存链式代理", http.StatusInternalServerError)
+		http.Error(w, result.Message, status)
 		return
 	}
-	writeJSON(w, next)
+	writeJSON(w, result.Next)
 }
 
 func (a *app) saveChainProfile(w http.ResponseWriter, r *http.Request) {
@@ -153,57 +63,16 @@ func (a *app) saveChainProfile(w http.ResponseWriter, r *http.Request) {
 		Hops           []string
 	}
 	if decodeJSON(r.Body, &req) != nil {
-		http.Error(w, "无效的代理链", 400)
+		http.Error(w, chainHTTPMessage4(), 400)
 		return
 	}
-	req.Name = strings.TrimSpace(req.Name)
-	if req.Name == "" || len([]rune(req.Name)) > 80 {
-		http.Error(w, "名称须为 1 至 80 个字符", 400)
-		return
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	old := a.settings.Chains
-	if req.Original != "" && old[req.Original] == nil {
-		http.Error(w, "原代理链已不存在", 409)
-		return
-	}
-	if req.Name != req.Original && old[req.Name] != nil {
-		http.Error(w, "代理链名称已存在", 409)
-		return
-	}
-	profile, _ := os.ReadFile(a.profilePath())
-	if a.settings.SubscriptionURL == "" {
-		profile = nil
-	}
-	if _, err := chainProxies(req.Hops, profile, a.manualNodes); err != nil {
-		http.Error(w, err.Error(), 400)
-		return
-	}
-	previous := a.settings.Chain
-	if previous.Enabled && req.Original != "" && previous.Name == req.Original {
-		if a.kernelRunningLocked() || a.regionJobRunningLocked() {
-			http.Error(w, "请先断开连接并结束地区检测，再修改当前使用的代理链", 409)
-			return
+	result := a.runChainService(chainServiceRequest{Op: "save-profile", Name: req.Name, Original: req.Original, Hops: req.Hops})
+	if result.Err != nil {
+		status := result.Status
+		if status < 400 {
+			status = 500
 		}
-		next := proxyChain{Name: req.Name, Enabled: true, Hops: req.Hops}
-		if _, err := a.buildChain(next, profile); err != nil {
-			http.Error(w, err.Error(), 400)
-			return
-		}
-		a.settings.Chain = next
-	}
-	profiles := maps.Clone(old)
-	if profiles == nil {
-		profiles = make(map[string][]string)
-	}
-	delete(profiles, req.Original)
-	profiles[req.Name] = req.Hops
-	a.settings.Chains = profiles
-	if a.saveSettings() != nil {
-		a.settings.Chains = old
-		a.settings.Chain = previous
-		http.Error(w, "保存失败", 500)
+		http.Error(w, result.Message, status)
 		return
 	}
 	writeJSON(w, map[string]bool{"saved": true})

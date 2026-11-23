@@ -3,10 +3,7 @@
 package main
 
 import (
-	"encoding/json"
-	"errors"
-	"fmt"
-	"io"
+	"golang.org/x/sys/windows"
 	"log"
 	"net/http"
 	"os"
@@ -14,8 +11,6 @@ import (
 	"strconv"
 	"sync"
 	"time"
-
-	"golang.org/x/sys/windows"
 )
 
 // window constants for the startup lock. x/sys exposes LockFileEx but not its
@@ -36,7 +31,6 @@ const (
 	serviceShutdownWait = 10 * time.Second
 )
 
-
 type runningServiceInfo struct {
 	Record    serviceRecord
 	Elevated  bool
@@ -46,15 +40,12 @@ type runningServiceInfo struct {
 // selfIdentity describes the executable on disk, which is the same path for
 // every instance because they are launched from the app directory.
 func selfIdentity() (int64, int64) {
-	path, err := os.Executable()
-	if err != nil {
+	e := newBootstrapEffects(bootstrapServiceRequest{Op: "identity"})
+	r := runBootstrapWithEffects(e.q, e)
+	if r.Err != nil {
 		return 0, 0
 	}
-	info, err := os.Stat(path)
-	if err != nil {
-		return 0, 0
-	}
-	return info.Size(), info.ModTime().UnixNano()
+	return e.size, e.mtime
 }
 
 // stale reports whether the service binary was replaced after the recorded
@@ -73,19 +64,8 @@ func (info runningServiceInfo) stale() bool {
 // shouldTakeOver decides whether a new instance asks the running service to
 // stop instead of reusing it.
 func shouldTakeOver(existing runningServiceInfo, elevated bool) bool {
-	// A rebuilt binary has to take effect, otherwise the new build would be
-	// silently served by the old code. A live session is never dropped for it.
-	if existing.stale() && !existing.Connected {
-		return true
-	}
-	// Otherwise keep the privilege the running service has and we lack: an
-	// unnecessary restart would silently disable TUN.
-	if existing.Elevated && !elevated {
-		return false
-	}
-	return elevated && !existing.Elevated
+	return serviceTakeoverDecision(existing.stale(), existing.Connected, existing.Elevated, elevated)
 }
-
 
 func serviceRequest(record serviceRecord, method, route string) (*http.Response, error) {
 	request, err := http.NewRequest(method,
@@ -103,43 +83,25 @@ func serviceRequest(record serviceRecord, method, route string) (*http.Response,
 // port cannot be mistaken for ours, and a record left behind by a crash simply
 // fails the probe.
 func probeService(record serviceRecord) (runningServiceInfo, bool) {
-	if record.Port <= 0 || record.Token == "" {
+	e := newBootstrapEffects(bootstrapServiceRequest{Op: "probe"})
+	e.record = record
+	r := runBootstrapWithEffects(e.q, e)
+	if r.Err != nil || !r.Bool {
 		return runningServiceInfo{}, false
 	}
-	response, err := serviceRequest(record, http.MethodGet, "/api/state")
-	if err != nil {
-		return runningServiceInfo{}, false
-	}
-	defer response.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(response.Body, 64*1024))
-	if response.StatusCode != http.StatusOK {
-		return runningServiceInfo{}, false
-	}
-	var state struct {
-		Elevated  bool `json:"elevated"`
-		Connected bool `json:"connected"`
-	}
-	_ = json.Unmarshal(body, &state)
-	return runningServiceInfo{
-		Record:    record,
-		Elevated:  state.Elevated,
-		Connected: state.Connected,
-	}, true
+	return runningServiceInfo{Record: record, Elevated: e.existingElevated, Connected: e.existingConnected}, true
 }
 
 // runningService reads the published record and checks that it is live.
 func runningService(home string) (runningServiceInfo, bool) {
-	body, err := os.ReadFile(serviceRecordPath(home))
-	if err != nil {
+	e := newBootstrapEffects(bootstrapServiceRequest{Op: "running"})
+	e.home = home
+	r := runBootstrapWithEffects(e.q, e)
+	if r.Err != nil || !r.Bool {
 		return runningServiceInfo{}, false
 	}
-	var record serviceRecord
-	if json.Unmarshal(body, &record) != nil {
-		return runningServiceInfo{}, false
-	}
-	return probeService(record)
+	return runningServiceInfo{Record: e.record, Elevated: e.existingElevated, Connected: e.existingConnected}, true
 }
-
 
 // removeServiceRecord deletes the record only while it still describes this
 // process, so a handing-over instance cannot delete the live service's address.
@@ -186,34 +148,16 @@ func (a *app) adoptBundledFiles(sourceDir string) {
 // one database, and the newcomer's recovery of the proxy settings would
 // disable the proxy of the one already connected.
 func joinService(home string, elevated bool, lockWait, shutdownWait time.Duration) (*serviceLock, serviceRecord, error) {
-	// The usual case needs no lock: a service that is already serving publishes
-	// its address atomically, so it can simply be asked.
-	if existing, alive := runningService(home); alive && !shouldTakeOver(existing, elevated) {
-		return nil, existing.Record, nil
+	e := newBootstrapEffects(bootstrapServiceRequest{Op: "join", Elevated: elevated, Wait: lockWait, ShutdownWait: shutdownWait})
+	e.home = home
+	r := runBootstrapWithEffects(e.q, e)
+	if r.Err != nil {
+		return nil, serviceRecord{}, r.Err
 	}
-
-	lock, err := lockService(home, lockWait)
-	if err != nil {
-		return nil, serviceRecord{}, err
+	if r.Reuse {
+		return nil, e.record, nil
 	}
-	// The launch that held the lock may have published a service while we
-	// waited, which is the whole point of having taken it.
-	existing, alive := runningService(home)
-	if !alive {
-		return lock, serviceRecord{}, nil
-	}
-	if !shouldTakeOver(existing, elevated) {
-		lock.Release()
-		return nil, existing.Record, nil
-	}
-	log.Printf("taking over from the SmartVPN service on port %d", existing.Record.Port)
-	if !handOverTo(existing, shutdownWait) {
-		lock.Release()
-		return nil, serviceRecord{}, fmt.Errorf(
-			"the SmartVPN service on port %d did not shut down; stop it and try again",
-			existing.Record.Port)
-	}
-	return lock, serviceRecord{}, nil
+	return e.win().lock, serviceRecord{}, nil
 }
 
 // handOverTo asks the recorded service to shut down and waits for it to stop
@@ -222,19 +166,10 @@ func joinService(home string, elevated bool, lockWait, shutdownWait time.Duratio
 // service that keeps answering is one this launch must not displace, and the
 // caller turns that into a refusal rather than into a second service.
 func handOverTo(info runningServiceInfo, wait time.Duration) bool {
-	if response, err := serviceRequest(info.Record, http.MethodPost, "/api/shutdown"); err == nil {
-		_ = response.Body.Close()
-	}
-	deadline := time.Now().Add(wait)
-	for {
-		if _, alive := probeService(info.Record); !alive {
-			return true
-		}
-		if !time.Now().Before(deadline) {
-			return false
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
+	e := newBootstrapEffects(bootstrapServiceRequest{Op: "handover", ShutdownWait: wait})
+	e.record = info.Record
+	r := runBootstrapWithEffects(e.q, e)
+	return r.Err == nil && r.Bool
 }
 
 // serviceLock is the exclusive hold a launch keeps on the window in which it
@@ -257,37 +192,10 @@ func serviceLockPath(home string) string {
 // the handle is closed or the process dies: a launch that crashes or is killed
 // cannot leave the next one waiting forever.
 func lockService(home string, wait time.Duration) (*serviceLock, error) {
-	path := serviceLockPath(home)
-	name, err := windows.UTF16PtrFromString(path)
-	if err != nil {
-		return nil, err
-	}
-	handle, err := windows.CreateFile(name,
-		windows.GENERIC_READ|windows.GENERIC_WRITE,
-		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
-		nil, windows.OPEN_ALWAYS, windows.FILE_ATTRIBUTE_NORMAL, 0)
-	if err != nil {
-		return nil, fmt.Errorf("could not open %s: %w", path, err)
-	}
-	deadline := time.Now().Add(wait)
-	for {
-		// The first byte stands for the whole lock, and asking not to wait is
-		// what makes the deadline below possible.
-		err := windows.LockFileEx(handle,
-			lockfileExclusiveLock|lockfileFailImmediately, 0, 1, 0, &windows.Overlapped{})
-		if err == nil {
-			return &serviceLock{handle: handle}, nil
-		}
-		if !errors.Is(err, windows.ERROR_LOCK_VIOLATION) {
-			_ = windows.CloseHandle(handle)
-			return nil, fmt.Errorf("could not lock %s: %w", path, err)
-		}
-		if !time.Now().Before(deadline) {
-			_ = windows.CloseHandle(handle)
-			return nil, fmt.Errorf("another SmartVPN service is starting up and holds %s", path)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	e := newBootstrapEffects(bootstrapServiceRequest{Op: "lock", Wait: wait})
+	e.home = home
+	r := runBootstrapWithEffects(e.q, e)
+	return e.win().lock, r.Err
 }
 
 // Release gives the lock back. It may be called more than once, so a caller can

@@ -1,0 +1,20 @@
+# Phase27: service instance lifecycle and source-label recovery
+
+Two independently selectable Windows amd64 rustcore workflows: SMARTVPN_RUST_LIFECYCLE_FLOW and SMARTVPN_RUST_LABELS_FLOW. Default Go and continuation recovery remain. Rust plans service construction, settings/cache recovery, bundle adoption/config sweep, prepare, API listener handoff, shutdown/cleanup, identify/reapply and full source-label restoration. This is composition through Go-held resources, not a standalone Rust state owner or HTTP server.
+
+Go owns app state and original graphs, partial JSON/YAML parsing, platform secrets, files/store/listener/server/channel objects and actual effects. Rust receives bounded metadata and opaque identities, not credentials or server tokens. Existing migrated manual/subscription/kernel/connection components are explicit reused subusecases, not reimplemented Mihomo.
+
+Settings preserves partial decoded fields on malformed JSON, successful-read-only legacy migration, old chain slice alias, secret failure clearing before cache-hash validation, empty-only defaults and original cache deletion/selection behavior. Construction preserves cleanup/bundle/store/load order and independent failure semantics. Portable mode does not adopt bundled files; existing destination files are not overwritten. Store failure logs but construction continues without dependent loads.
+
+Prepare respects another instance's proxy ownership, then redaction/log cleanup/background refresh ordering. Tests never execute actual proxy or background refresh effects. Serve preserves tcp4 loopback ephemeral binding, reserves the first listener while allocating a noncolliding second, closes failures once, uses the original three-second header timeout and transfers ownership only after validated successful completion. Store ownership likewise transfers only on successful construction. A native interruption cannot silently launch a half-initialized service.
+
+Cleanup retains stop-merge, stop-kernel, conditional proxy restoration and store-close order under lock. Shutdown sends its original capacity-one signal after disconnect's response, including error responses; it does not silently discard a second send. Windows and Android outer shutdown ordering remains different and unchanged. Reapply validates running/mode before setting proxy and commits the flag only on success. Identify reads running under lock and encodes after unlocking.
+
+Source labels preserve single-source backing slices and default label rules. Merged recovery checks cached-source completeness and proxy-graph equivalence, patches only absent metadata keys, preserves present nil-valued keys, uses temp-write/rename with the original failure cleanup and refreshes cached labels only after successful replacement. Original graph identity remains Go-owned; YAML and graph equality are explicit compatibility facts.
+
+Recovered native errors before HTTP response become generic errors; committed responses are never repeated. After a completed effect, fallback resumes its advanced Go continuation, never restarts file writes, renames, store opens, sends or resource closes. Arbitrary default-Go panic recovery is not added.
+
+Verification uses fake file/store/platform/listener/server/scheduler effects and synthetic TempDir documents. Fake listeners never Accept or bind; no actual service, VPN, node connection, system proxy, DNS/routes or user database is touched. Android remains compilation-only. Full regression, review and source delivery are separately recorded.
+
+Final focused validation: 451 Rust tests; 317 safe default Go tests; 1,624 lifecycle and 962 labels actual-DLL comparisons, every normal case zero recovery. Fault coverage: 132 ABI boundaries, 27 post-effect panics, independent capacity64/cancel1200 for both modules, three resource handoff/close cases. Final review corrected session double-close by marking closed before calling it, preserving close-before-finalize even on panic. Eleven original lifecycle text literals match; reapply errors remain unchanged. Full aggregate, platform compilation and delivery status are tracked separately.
+

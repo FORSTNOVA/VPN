@@ -15,33 +15,43 @@ import (
 // comparable with the TCP exit address: if the two differ, the datagrams the
 // node forwards are leaving through something other than the tunnel.
 const (
-	stunBindingRequest   = 0x0001
-	stunBindingSuccess   = 0x0101
-	stunMagicCookie      = 0x2112A442
-	stunHeaderLength     = 20
-	stunAttributeMapped  = 0x0001
-	stunAttributeXor     = 0x0020
-	stunAddressIPv4      = 0x01
-	stunAddressIPv6      = 0x02
+	stunBindingRequest  = 0x0001
+	stunBindingSuccess  = 0x0101
+	stunMagicCookie     = 0x2112A442
+	stunHeaderLength    = 20
+	stunAttributeMapped = 0x0001
+	stunAttributeXor    = 0x0020
+	stunAddressIPv4     = 0x01
+	stunAddressIPv6     = 0x02
 )
 
 // The servers are tried in order and the first answer wins.
 var stunTargets = []string{"stun.l.google.com:19302", "stun.cloudflare.com:3478"}
 
 func buildSTUNRequest() ([]byte, error) {
-	message := make([]byte, stunHeaderLength)
-	if _, err := rand.Read(message[8:20]); err != nil {
+	var id [12]byte
+	if _, err := rand.Read(id[:]); err != nil {
 		return nil, err
 	}
+	return encodeSTUNRequest(id), nil
+}
+
+func encodeSTUNRequestGo(id [12]byte) []byte {
+	message := make([]byte, stunHeaderLength)
 	binary.BigEndian.PutUint16(message[0:2], stunBindingRequest)
-	binary.BigEndian.PutUint16(message[2:4], 0)
 	binary.BigEndian.PutUint32(message[4:8], stunMagicCookie)
-	return message, nil
+	copy(message[8:20], id[:])
+	return message
+}
+
+func matchesSTUNReplyGo(request, reply []byte) bool {
+	return len(request) >= stunHeaderLength && len(reply) >= stunHeaderLength &&
+		binary.BigEndian.Uint16(reply[:2]) == stunBindingSuccess && bytes.Equal(reply[8:20], request[8:20])
 }
 
 // parseSTUNAddress reads the address the server saw. XOR-MAPPED-ADDRESS is what
 // a modern server sends and is preferred; MAPPED-ADDRESS is still accepted.
-func parseSTUNAddress(message []byte) (string, error) {
+func parseSTUNAddressGo(message []byte) (string, error) {
 	if len(message) < stunHeaderLength {
 		return "", errors.New("STUN 应答过短")
 	}
@@ -132,31 +142,10 @@ func stunMask(size int, transaction []byte) []byte {
 // probeUDPEgress reports the address the network sees for the datagrams the node
 // forwards, which is what a WebRTC-style leak test asks.
 func probeUDPEgress(proxyAddress string, timeout time.Duration) (string, int64, error) {
-	request, err := buildSTUNRequest()
-	if err != nil {
-		return "", 0, errors.New("无法构造 STUN 请求")
-	}
-	var lastErr error
-	for _, target := range stunTargets {
-		reply, elapsed, err := socksUDPExchange(proxyAddress, target, request,
-			func(payload []byte) bool {
-				return len(payload) >= stunHeaderLength &&
-					binary.BigEndian.Uint16(payload[0:2]) == stunBindingSuccess &&
-					bytes.Equal(payload[8:20], request[8:20])
-			}, timeout)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		address, err := parseSTUNAddress(reply)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		return address, elapsed, nil
-	}
-	if lastErr == nil {
-		lastErr = errors.New("没有可用的 STUN 服务器")
-	}
-	return "", 0, lastErr
+	q := diagnoseServiceRequest{Op: "stun", ProxyAddress: proxyAddress}
+	e := newAppDiagnoseEffects(nil, q, nil)
+	e.udpTimeout = timeout
+	defer e.Release()
+	r := runSelectedDiagnoseService(q, e)
+	return r.Mapped, r.Elapsed, r.Err
 }

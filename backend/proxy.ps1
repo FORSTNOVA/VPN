@@ -28,8 +28,9 @@ function Set-Record([string]$Name, $Record) {
   $key.SetValue($Name, $value, $kind)
 }
 
-function Same-Json($Left, $Right) {
-  return (ConvertTo-Json -InputObject $Left -Compress -Depth 8) -ceq (ConvertTo-Json -InputObject $Right -Compress -Depth 8)
+function Same-Record($Left, $Right) {
+  return ($Left.present -eq $Right.present) -and ($Left.kind -ceq $Right.kind) -and
+    ((ConvertTo-Json -InputObject $Left.value -Compress -Depth 8) -ceq (ConvertTo-Json -InputObject $Right.value -Compress -Depth 8))
 }
 
 $managed = @('ProxyEnable', 'ProxyServer', 'ProxyOverride', 'AutoConfigURL', 'AutoDetect')
@@ -69,9 +70,23 @@ if ($Action -eq 'enable') {
       AutoConfigURL = @{ present = $false; kind = ''; value = $null }
       AutoDetect = @{ present = $true; kind = 'DWord'; value = 0 }
     }
+    $current = @{}
+    foreach ($name in $managed) { $current[$name] = Get-ValueRecord $name }
+    $restore = $null
+    if ($env:SMARTVPN_PROXY_PLANNER) {
+      # No registry writes occur during negotiation with an older supervisor.
+      $savedEncoding = $OutputEncoding
+      try {
+        $OutputEncoding = [Text.UTF8Encoding]::new($false)
+        $request = ConvertTo-Json @{ address = $appliedAddress; current = $current } -Compress -Depth 8
+        $reply = $request | & $env:SMARTVPN_PROXY_PLANNER --proxy-restore-plan 2>$null
+        if ($LASTEXITCODE -eq 0) { $restore = ConvertFrom-Json -InputObject $reply }
+      } catch { $restore = $null } finally { $OutputEncoding = $savedEncoding }
+    }
     foreach ($name in $managed) {
-      $current = Get-ValueRecord $name
-      if (Same-Json $current $expected[$name]) { Set-Record $name $backup.original.$name }
+      if (($null -eq $restore -or $restore -ccontains $name) -and (Same-Record (Get-ValueRecord $name) $expected[$name])) {
+        Set-Record $name $backup.original.$name
+      }
     }
     Remove-Item -LiteralPath $BackupPath -Force
   }

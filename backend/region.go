@@ -8,7 +8,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -177,7 +176,7 @@ func (a *app) probeRegionLocked() regionProbeResult {
 }
 
 func (a *app) saveRegionLocked(record regionRecord) {
-	a.regions[record.Name] = record
+	a.writeRegionRecordLocked(record.Name, record)
 	if a.store == nil {
 		return
 	}
@@ -187,14 +186,16 @@ func (a *app) saveRegionLocked(record regionRecord) {
 }
 
 func (a *app) regionJobRunningLocked() bool {
-	return a.regionJob != nil && a.regionJob.Running
+	j := a.healthMetaLocked().Job
+	return j != nil && j.Running
 }
 
 func (a *app) regionJobSnapshotLocked() *regionJob {
-	if a.regionJob == nil {
+	j := a.healthMetaLocked().Job
+	if j == nil {
 		return &regionJob{}
 	}
-	snapshot := *a.regionJob
+	snapshot := *j
 	return &snapshot
 }
 
@@ -209,195 +210,30 @@ func (a *app) startRegionVerification(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	a.mu.Lock()
-	if a.settings.Chain.Enabled {
-		a.mu.Unlock()
-		http.Error(w, "请先关闭链式代理，再逐个验证节点地区", http.StatusConflict)
+	result := a.runRegionJobService(regionJobServiceRequest{Op: "start", Refresh: body.Refresh})
+	if result.Status != 200 {
+		http.Error(w, result.Message, result.Status)
 		return
 	}
-	if a.settings.SubscriptionURL == "" {
-		a.mu.Unlock()
-		http.Error(w, "set a subscription URL first", http.StatusBadRequest)
-		return
-	}
-	if a.regionJobRunningLocked() {
-		a.mu.Unlock()
-		http.Error(w, "an exit region check is already running", http.StatusConflict)
-		return
-	}
-	a.regionJob = &regionJob{Running: true, StartedAt: timestamp(time.Now())}
-	a.mu.Unlock()
-
-	go a.runRegionJob(body.Refresh)
-	writeJSON(w, map[string]any{"ok": true, "job": a.regionJobSnapshotLocked()})
+	writeJSON(w, map[string]any{"ok": true, "job": result.Job})
 }
-
 func (a *app) finishRegionJobLocked(err error) {
-	if a.regionJob == nil {
-		return
-	}
-	a.regionJob.Running = false
-	a.regionJob.FinishedAt = timestamp(time.Now())
-	if err != nil {
-		a.regionJob.LastError = err.Error()
+	r := a.runRegionJobService(regionJobServiceRequest{Op: "finish", Err: err})
+	if r.Err != nil {
+		log.Printf("region job finish incomplete: %v", r.Err)
 	}
 }
 
-// runRegionJob walks the node list one node at a time. It releases the lock
-// between nodes so the UI can still poll while a long check runs, and it never
-// holds the group switch across a lock release.
+// The original group is restored once, after all node iterations.
 func (a *app) runRegionJob(refresh bool) {
-	a.mu.Lock()
-	if !a.regionJobRunningLocked() {
-		a.mu.Unlock()
-		return
+	r := a.runRegionJobService(regionJobServiceRequest{Op: "run", Refresh: refresh})
+	if r.Err != nil {
+		log.Printf("region job incomplete: %v", r.Err)
 	}
-	temporary := !a.kernelRunningLocked()
-	if temporary {
-		if err := a.startMihomoLocked(); err != nil {
-			a.finishRegionJobLocked(err)
-			a.mu.Unlock()
-			return
-		}
-	}
-	original := a.activeNodeLocked()
-	nodes, err := a.listNodes()
-	if err != nil {
-		if temporary {
-			a.stopMihomoLocked()
-		}
-		a.finishRegionJobLocked(err)
-		a.mu.Unlock()
-		return
-	}
-	delays, _ := a.groupDelays(8 * time.Second)
-	a.regionJob.Total = len(nodes)
-	a.mu.Unlock()
-
-	for _, node := range nodes {
-		a.mu.Lock()
-		if !a.regionJobRunningLocked() {
-			a.mu.Unlock()
-			break
-		}
-		if !refresh {
-			if record, ok := a.regions[node.Name]; ok &&
-				record.Status == regionVerified && time.Since(record.VerifiedAt) < regionTTL {
-				a.regionJob.Skipped++
-				a.regionJob.Done++
-				a.mu.Unlock()
-				continue
-			}
-		}
-		if delays[node.Name] <= 0 {
-			a.saveRegionLocked(regionRecord{
-				Name: node.Name, Status: regionUnreachable,
-				Detail: "节点未通过延迟测试", VerifiedAt: time.Now(),
-			})
-			a.regionJob.Failed++
-			a.regionJob.Done++
-			a.mu.Unlock()
-			continue
-		}
-		if err := a.switchGroupLocked(node.Name); err != nil {
-			a.saveRegionLocked(regionRecord{
-				Name: node.Name, Status: regionUnreachable,
-				Detail: "无法切换到该节点", VerifiedAt: time.Now(),
-			})
-			a.regionJob.Failed++
-			a.regionJob.Done++
-			a.mu.Unlock()
-			continue
-		}
-		result := a.probeRegionLocked()
-		a.saveRegionLocked(regionRecord{
-			Name: node.Name, ExitIP: result.ExitIP, Country: result.Country,
-			Status: result.Status, Sources: result.Sources, Detail: result.Detail,
-			VerifiedAt: time.Now(),
-		})
-		if result.Status == regionVerified {
-			a.regionJob.Verified++
-		} else {
-			a.regionJob.Failed++
-		}
-		a.regionJob.Done++
-		a.mu.Unlock()
-	}
-
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if original != "" && original != "REJECT" {
-		if err := a.switchGroupLocked(original); err != nil {
-			log.Printf("could not restore the node after an exit region check: %v", err)
-		}
-	}
-	if temporary {
-		a.stopMihomoLocked()
-	}
-	a.finishRegionJobLocked(nil)
 }
 
 func (a *app) regionReport(w http.ResponseWriter, _ *http.Request) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	type regionPayload struct {
-		Name       string   `json:"name"`
-		Country    string   `json:"country,omitempty"`
-		ExitIP     string   `json:"exitIp,omitempty"`
-		Status     string   `json:"status"`
-		Sources    []string `json:"sources,omitempty"`
-		Detail     string   `json:"detail,omitempty"`
-		VerifiedAt string   `json:"verifiedAt,omitempty"`
-		Stale      bool     `json:"stale"`
-	}
-	names := make([]string, 0, len(a.regions))
-	for name := range a.regions {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	payload := make([]regionPayload, 0, len(names))
-	now := time.Now()
-	for _, name := range names {
-		record := a.regions[name]
-		entry := regionPayload{
-			Name: name, Country: record.Country, ExitIP: record.ExitIP,
-			Status: record.Status, Sources: record.Sources, Detail: record.Detail,
-			Stale: record.Status == regionVerified && now.Sub(record.VerifiedAt) > regionTTL,
-		}
-		if !record.VerifiedAt.IsZero() {
-			entry.VerifiedAt = record.VerifiedAt.Format(time.RFC3339)
-		}
-		payload = append(payload, entry)
-	}
-	pool := candidatesForRegion(a.lockedRegion, a.regions, a.health, now)
-	if pool == nil {
-		pool = []string{}
-	}
-	type healthPayload struct {
-		State               string `json:"state"`
-		LatencyMs           int    `json:"latencyMs"`
-		ConsecutiveFailures int    `json:"consecutiveFailures"`
-		CooldownUntil       string `json:"cooldownUntil,omitempty"`
-		UpdatedAt           string `json:"updatedAt,omitempty"`
-	}
-	healthPayloads := make(map[string]healthPayload, len(a.health))
-	for name, record := range a.health {
-		healthPayloads[name] = healthPayload{
-			State:               record.State,
-			LatencyMs:           record.LatencyMs,
-			ConsecutiveFailures: record.ConsecutiveFailures,
-			CooldownUntil:       timestamp(record.CooldownUntil),
-			UpdatedAt:           timestamp(record.UpdatedAt),
-		}
-	}
-	writeJSON(w, map[string]any{
-		"nodes":        payload,
-		"job":          a.regionJobSnapshotLocked(),
-		"lockedRegion": a.lockedRegion,
-		"pool":         pool,
-		"health":       healthPayloads,
-		"ttlHours":     int(regionTTL.Hours()),
-	})
+	writeRegionServiceResult(w, a.runRegionService(regionServiceRequest{Op: "report"}))
 }
 
 func (a *app) lockRegion(w http.ResponseWriter, r *http.Request) {
@@ -408,101 +244,33 @@ func (a *app) lockRegion(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	country := strings.ToUpper(strings.TrimSpace(body.Country))
-	if country != "" && !looksLikeCountryCode(country) {
-		http.Error(w, "the region must be a two-letter country code", http.StatusBadRequest)
-		return
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if country != "" {
-		if a.settings.Chain.Enabled {
-			http.Error(w, "请先关闭链式代理，再更改锁定地区", http.StatusConflict)
-			return
-		}
-		now := time.Now()
-		usable := false
-		for _, record := range a.regions {
-			if record.Status == regionVerified && record.Country == country && now.Sub(record.VerifiedAt) < regionTTL {
-				usable = true
-				break
-			}
-		}
-		if !usable {
-			http.Error(w, errNoLockableRegion.Error(), http.StatusBadRequest)
-			return
-		}
-	}
-	a.lockedRegion = country
-	a.settings.LockedRegion = country
-	if country == "" {
-		a.lockedNode = ""
-		a.settings.LockedNode = ""
-	} else {
-		// The pinned node has to belong to the new region, otherwise the group
-		// would keep carrying an off-region node under a lock that claims
-		// otherwise.
-		a.lockedNode = a.bestKnownCandidateLocked(time.Now())
-		a.settings.LockedNode = a.lockedNode
-	}
-	if err := a.saveSettings(); err != nil {
-		http.Error(w, "could not save the locked region", http.StatusInternalServerError)
-		return
-	}
-	// A lock taken while a connection is running binds that connection, not only
-	// the next one. Leaving the group on the previous region's node would mean
-	// the window says the region is locked while traffic still leaves from
-	// somewhere else, which is the one thing the lock exists to prevent.
-	//
-	// Nothing here is measured: the candidate is the best the health records
-	// know, and if the new region has none that can carry traffic the group is
-	// blocked rather than left where it was. That is the lock's own promise —
-	// it fails closed.
-	if country != "" && a.kernelRunningLocked() {
-		now := time.Now()
-		if a.lockedNode == "" {
-			a.blockLocked("", now, "锁定地区 "+country+" 目前没有可用节点")
-		} else if a.activeNodeLocked() != a.lockedNode {
-			if err := a.switchGroupLocked(a.lockedNode); err != nil {
-				log.Printf("could not pin the group to %s after locking %s: %v", a.lockedNode, country, err)
-			}
-		}
-	}
-	a.recordSwitchLocked(switchEvent{
-		At: time.Now(), Group: "SmartVPN", ToNode: "-",
-		Trigger:  "region_lock",
-		Evidence: "锁定地区：" + country,
-	})
-	writeJSON(w, map[string]any{
-		"ok": true, "lockedRegion": a.lockedRegion,
-		"pool": len(candidatesForRegion(a.lockedRegion, a.regions, a.health, time.Now())),
-	})
+	writeRegionServiceResult(w, a.runRegionService(regionServiceRequest{Op: "lock", Country: body.Country}))
 }
 
 // lockRegionToLocked follows the verified exit region of a node, which is how
 // the UI keeps the lock in step with the user's chosen node. The node itself
 // becomes the pinned selection so automatic groups cannot leave the region.
 func (a *app) lockRegionToLocked(node string) {
-	if a.settings.Chain.Enabled {
+	if a.chainEnabledLocked() {
 		return
 	}
 	if node == "" {
 		return
 	}
-	record, ok := a.regions[node]
+	record, ok := a.regionRecordLocked(node)
 	if !ok || record.Status != regionVerified {
 		return
 	}
 	if time.Since(record.VerifiedAt) > regionTTL {
 		return
 	}
-	if a.lockedRegion == record.Country && a.lockedNode == node {
+	if a.controlMetaLocked().RuntimeLockedRegion == record.Country && a.controlMetaLocked().RuntimeLockedNode == node {
 		return
 	}
-	a.lockedRegion = record.Country
-	a.lockedNode = node
-	a.settings.LockedRegion = record.Country
-	a.settings.LockedNode = node
+	a.patchControlLocked(controlRuntimeLockedRegion, serviceControlState{RuntimeLockedRegion: record.Country})
+	a.patchControlLocked(controlRuntimeLockedNode, serviceControlState{RuntimeLockedNode: node})
+	a.patchControlLocked(controlLockedRegion, serviceControlState{LockedRegion: record.Country})
+	a.patchControlLocked(controlLockedNode, serviceControlState{LockedNode: node})
 	if err := a.saveSettings(); err != nil {
 		log.Printf("could not persist the locked region: %v", err)
 	}

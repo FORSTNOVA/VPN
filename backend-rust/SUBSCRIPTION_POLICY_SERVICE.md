@@ -1,0 +1,9 @@
+# Subscription HTTP and policy/DNS boundary
+
+The native subscription HTTP planner owns fetch/refresh decisions, diagnostic short-lock capture, response/error precedence, payload format selection and statistics, and automatic merge scheduler lifecycle. Existing native profile and merge tick flows are reused. Go retains narrow standard codec observations, payload/body/node graph resources, channels/tickers, clocks and actual IO. Refresh publishes cached nodes before saving and does not roll them back on save failure; diagnostics keeps network and response outside its snapshot lock.
+
+Policy/DNS planners own target resolution (including cycles and overrides), rule filtering and preview, subscription rules, entry DNS selection, domain filtering/merging and hostname selection. Original profile graph references and append backing-array effects remain Go resources. Unicode case/trim/IP/URL codec facts use Go compatibility operations; native logic selects and combines their results. Policy HTTP matching uses separate read/node-codec/source/hash facts rather than an entire Go matching operation. URL credentials are not copied into the matching protocol.
+
+Default Go and explicit native selectors remain. Normal native cases are checked without recovery, while protocol/UTF-8/bounded input failures continue from the observed mirror without repeating completed effects. HTTP writer failures preserve lock/cleanup ownership and never add a second response.
+
+This phase does not claim complete standalone Rust hosting. Bootstrap/instance takeover/proxy ownership/JNI-loss control/log privacy and adaptive DNS/independent health confirmation subflows remain separate migration work. No live network, VPN, DNS settings or user database operations are part of the fake-only verification. Android builds remain compile-only.

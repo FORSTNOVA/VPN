@@ -3,6 +3,7 @@ import 'probe_book.dart';
 
 class ChainEditor extends StatefulWidget {
   final List<String> available;
+  final Map<String, String> nodeGroups;
   final List<String> initialHops;
   final String initialName;
   final bool tunnelActive;
@@ -12,6 +13,7 @@ class ChainEditor extends StatefulWidget {
   const ChainEditor({
     super.key,
     required this.available,
+    this.nodeGroups = const {},
     required this.initialHops,
     required this.initialName,
     this.tunnelActive = false,
@@ -90,6 +92,7 @@ class _ChainEditorState extends State<ChainEditor> {
         title: '替换第 ${index + 1} 跳节点',
         current: current,
         nodes: candidates,
+        nodeGroups: widget.nodeGroups,
       ),
     );
 
@@ -122,6 +125,7 @@ class _ChainEditorState extends State<ChainEditor> {
         prefix: List.of(_hops),
         title: '选择第 ${_hops.length + 1} 跳节点',
         nodes: candidates,
+        nodeGroups: widget.nodeGroups,
       ),
     );
 
@@ -406,10 +410,11 @@ class _ChainEditorState extends State<ChainEditor> {
   }
 }
 
-class _NodeSelectionSheet extends StatelessWidget {
+class _NodeSelectionSheet extends StatefulWidget {
   final String title;
   final String? current;
   final List<String> nodes;
+  final Map<String, String> nodeGroups;
   final ProbeBook book;
   final List<String> prefix;
 
@@ -417,88 +422,171 @@ class _NodeSelectionSheet extends StatelessWidget {
     required this.title,
     this.current,
     required this.nodes,
+    required this.nodeGroups,
     required this.book,
     required this.prefix,
   });
 
   @override
+  State<_NodeSelectionSheet> createState() => _NodeSelectionSheetState();
+}
+
+class _NodeSelectionSheetState extends State<_NodeSelectionSheet> {
+  final _search = TextEditingController();
+  final _collapsed = <String>{};
+  String? _selectedGroup;
+
+  String _groupOf(String node) {
+    final mapped = widget.nodeGroups[node]?.trim();
+    if (mapped != null && mapped.isNotEmpty) return mapped;
+    final name = node.trim();
+    final end = name.indexOf(']');
+    return name.startsWith('[') && end > 1 ? name.substring(0, end + 1) : '默认源';
+  }
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  Widget _chip(String? group, int count) => Padding(
+        padding: const EdgeInsets.only(right: 6),
+        child: ChoiceChip(
+          label: Text('${group ?? '全部'} ($count)'),
+          selected: _selectedGroup == group,
+          onSelected: (_) => setState(() => _selectedGroup = group),
+        ),
+      );
+
+  Widget _nodeTile(String node) {
+    final current = node == widget.current;
+    return ListTile(
+      dense: true,
+      title: Text(node,
+          style: TextStyle(
+            fontWeight: current ? FontWeight.bold : FontWeight.normal,
+            color: current ? Theme.of(context).colorScheme.primary : null,
+          )),
+      subtitle: Wrap(children: [
+        PathProbeButton(book: widget.book, hops: [node], title: '测单节点'),
+        if (widget.prefix.isNotEmpty)
+          PathProbeButton(
+              book: widget.book, hops: [...widget.prefix, node], title: '测此路径'),
+      ]),
+      onTap: () => Navigator.of(context).pop(node),
+    );
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return DraggableScrollableSheet(
-      initialChildSize: 0.6,
-      minChildSize: 0.35,
-      maxChildSize: 0.9,
-      expand: false,
-      builder: (ctx, scrollController) => Column(
-        children: [
-          Container(
-            width: 36,
-            height: 4,
-            margin: const EdgeInsets.symmetric(vertical: 8),
-            decoration: BoxDecoration(
-              color: Colors.grey.shade400,
-              borderRadius: BorderRadius.circular(2),
-            ),
-          ),
-          Padding(
-            padding:
-                const EdgeInsets.symmetric(horizontal: 16.0, vertical: 4.0),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  title,
-                  style: const TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
+    final query = _search.text.trim().toLowerCase();
+    final matches = <String, List<String>>{};
+    var total = 0;
+    for (final node in widget.nodes) {
+      final group = _groupOf(node);
+      final bucket = matches.putIfAbsent(group, () => []);
+      if (group.toLowerCase().contains(query) ||
+          node.toLowerCase().contains(query)) {
+        bucket.add(node);
+        total++;
+      }
+    }
+    final groups = [
+      ...matches.keys.where((g) => g != '默认源' && g != '手动节点'),
+      if (matches.containsKey('默认源')) '默认源',
+      if (matches.containsKey('手动节点')) '手动节点',
+    ];
+    final visible = groups.where((g) =>
+        (_selectedGroup == null || g == _selectedGroup) &&
+        matches[g]!.isNotEmpty);
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+      child: DraggableScrollableSheet(
+        initialChildSize: 0.75,
+        minChildSize: 0.35,
+        maxChildSize: 0.95,
+        expand: false,
+        builder: (context, controller) => CustomScrollView(
+          controller: controller,
+          slivers: [
+            SliverToBoxAdapter(
+                child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+              child: Column(children: [
+                Row(children: [
+                  Expanded(
+                      child: Text(widget.title,
+                          style: Theme.of(context).textTheme.titleMedium)),
+                  TextButton(
+                      onPressed: () => Navigator.of(context).pop(),
+                      child: const Text('取消')),
+                ]),
+                TextField(
+                  controller: _search,
+                  onChanged: (_) => setState(() {}),
+                  decoration: InputDecoration(
+                    isDense: true,
+                    hintText: '搜索节点名或订阅分组',
+                    prefixIcon: const Icon(Icons.search),
+                    suffixIcon: _search.text.isEmpty
+                        ? null
+                        : IconButton(
+                            tooltip: '清除搜索',
+                            icon: const Icon(Icons.clear),
+                            onPressed: () => setState(_search.clear),
+                          ),
                   ),
                 ),
-                TextButton(
-                  onPressed: () => Navigator.of(context).pop(),
-                  child: const Text('取消'),
-                ),
-              ],
-            ),
-          ),
-          const Divider(height: 1),
-          if (nodes.isEmpty)
-            const Expanded(
-              child: Center(
-                child: Text('无可选节点', style: TextStyle(color: Colors.grey)),
-              ),
-            )
-          else
-            Expanded(
-              child: ListView.builder(
-                controller: scrollController,
-                itemCount: nodes.length,
-                itemBuilder: (ctx, idx) {
-                  final node = nodes[idx];
-                  final isCurrent = node == current;
-                  return ListTile(
-                    dense: true,
-                    title: Text(
-                      node,
-                      softWrap: true,
-                      style: TextStyle(
-                        fontWeight:
-                            isCurrent ? FontWeight.bold : FontWeight.normal,
-                        color: isCurrent
-                            ? Theme.of(context).colorScheme.primary
-                            : null,
-                      ),
-                    ),
-                    subtitle: Wrap(children: [
-                      PathProbeButton(book: book, hops: [node], title: '测单节点'),
-                      if (prefix.isNotEmpty)
-                        PathProbeButton(
-                            book: book, hops: [...prefix, node], title: '测此路径'),
+                if (groups.length > 1)
+                  SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(children: [
+                      _chip(null, total),
+                      for (final group in groups)
+                        _chip(group, matches[group]!.length),
                     ]),
-                    onTap: () => Navigator.of(context).pop(node),
-                  );
-                },
-              ),
-            ),
-        ],
+                  ),
+              ]),
+            )),
+            if (visible.isEmpty)
+              SliverFillRemaining(
+                  hasScrollBody: false,
+                  child: Center(
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                      const Text('未找到匹配的节点'),
+                      TextButton(
+                          onPressed: () => setState(() {
+                                _search.clear();
+                                _selectedGroup = null;
+                              }),
+                          child: const Text('清除筛选')),
+                    ]),
+                  )),
+            for (final group in visible) ...[
+              SliverToBoxAdapter(
+                  child: ListTile(
+                dense: true,
+                title: Text(group),
+                trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Text('${matches[group]!.length}'),
+                  Icon(query.isEmpty && _collapsed.contains(group)
+                      ? Icons.expand_more
+                      : Icons.expand_less),
+                ]),
+                enabled: query.isEmpty,
+                onTap: () => setState(() {
+                  if (!_collapsed.remove(group)) _collapsed.add(group);
+                }),
+              )),
+              if (query.isNotEmpty || !_collapsed.contains(group))
+                SliverList.builder(
+                    itemCount: matches[group]!.length,
+                    itemBuilder: (_, index) =>
+                        _nodeTile(matches[group]![index])),
+            ],
+          ],
+        ),
       ),
     );
   }

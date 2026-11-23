@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"net"
 	"testing"
+	"time"
 )
 
 // stunResponse builds a binding reply the way a server would, with the XORing
@@ -65,6 +66,29 @@ func TestBuildSTUNRequest(t *testing.T) {
 	}
 }
 
+func TestSTUNRelaySelectsMatchingTransaction(t *testing.T) {
+	address := startFakeRelay(t, "stun")
+	got, _, err := probeUDPEgress(address, time.Second)
+	if err != nil || got != "192.0.2.2:5678" {
+		t.Fatalf("STUN relay returned %q, %v", got, err)
+	}
+}
+
+func TestSTUNRelayMatchesBeforeParsing(t *testing.T) {
+	request, err := buildSTUNRequest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	q := diagnoseServiceRequest{Op: "stun", ProxyAddress: startFakeRelay(t, "stun-bad-cookie")}
+	e := newAppDiagnoseEffects(nil, q, nil)
+	defer e.Release()
+	e.udpTimeout = time.Second
+	got, _, err := e.exchange(0, request)
+	if got != "" || err == nil || err.Error() != "STUN 应答缺少魔术字" {
+		t.Fatalf("expected the first matching reply to reach the parser: %q %v", got, err)
+	}
+}
+
 func TestParseSTUNAddressXorMapped(t *testing.T) {
 	request, _ := buildSTUNRequest()
 	txid := request[8:20]
@@ -112,11 +136,11 @@ func TestParseSTUNAddressRejections(t *testing.T) {
 	request, _ := buildSTUNRequest()
 	txid := request[8:20]
 	cases := map[string][]byte{
-		"short":              {0x01, 0x01},
-		"not a response":     append([]byte{}, request...),
-		"no address":         stunHeaderOnly(txid),
-		"unknown family":     stunResponse(txid, stunAttributeXor, 0x05, net.ParseIP("203.0.113.7"), 443, true),
-		"truncated address":  stunResponse(txid, stunAttributeXor, stunAddressIPv4, net.ParseIP("203.0.113.7"), 443, true)[:24],
+		"short":             {0x01, 0x01},
+		"not a response":    append([]byte{}, request...),
+		"no address":        stunHeaderOnly(txid),
+		"unknown family":    stunResponse(txid, stunAttributeXor, 0x05, net.ParseIP("203.0.113.7"), 443, true),
+		"truncated address": stunResponse(txid, stunAttributeXor, stunAddressIPv4, net.ParseIP("203.0.113.7"), 443, true)[:24],
 	}
 	for name, message := range cases {
 		t.Run(name, func(t *testing.T) {

@@ -67,12 +67,11 @@ func TestLogRedactorFollowsTheSubscriptionInUse(t *testing.T) {
 }
 
 func TestSubscriptionSecrets(t *testing.T) {
-	a := &app{
-		settings: settings{SubscriptionURL: testURL},
-		subscriptions: []subscriptionEntry{
+	a := testControlApp(testControlApp(&app{}, func(a *app) {
+		testCatalogWrite(a, []subscriptionEntry{
 			{URL: testURL}, {URL: otherURL}, {URL: ""}, {URL: "http://a.b"}, {URL: otherURL},
-		},
-	}
+		})
+	}), func(a *app) { testSetSettings(a, settings{SubscriptionURL: testURL}) })
 	got := a.subscriptionSecrets()
 	want := []string{testURL, otherURL}
 	if strings.Join(got, "|") != strings.Join(want, "|") {
@@ -104,7 +103,7 @@ func TestScrubKernelLogRemovesTheSubscriptionURL(t *testing.T) {
 		"",
 	}, "\n"), 0600)
 
-	a := &app{home: home, settings: settings{SubscriptionURL: testURL}}
+	a := testControlApp(&app{home: home}, func(a *app) { testSetSettings(a, settings{SubscriptionURL: testURL}) })
 	a.scrubKernelLog()
 
 	body, err := os.ReadFile(path)
@@ -136,7 +135,7 @@ func TestScrubKernelLogLeavesACleanLogAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	a := &app{home: home, settings: settings{SubscriptionURL: testURL}}
+	a := testControlApp(&app{home: home}, func(a *app) { testSetSettings(a, settings{SubscriptionURL: testURL}) })
 	a.scrubKernelLog()
 
 	got, err := os.ReadFile(path)
@@ -158,7 +157,7 @@ func TestScrubKernelLogLeavesACleanLogAlone(t *testing.T) {
 }
 
 func TestScrubKernelLogWithoutAFile(t *testing.T) {
-	a := &app{home: filepath.Join(t.TempDir(), "missing"), settings: settings{SubscriptionURL: testURL}}
+	a := testControlApp(&app{home: filepath.Join(t.TempDir(), "missing")}, func(a *app) { testSetSettings(a, settings{SubscriptionURL: testURL}) })
 	a.scrubKernelLog()
 }
 

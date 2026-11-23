@@ -27,14 +27,14 @@ func TestWindowsSocksPortSettings(t *testing.T) {
 	for _, v := range []int{-1, 65536} {
 		update(fmt.Sprintf(`{"socksPort":%d}`, v), 400)
 	}
-	a.settings = settings{}
+	testSetSettings(a, settings{})
 	a.loadSettings()
-	if a.settings.SocksPort != 6258 {
+	if a.settingsLocked().SocksPort != 6258 {
 		t.Fatal("lost saved port")
 	}
 	update(`{"socksPort":0}`, 200)
 	a.loadSettings()
-	if a.settings.SocksPort != 0 {
+	if a.settingsLocked().SocksPort != 0 {
 		t.Fatal("automatic selection not restored")
 	}
 	l, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -57,8 +57,8 @@ func TestWindowsFixedPortKernelReconnect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a.settings.MihomoPath = exe
-	a.settings.SocksPort = p
+	testEditSettings(a, func(s *settings) { s.MihomoPath = exe })
+	testEditSettings(a, func(s *settings) { s.SocksPort = p })
 	if err := a.saveSettings(); err != nil {
 		t.Fatal(err)
 	}
@@ -66,7 +66,7 @@ func TestWindowsFixedPortKernelReconnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	for i := 0; i < 2; i++ {
-		a.settings = settings{}
+		testSetSettings(a, settings{})
 		a.loadSettings()
 		a.mu.Lock()
 		err = a.startMihomoLocked()

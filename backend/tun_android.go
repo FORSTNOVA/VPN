@@ -6,11 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net"
 	"net/http"
-	"net/url"
-	"strconv"
-	"strings"
 	"sync"
 	"syscall"
 )
@@ -23,16 +19,11 @@ import (
 // page that claimed to have created the tunnel would be describing something
 // this process cannot see.
 type vpnTunnel struct {
-	mu         sync.Mutex
-	authorized bool
-	fd         int
-	iface      string
-	routes     []string
-	dns        []string
-	// Whether the kernel took the descriptor over. From that moment the kernel
-	// closes it, and this side must not: closing a descriptor twice is a
-	// different descriptor's problem.
-	handedOver bool
+	mu     sync.Mutex
+	lease  androidTunLease
+	iface  string
+	routes []string
+	dns    []string
 }
 
 var tunnel vpnTunnel
@@ -44,14 +35,7 @@ var tunnel vpnTunnel
 func (t *vpnTunnel) grant(authorized bool, fd int, iface string, routes, dns []string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	// A second description of the same tunnel must not reset what is known
-	// about it: the flag below decides who closes the descriptor, and clearing
-	// it here would have this side close one the kernel is still reading.
-	if t.fd != fd {
-		t.handedOver = false
-	}
-	t.authorized = authorized
-	t.fd = fd
+	t.lease.apply(leaseGrant, int32(fd), authorized)
 	t.iface = iface
 	t.routes = routes
 	t.dns = dns
@@ -61,11 +45,18 @@ func (t *vpnTunnel) grant(authorized bool, fd int, iface string, routes, dns []s
 
 // handOver marks the descriptor as the kernel's, which happens when its tunnel
 // listener came up with it.
-func (t *vpnTunnel) handOver() {
+func (t *vpnTunnel) handOver() uint64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	t.handedOver = true
-	log.Printf("tunnel: descriptor %d is the kernel's from here", t.fd)
+	_, rust := t.lease.apply(leaseHandOver, 0, false)
+	log.Printf("tunnel: descriptor %d handed to kernel (Rust lease=%t)", t.lease.fd, rust)
+	return t.lease.generation
+}
+
+func (t *vpnTunnel) ownedBy(generation uint64) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.lease.generation == generation && t.lease.fd > 0 && t.lease.flags == (leaseAuthorized|leaseKernelOwns)
 }
 
 // release forgets the tunnel. A descriptor the kernel never took has no owner
@@ -74,15 +65,10 @@ func (t *vpnTunnel) handOver() {
 // because the Java side detached it from the object that made it.
 func (t *vpnTunnel) release() {
 	t.mu.Lock()
-	orphan := t.fd
-	if t.handedOver {
-		orphan = 0
-	}
-	t.fd = 0
+	orphan, _ := t.lease.apply(leaseRelease, 0, false)
 	t.iface = ""
 	t.routes = nil
 	t.dns = nil
-	t.handedOver = false
 	t.mu.Unlock()
 	if orphan > 0 {
 		log.Printf("tunnel: closing descriptor %d, which no kernel ever took", orphan)
@@ -93,7 +79,7 @@ func (t *vpnTunnel) release() {
 func (t *vpnTunnel) state() (bool, int, string, []string, []string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.authorized, t.fd, t.iface, append([]string(nil), t.routes...), append([]string(nil), t.dns...)
+	return t.lease.flags&leaseAuthorized != 0, int(t.lease.fd), t.iface, append([]string(nil), t.routes...), append([]string(nil), t.dns...)
 }
 
 // descriptor is the file descriptor the kernel is told to write to, and zero
@@ -101,7 +87,7 @@ func (t *vpnTunnel) state() (bool, int, string, []string, []string) {
 func (t *vpnTunnel) descriptor() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	return t.fd
+	return int(t.lease.fd)
 }
 
 // connectionModeSupported and defaultConnectionMode describe what Android can
@@ -135,7 +121,7 @@ func (a *app) tunUnavailableLocked() error {
 //
 // dns-hijack is kept: the system resolves through the tunnel, so the queries
 // arrive on this interface, and the kernel answers them from its own resolver.
-func tunConfigSection(_ bool) string {
+func tunConfigSectionGo(_ bool) string {
 	return fmt.Sprintf(`tun:
   enable: true
   stack: %s
@@ -162,24 +148,7 @@ const dnsListenLine = ""
 const findProcessMode = "off"
 
 func (a *app) tunStatus(w http.ResponseWriter, _ *http.Request) {
-	tunnel.refresh()
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	authorized, fd, iface, routes, dns := tunnel.state()
-	reason := a.tunUnavailableLocked()
-	writeJSON(w, map[string]any{
-		"mode":       a.connectionModeLocked(),
-		"elevated":   authorized,
-		"interface":  iface,
-		"stack":      tunStack,
-		"mtu":        tunMTU,
-		"routes":     routes,
-		"dns":        dns,
-		"available":  reason == nil,
-		"reason":     tunReason(reason),
-		"active":     a.kernelRunningLocked() && fd > 0,
-		"descriptor": fd,
-	})
+	a.runTunReportHTTP(w, tunReportRequest{Op: "android-status"})
 }
 
 // runTunChecks answers the same question the Windows page does — is traffic
@@ -189,60 +158,7 @@ func (a *app) tunStatus(w http.ResponseWriter, _ *http.Request) {
 // the locked region was verified at, so a tunnel that is up but leaving from
 // somewhere else is reported as a failure rather than as a working connection.
 func (a *app) runTunChecks(w http.ResponseWriter, _ *http.Request) {
-	tunnel.refresh()
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	authorized, fd, iface, routes, dns := tunnel.state()
-	checks := make([]tunCheck, 0, 8)
-	if authorized {
-		checks = append(checks, tunCheck{Name: "VPN 授权", State: "ok", Detail: "系统已允许 SmartVPN 建立 VPN 连接"})
-	} else {
-		checks = append(checks, tunCheck{Name: "VPN 授权", State: "fail", Detail: "尚未授权，连接会由系统弹窗询问"})
-	}
-	if fd > 0 {
-		state, detail := "ok", fmt.Sprintf("VpnService 已建立隧道（fd %d）", fd)
-		if !tunnel.descriptorAlive() {
-			// Worth failing loudly: in this state the device has no network at
-			// all, and everything else on this page would look healthy.
-			state = "fail"
-			detail = fmt.Sprintf("隧道描述符 %d 已被提前关闭：隧道还在接管路由，但没人再读它，"+
-				"此时全部应用的流量都会被丢弃", fd)
-		}
-		checks = append(checks, tunCheck{Name: "隧道", State: state, Value: iface, Detail: detail})
-	} else {
-		checks = append(checks, tunCheck{Name: "隧道", State: "fail", Detail: "VpnService 尚未建立隧道"})
-	}
-	switch {
-	case len(routes) == 0:
-		checks = append(checks, tunCheck{Name: "默认路由", State: "warn",
-			Detail: "读不到隧道的路由表，无法确认默认流量是否进入隧道"})
-	case hasDefaultRoute(routes):
-		checks = append(checks, tunCheck{Name: "默认路由", State: "ok", Value: strings.Join(routes, " "),
-			Detail: "VpnService 把默认路由指向了隧道，全部应用的流量都经过这里"})
-	default:
-		checks = append(checks, tunCheck{Name: "默认路由", State: "fail", Value: strings.Join(routes, " "),
-			Detail: "隧道没有默认路由，受保护流量会走系统网络"})
-	}
-	if len(dns) > 0 {
-		checks = append(checks, tunCheck{Name: "隧道 DNS", State: "ok", Value: strings.Join(dns, ", "),
-			Detail: "系统解析地址落在隧道内，查询会由内核接管"})
-	}
-
-	active := a.kernelRunningLocked() && fd > 0
-	if !active {
-		checks = append(checks, tunCheck{Name: "连接", State: "warn",
-			Detail: "尚未连接，路径检查只在连接后才有意义"})
-		writeJSON(w, map[string]any{"active": false, "checks": checks})
-		return
-	}
-
-	checks = append(checks, dnsHijackNote())
-	checks = append(checks, a.nodeDomainCheck(net.LookupHost))
-	checks = append(checks, a.exitRegionCheckLocked())
-	checks = append(checks, tunCheck{Name: "IPv6 出口", State: "warn", Detail: tunIPv6Disabled})
-
-	writeJSON(w, map[string]any{"active": true, "checks": checks, "interface": iface})
+	a.runTunReportHTTP(w, tunReportRequest{Op: "android-checks"})
 }
 
 // dnsHijackNote is what this platform can say about DNS.
@@ -256,53 +172,14 @@ func (a *app) runTunChecks(w http.ResponseWriter, _ *http.Request) {
 //
 // What is worth saying is that, plainly, so that nobody reads the rest of the
 // page as though this check had passed.
-func dnsHijackNote() tunCheck {
-	return tunCheck{
-		Name:  "DNS 接管",
-		State: "warn",
-		Detail: "本机进程有意留在隧道之外（订阅与节点连接必须直连），因此无法从进程内验证" +
-			"系统 DNS 是否被内核接管；默认路由与出口地区两项才是这台设备生效的证据",
-	}
-}
 
 // exitRegionCheckLocked measures the address the tunnel exits at and holds it
 // against the region that is locked and the address that region was verified
 // at. Everything else on this page proves the tunnel exists; this proves the
 // traffic in it leaves where the user asked it to.
 func (a *app) exitRegionCheckLocked() tunCheck {
-	check := tunCheck{Name: "出口地区", State: "warn"}
-	node := a.activeNodeLocked()
-	record, known := a.regions[node]
-	if !known || record.ExitIP == "" {
-		check.Detail = "当前节点还没有验证过的出口地址，先在地区页做一次实测"
-		return check
-	}
-	proxyURL := &url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(a.mixedPort))}
-	measured := checkExitIP(proxyURL, exitIPProbeURL(false), false)
-	if measured.Address == "" {
-		check.State = "fail"
-		check.Detail = "经隧道查询出口地址失败：" + measured.Error
-		return check
-	}
-	check.Value = measured.Address + " · " + record.Country
-	if measured.Address != record.ExitIP {
-		check.State = "fail"
-		check.Detail = fmt.Sprintf("出口地址与验证过的 %s 不一致（当时为 %s），节点可能已经换了出口",
-			record.ExitIP, record.Country)
-		return check
-	}
-	if a.lockedRegion != "" && !strings.EqualFold(a.lockedRegion, record.Country) {
-		check.State = "fail"
-		check.Detail = fmt.Sprintf("锁定地区是 %s，当前出口却是 %s", a.lockedRegion, record.Country)
-		return check
-	}
-	check.State = "ok"
-	if a.lockedRegion == "" {
-		check.Detail = "出口地址与验证结果一致；没有锁定地区，因此只是报告"
-		return check
-	}
-	check.Detail = "出口地址与锁定地区的验证结果一致，锁定生效"
-	return check
+	q := tunReportRequest{Op: "region"}
+	return tunReportCheck(runTunReportWithEffects(q, newAppTunReportEffects(a, q)))
 }
 
 // refresh asks the system for the tunnel's description as it stands now and
@@ -314,19 +191,25 @@ func (a *app) exitRegionCheckLocked() tunCheck {
 // say the tunnel has no routes while it is carrying everything.
 func (t *vpnTunnel) refresh() {
 	t.mu.Lock()
-	ask := t.fd > 0
+	lease := t.lease
 	t.mu.Unlock()
-	if !ask {
+	if lease.fd <= 0 {
 		return
 	}
 	report, ok := jniDescribeTunnel()
 	if !ok {
 		return
 	}
+	t.refreshReport(lease.generation, report)
+}
+
+func (t *vpnTunnel) refreshReport(generation uint64, report tunnelReport) {
 	t.mu.Lock()
-	t.iface = report.Interface
-	t.routes = report.Routes
-	t.dns = report.DNS
+	if t.lease.fd > 0 && t.lease.generation == generation {
+		t.iface = report.Interface
+		t.routes = report.Routes
+		t.dns = report.DNS
+	}
 	t.mu.Unlock()
 }
 
@@ -339,8 +222,8 @@ func (t *vpnTunnel) refresh() {
 // and that is worth saying on the checks page before anything else notices.
 func (t *vpnTunnel) descriptorAlive() bool {
 	t.mu.Lock()
-	fd := t.fd
-	t.mu.Unlock()
+	defer t.mu.Unlock()
+	fd := int(t.lease.fd)
 	if fd <= 0 {
 		return false
 	}
@@ -362,11 +245,7 @@ func (a *app) dropTunnel() {
 
 // hasDefaultRoute reports whether the tunnel owns the default route of either
 // protocol. The VpnService sets these; this only reads them back.
-func hasDefaultRoute(routes []string) bool {
-	for _, route := range routes {
-		if route == "0.0.0.0/0" || route == "::/0" {
-			return true
-		}
-	}
-	return false
+
+func configTUNFacts() (string, string, int, int) {
+	return tunStack, "", tunMTU, tunnel.descriptor()
 }

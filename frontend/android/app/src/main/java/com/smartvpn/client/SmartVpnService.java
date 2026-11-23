@@ -66,6 +66,7 @@ public class SmartVpnService extends VpnService {
     }
 
     private static Listener pending;
+    volatile boolean systemStarted;
 
     static void setListener(Listener listener) {
         pending = listener;
@@ -85,23 +86,67 @@ public class SmartVpnService extends VpnService {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
-        String action = intent == null ? ACTION_START : intent.getAction();
+        String action = intent == null ? null : intent.getAction();
         if (ACTION_STOP.equals(action)) {
             answer(false, "已断开");
             stopSelf();
             return START_NOT_STICKY;
         }
         startForeground(NOTIFICATION_ID, notification("正在建立隧道"));
+        if (!ACTION_START.equals(action)) systemStarted = true;
         if (tunnel != null) {
             answer(true, "");
             return START_NOT_STICKY;
+        }
+        boolean systemStart = !ACTION_START.equals(action);
+        String bootstrap = null;
+        if (systemStart) {
+            try {
+                bootstrap = CoreBridge.startConfigured(getApplicationContext());
+                if (bootstrap == null || new JSONObject(bootstrap).optInt("port") <= 0) {
+                    throw new IllegalStateException("local service unavailable");
+                }
+            } catch (Exception error) {
+                android.util.Log.w("SmartVPN", "always-on bootstrap failed");
+                stopSelf();
+                return START_NOT_STICKY;
+            }
         }
         String failure = establish();
         answer(failure == null, failure == null ? "" : failure);
         if (failure != null) {
             stopSelf();
+        } else if (systemStart) {
+            resumeLastConnection(bootstrap, startId);
         }
         return START_NOT_STICKY;
+    }
+
+    private void resumeLastConnection(String bootstrap, int startId) {
+        updateNotification("正在恢复上次连接");
+        new Thread(() -> {
+            java.net.HttpURLConnection http = null;
+            try {
+                JSONObject record = new JSONObject(bootstrap);
+                java.net.URL url = new java.net.URL("http", "127.0.0.1", record.getInt("port"),
+                        "/api/connect?resume=last");
+                http = (java.net.HttpURLConnection) url.openConnection(java.net.Proxy.NO_PROXY);
+                http.setInstanceFollowRedirects(false);
+                http.setConnectTimeout(5000);
+                http.setReadTimeout(90000);
+                http.setRequestMethod("POST");
+                http.setRequestProperty("Authorization", "Bearer " + record.getString("token"));
+                if (http.getResponseCode() != 200) throw new java.io.IOException("connect failed");
+                new android.os.Handler(getMainLooper()).post(() -> {
+                    if (tunnel != null) updateNotification("已连接");
+                });
+            } catch (Exception error) {
+                android.util.Log.w("SmartVPN", "always-on connection failed");
+                new android.os.Handler(getMainLooper()).post(() -> stopSelfResult(startId));
+            } finally {
+                if (http != null) http.disconnect();
+            }
+        }, "smartvpn-resume").start();
     }
 
     /**
@@ -292,16 +337,17 @@ public class SmartVpnService extends VpnService {
         vpnCallback = new ConnectivityManager.NetworkCallback() {
             @Override
             public void onAvailable(Network network) {
-                reportTunnel();
+                if (vpnCallback == this) reportTunnel();
             }
 
             @Override
             public void onLinkPropertiesChanged(Network network, LinkProperties properties) {
-                reportTunnel();
+                if (vpnCallback == this) reportTunnel();
             }
         };
         try {
-            manager.registerNetworkCallback(tunnelRequest, vpnCallback);
+            manager.registerNetworkCallback(tunnelRequest, vpnCallback,
+                    new android.os.Handler(getMainLooper()));
         } catch (Exception error) {
             android.util.Log.w("SmartVPN", "could not watch the tunnel's network: " + error);
         }
@@ -327,14 +373,11 @@ public class SmartVpnService extends VpnService {
 
     @Override
     public void onRevoke() {
-        // The system takes the tunnel back when another VPN is started or the
-        // user withdraws the authorisation. The Go side is told before the
-        // descriptor goes: a kernel left running against a closed tunnel would
-        // report a connection that carries nothing.
-        super.onRevoke();
+        // Android may invoke this on a Binder thread. The framework's default
+        // implementation stops the service; onDestroy owns tunnel teardown on
+        // the main thread for both explicit stops and revocation.
         android.util.Log.i("SmartVPN", "the system revoked the tunnel");
-        closeTunnel();
-        stopSelf();
+        super.onRevoke();
     }
 
     @Override

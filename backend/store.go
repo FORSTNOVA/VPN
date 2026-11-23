@@ -3,11 +3,8 @@ package main
 import (
 	"database/sql"
 	"errors"
-	"fmt"
 	"strings"
 	"time"
-
-	_ "modernc.org/sqlite"
 )
 
 // regionStatus records how much confidence a node's exit region has. Only
@@ -39,7 +36,7 @@ type switchEvent struct {
 	Evidence string
 }
 
-type store struct {
+type goStoreBackend struct {
 	db *sql.DB
 }
 
@@ -90,8 +87,8 @@ CREATE TABLE IF NOT EXISTS settings_kv (
 CREATE INDEX IF NOT EXISTS switch_events_at ON switch_events (at DESC);
 `
 
-func openStore(path string) (*store, error) {
-	db, err := sql.Open("sqlite", path)
+func openGoStoreBackend(path string) (*goStoreBackend, error) {
+	db, err := sql.Open(storeDriverName, path)
 	if err != nil {
 		return nil, err
 	}
@@ -106,22 +103,35 @@ func openStore(path string) (*store, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	if _, err := db.Exec(storeSchema + trafficHistorySchema); err != nil {
+	if err := migrateGoStore(db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
-	var hasDetails int
-	if err = db.QueryRow("SELECT count(*) FROM pragma_table_info('probe_results') WHERE name='details'").Scan(&hasDetails); err == nil && hasDetails == 0 {
-		_, err = db.Exec("ALTER TABLE probe_results ADD COLUMN details TEXT NOT NULL DEFAULT ''")
-	}
-	if err != nil {
-		db.Close()
-		return nil, err
-	}
-	return &store{db: db}, nil
+	return &goStoreBackend{db: db}, nil
 }
 
-func (s *store) Close() error {
+func migrateGoStore(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(storeSchema + trafficHistorySchema); err != nil {
+		return err
+	}
+	var hasDetails int
+	if err := tx.QueryRow("SELECT count(*) FROM pragma_table_info('probe_results') WHERE name='details'").Scan(&hasDetails); err != nil {
+		return err
+	}
+	if hasDetails == 0 {
+		if _, err := tx.Exec("ALTER TABLE probe_results ADD COLUMN details TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (s *goStoreBackend) Close() error {
 	if s == nil || s.db == nil {
 		return nil
 	}
@@ -142,8 +152,7 @@ func timeFromUnix(seconds int64) time.Time {
 	return time.Unix(seconds, 0)
 }
 
-func (s *store) upsertNodes(nodes []proxyNode) error {
-	now := unixSeconds(time.Now())
+func (s *goStoreBackend) upsertNodesAt(nodes []proxyNode, now int64) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -173,7 +182,7 @@ func (s *store) upsertNodes(nodes []proxyNode) error {
 	return tx.Commit()
 }
 
-func (s *store) saveRegion(record regionRecord) error {
+func (s *goStoreBackend) saveRegion(record regionRecord) error {
 	_, err := s.db.Exec(`
 		INSERT INTO region_verify (name, exit_ip, country, status, sources, detail, verified_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -189,7 +198,7 @@ func (s *store) saveRegion(record regionRecord) error {
 	return err
 }
 
-func (s *store) loadRegions() (map[string]regionRecord, error) {
+func (s *goStoreBackend) loadRegions() (map[string]regionRecord, error) {
 	rows, err := s.db.Query(`SELECT name, exit_ip, country, status, sources, detail, verified_at FROM region_verify`)
 	if err != nil {
 		return nil, err
@@ -213,12 +222,12 @@ func (s *store) loadRegions() (map[string]regionRecord, error) {
 	return records, rows.Err()
 }
 
-func (s *store) clearRegions() error {
+func (s *goStoreBackend) clearRegions() error {
 	_, err := s.db.Exec(`DELETE FROM region_verify`)
 	return err
 }
 
-func (s *store) saveHealth(record nodeHealth) error {
+func (s *goStoreBackend) saveHealth(record nodeHealth) error {
 	_, err := s.db.Exec(`
 		INSERT INTO health (name, state, consecutive_failures, consecutive_successes,
 			latency_ms, last_success_at, cooldown_until, updated_at)
@@ -237,7 +246,7 @@ func (s *store) saveHealth(record nodeHealth) error {
 	return err
 }
 
-func (s *store) loadHealth() (map[string]nodeHealth, error) {
+func (s *goStoreBackend) loadHealth() (map[string]nodeHealth, error) {
 	rows, err := s.db.Query(`SELECT name, state, consecutive_failures, consecutive_successes,
 		latency_ms, last_success_at, cooldown_until, updated_at FROM health`)
 	if err != nil {
@@ -261,12 +270,12 @@ func (s *store) loadHealth() (map[string]nodeHealth, error) {
 	return records, rows.Err()
 }
 
-func (s *store) clearHealth() error {
+func (s *goStoreBackend) clearHealth() error {
 	_, err := s.db.Exec(`DELETE FROM health`)
 	return err
 }
 
-func (s *store) appendSwitchEvent(event switchEvent) error {
+func (s *goStoreBackend) appendSwitchEvent(event switchEvent) error {
 	_, err := s.db.Exec(`
 		INSERT INTO switch_events (at, group_name, from_node, to_node, trigger, evidence)
 		VALUES (?, ?, ?, ?, ?, ?)`,
@@ -275,7 +284,7 @@ func (s *store) appendSwitchEvent(event switchEvent) error {
 	return err
 }
 
-func (s *store) recentSwitchEvents(limit int) ([]switchEvent, error) {
+func (s *goStoreBackend) recentSwitchEvents(limit int) ([]switchEvent, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -299,14 +308,14 @@ func (s *store) recentSwitchEvents(limit int) ([]switchEvent, error) {
 	return events, rows.Err()
 }
 
-func (s *store) setValue(key, value string) error {
+func (s *goStoreBackend) setValue(key, value string) error {
 	_, err := s.db.Exec(`
 		INSERT INTO settings_kv (key, value) VALUES (?, ?)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
 	return err
 }
 
-func (s *store) getValue(key string) (string, bool, error) {
+func (s *goStoreBackend) getValue(key string) (string, bool, error) {
 	var value string
 	err := s.db.QueryRow(`SELECT value FROM settings_kv WHERE key = ?`, key).Scan(&value)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -316,24 +325,4 @@ func (s *store) getValue(key string) (string, bool, error) {
 		return "", false, err
 	}
 	return value, true, nil
-}
-
-func (s *store) saveHealthParams(params healthParams) error {
-	body, err := params.encode()
-	if err != nil {
-		return err
-	}
-	return s.setValue("health_params", body)
-}
-
-func (s *store) loadHealthParams() (healthParams, error) {
-	params := defaultHealthParams()
-	body, found, err := s.getValue("health_params")
-	if err != nil || !found {
-		return params, err
-	}
-	if err := params.decode(body); err != nil {
-		return defaultHealthParams(), fmt.Errorf("stored health parameters were unreadable: %w", err)
-	}
-	return params.normalized(), nil
 }

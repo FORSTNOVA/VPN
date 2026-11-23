@@ -180,18 +180,20 @@ func pathRoundApp(t *testing.T, region string, nodes ...string) (*app, *controll
 	})
 	a := stub.app(t)
 	runningKernel(t, a)
-	a.lockedRegion = region
+	a.patchControlLocked(controlRuntimeLockedRegion, serviceControlState{RuntimeLockedRegion: region})
 	now := time.Now()
 	for _, name := range nodes {
 		if region != "" {
-			a.regions[name] = regionRecord{Name: name, Country: region, Status: regionVerified, VerifiedAt: now}
+			a.writeRegionRecordLocked(name, regionRecord{Name: name, Country: region, Status: regionVerified, VerifiedAt: now})
 		}
-		a.health[name] = nodeHealth{Name: name, State: healthHealthy, UpdatedAt: now, LastSuccessAt: now}
+		a.writeHealthRecordLocked(name, nodeHealth{Name: name, State: healthHealthy, UpdatedAt: now, LastSuccessAt: now})
 	}
-	a.settings.PathChecks = pathCheckSettings{
-		Enabled: true, IntervalSec: 60,
-		Targets: []pathTarget{{Label: "YouTube", URL: "https://www.youtube.com/generate_204", Enabled: true}},
-	}
+	testEditPath(a, func(p *servicePathState) {
+		p.Config = pathCheckSettings{
+			Enabled: true, IntervalSec: 60,
+			Targets: []pathTarget{{Label: "YouTube", URL: "https://www.youtube.com/generate_204", Enabled: true}},
+		}
+	})
 	return a, stub, currentChoice
 }
 
@@ -226,7 +228,7 @@ func pathResults(targets []pathTarget, passing bool) []siteCheckResult {
 func TestPathRoundSwitchesUntilItPasses(t *testing.T) {
 	a, stub, choice := pathRoundApp(t, "JP", "jp-a", "jp-b")
 	// jp-a is the node in use and it is the one that cannot reach the site.
-	a.health["jp-a"] = nodeHealth{Name: "jp-a", State: healthUnhealthy, UpdatedAt: time.Now()}
+	a.writeHealthRecordLocked("jp-a", nodeHealth{Name: "jp-a", State: healthUnhealthy, UpdatedAt: time.Now()})
 	check, attempts := checkerThatFailsOnce()
 
 	a.runPathRound(check)
@@ -240,11 +242,11 @@ func TestPathRoundSwitchesUntilItPasses(t *testing.T) {
 	if choice() != "jp-b" {
 		t.Fatalf("the group must end on the passing node, got %q", choice())
 	}
-	if len(a.pathStatus.Failures) != 0 || a.pathStatus.Note != "" {
-		t.Fatalf("the round must end clean: %+v", a.pathStatus)
+	if len(a.pathStatusLocked().Failures) != 0 || a.pathStatusLocked().Note != "" {
+		t.Fatalf("the round must end clean: %+v", a.pathStatusLocked())
 	}
-	if a.lockedNode != "jp-b" {
-		t.Fatalf("the pinned node follows the switch: %q", a.lockedNode)
+	if a.controlLocked().RuntimeLockedNode != "jp-b" {
+		t.Fatalf("the pinned node follows the switch: %q", a.controlLocked().RuntimeLockedNode)
 	}
 }
 
@@ -253,14 +255,14 @@ func TestPathRoundStopsWhenTheRegionRunsOut(t *testing.T) {
 	// Nothing passes, so every candidate is tried and then it gives up.
 	a.runPathRound(checkerAlwaysFailing())
 
-	if len(a.pathStatus.Failures) == 0 {
-		t.Fatalf("the failure must be recorded: %+v", a.pathStatus)
+	if len(a.pathStatusLocked().Failures) == 0 {
+		t.Fatalf("the failure must be recorded: %+v", a.pathStatusLocked())
 	}
-	if !strings.Contains(a.pathStatus.Note, "都通不过") {
-		t.Fatalf("note = %q, want it to say the region is exhausted", a.pathStatus.Note)
+	if !strings.Contains(a.pathStatusLocked().Note, "都通不过") {
+		t.Fatalf("note = %q, want it to say the region is exhausted", a.pathStatusLocked().Note)
 	}
 	// The one thing this monitor must never do: block traffic for a dead site.
-	if a.blocked {
+	if a.healthDomainLocked().Blocked {
 		t.Fatal("protected traffic must not be blocked for an unreachable site")
 	}
 	switches := 0
@@ -282,8 +284,8 @@ func TestPathRoundWithoutARegionOnlyReports(t *testing.T) {
 	check, _ := checkerThatFailsOnce()
 	a.runPathRound(check)
 
-	if !strings.Contains(a.pathStatus.Note, "地区未知") {
-		t.Fatalf("note = %q", a.pathStatus.Note)
+	if !strings.Contains(a.pathStatusLocked().Note, "地区未知") {
+		t.Fatalf("note = %q", a.pathStatusLocked().Note)
 	}
 	for _, call := range stub.calls {
 		if strings.HasPrefix(call, http.MethodPut) {

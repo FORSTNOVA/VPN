@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"path/filepath"
 	"syscall"
 	"unsafe"
 
@@ -36,25 +37,21 @@ import (
 //
 //export SmartVPNStart
 func SmartVPNStart(dataDir *C.char, bridgeClass *C.char) *C.char {
-	if rc := C.smartvpn_bridge_init(bridgeClass); rc != 0 {
-		return bridgeReply(bootstrap{Error: "无法连接 Java 桥：订阅凭据的加密与 socket 保护都不可用"})
+	e := newBootstrapEffects(bootstrapServiceRequest{Op: "jni-start"})
+	e.deferServiceUnlock = true
+	defer func() { e.deferServiceUnlock = false; e.Release() }()
+	e.hooks = map[string]func(bootstrapServiceEffect) bootstrapServiceReply{"android-home": func(bootstrapServiceEffect) bootstrapServiceReply {
+		e.home = filepath.Join(C.GoString(dataDir), "SmartVPN")
+		return bootstrapServiceReply{}
+	}}
+	p := e.android()
+	p.bridgeInit = func() bool { return C.smartvpn_bridge_init(bridgeClass) == 0 }
+	p.socketHook = func() { dialer.DefaultSocketHook = protectSocket }
+	r := runBootstrapWithEffects(e.q, e)
+	if r.Err != nil {
+		return bridgeReply(bootstrap{Error: r.Err.Error()})
 	}
-	// Every socket the kernel dials has to be kept out of the tunnel it carries.
-	// Setting this before the kernel starts is the whole of the loop protection;
-	// the hook itself is below.
-	dialer.DefaultSocketHook = protectSocket
-
-	serviceMu.Lock()
-	defer serviceMu.Unlock()
-	if service != nil {
-		return bridgeReply(bootstrap{Port: service.apiPort, Token: serviceToken})
-	}
-	started, err := startAndroidService(C.GoString(dataDir))
-	if err != nil {
-		log.Printf("could not start the service: %v", err)
-		return bridgeReply(bootstrap{Error: err.Error()})
-	}
-	return bridgeReply(started)
+	return bridgeReply(bootstrap{Port: e.port, Token: e.token})
 }
 
 // SmartVPNStop ends the service and the connection with it.
@@ -83,42 +80,13 @@ type tunnelReport struct {
 //
 //export SmartVPNSetTunnel
 func SmartVPNSetTunnel(authorized C.int, fd C.int, info *C.char) *C.char {
-	report := tunnelReport{}
-	if err := json.Unmarshal([]byte(C.GoString(info)), &report); err != nil {
-		log.Printf("could not read the tunnel description: %v", err)
-	}
-	if authorized != 0 {
-		tunnel.grant(true, int(fd), report.Interface, report.Routes, report.DNS)
-	} else {
-		tunnel.release()
-	}
-
-	serviceMu.Lock()
-	a := service
-	serviceMu.Unlock()
-	if a == nil {
-		// A tunnel with nothing behind it is worse than no tunnel: every app's
-		// traffic would be captured and dropped. The Java side closes it when it
-		// is told this.
-		if authorized != 0 {
-			return bridgeReply(bootstrap{Error: "本地服务没有运行，隧道已被拒绝"})
-		}
-		return bridgeReply(nil)
-	}
-	a.mu.Lock()
-	// The permission the tunnel needs on this platform is the user's
-	// authorisation, and the window shows it where the Windows copy shows an
-	// administrator token.
-	a.elevated = authorized != 0
-	connected := a.kernelRunningLocked()
-	a.mu.Unlock()
-	if authorized == 0 && connected {
-		a.mu.Lock()
-		err := a.dropConnectionLocked()
-		a.mu.Unlock()
-		if err != nil {
-			log.Printf("could not end the connection after the tunnel went away: %v", err)
-		}
+	e := newBootstrapEffects(bootstrapServiceRequest{Op: "tunnel", Authorized: authorized != 0})
+	p := e.android()
+	p.fd = int(fd)
+	p.decode = func(r *tunnelReport) error { return json.Unmarshal([]byte(C.GoString(info)), r) }
+	r := runBootstrapWithEffects(e.q, e)
+	if r.Err != nil {
+		return bridgeReply(bootstrap{Error: r.Err.Error()})
 	}
 	return bridgeReply(nil)
 }

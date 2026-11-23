@@ -5,12 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"net"
+
 	"net/http"
-	"net/url"
+
 	"runtime"
 	"sort"
-	"strconv"
+
 	"time"
 )
 
@@ -83,7 +83,7 @@ func (p *healthParams) decode(body string) error {
 
 // normalized keeps stored or user-supplied values inside ranges the patrol loop
 // can actually run with.
-func (p healthParams) normalized() healthParams {
+func (p healthParams) normalizedGo() healthParams {
 	clamp := func(value, low, high int) int {
 		if value < low {
 			return low
@@ -124,7 +124,7 @@ func (h nodeHealth) cooldownActive(now time.Time) bool {
 
 // nextHealthState folds one probe result into a node's health. It is pure so
 // the transition rules stay testable without a running Mihomo.
-func nextHealthState(current nodeHealth, ok bool, latencyMs int, now time.Time, params healthParams) nodeHealth {
+func nextHealthStateGo(current nodeHealth, ok bool, latencyMs int, now time.Time, params healthParams) nodeHealth {
 	next := current
 	next.Name = current.Name
 	next.UpdatedAt = now
@@ -204,6 +204,12 @@ func (a *app) activeNodeLocked() string {
 			selected, _ = nested["now"].(string)
 		}
 	}
+	if a.rememberingNode && !a.chainEnabledLocked() && a.store != nil && selected != "" &&
+		selected != autoGroup && selected != fallbackGroup && selected != blockedChoice && selected != chainExit && selected != a.lastSavedNode {
+		if err := a.store.setValue("lastConnectedNode", selected); err == nil {
+			a.lastSavedNode = selected
+		}
+	}
 	return selected
 }
 
@@ -213,7 +219,7 @@ func (a *app) switchGroupLocked(target string) error {
 }
 
 func (a *app) recordHealthLocked(record nodeHealth) {
-	a.health[record.Name] = record
+	a.writeHealthRecordLocked(record.Name, record)
 	if a.store != nil {
 		if err := a.store.saveHealth(record); err != nil {
 			log.Printf("could not persist node health: %v", err)
@@ -237,71 +243,32 @@ func (a *app) recordSwitchLocked(event switchEvent) {
 // from a set of measured delays, preferring the node already pinned. An empty
 // result means the region has nothing usable right now.
 func (a *app) bestLockedCandidateLocked(delays map[string]int, now time.Time) (string, int) {
-	pool := candidatesForRegion(a.lockedRegion, a.regions, a.health, now)
+	pool := candidatesForRegion(a.controlMetaLocked().RuntimeLockedRegion, a.healthDomainLocked().Regions, a.healthDomainLocked().Health, now)
 	nodes := make([]proxyNode, 0, len(pool))
 	for _, name := range pool {
 		nodes = append(nodes, proxyNode{Name: name})
 	}
-	return chooseReachableNode(nodes, delays, a.lockedNode)
+	return chooseReachableNode(nodes, delays, a.controlMetaLocked().RuntimeLockedNode)
 }
 
 func (a *app) patrolOnce() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.patrolLocked()
+	if r := a.runAppControl(appServiceRequest{Op: "once"}); r.Err != nil {
+		log.Printf("health patrol stopped: state unavailable: %v", r.Err)
+	}
 }
 
 // patrolLocked runs one health sweep. The caller holds a.mu, matching the rest
 // of the service, so a sweep can never race a connect or a group change.
 func (a *app) patrolLocked() {
-	if !a.kernelRunningLocked() {
-		return
+	if r := a.runAppControl(appServiceRequest{Op: "sweep"}); r.Err != nil {
+		panic(r.Err)
 	}
-	if a.regionJobRunningLocked() {
-		return
-	}
-	now := time.Now()
-	active := a.activeNodeLocked()
-	if active == "" || active == blockedChoice || active == "DIRECT" {
-		if a.blocked {
-			a.tryUnblockLocked(now)
-		}
-		return
-	}
-	timeout := time.Duration(a.healthParams.ConnectTimeoutMs) * time.Millisecond
-	// Mihomo only offers a bulk delay endpoint per group: its per-proxy route
-	// cannot address the node names these subscriptions use, which all contain
-	// spaces, pipes or emoji. One call covers every node we watch.
-	delays, err := a.groupDelaysForURL(patrolTargetPrimary, timeout)
-	if err != nil {
-		// A group that cannot be measured is not a healthy group. When the whole
-		// line is down the bulk call itself has no answer to give, and skipping
-		// the sweep would leave the user pinned to a dead node — every request
-		// timing out while the UI still reports the node as healthy.
-		log.Printf("health sweep could not measure the group (%v); counting it as a failed sweep", err)
-		a.applyFailedSweepLocked(active, now)
-		return
-	}
-	a.applyPatrolLocked(active, delays, now)
 }
 
 // applyPatrolLocked folds one group measurement into every node the sweep is
 // responsible for: the node currently in use plus the locked-region candidates.
 func (a *app) applyPatrolLocked(active string, delays map[string]int, now time.Time) {
-	watched := append([]string{active}, candidatesForRegion(a.lockedRegion, a.regions, a.health, now)...)
-	if a.settings.Chain.Enabled {
-		watched = []string{active}
-	}
-	// A sweep that reached anything has put the measurement machinery back in
-	// order, so an anomaly reported by an earlier one no longer describes now.
-	for _, name := range watched {
-		if delays[name] > 0 {
-			a.sweepNote = ""
-			break
-		}
-	}
-	a.recordSweepLocked(watched, delays, now)
-	a.failoverIfUnhealthyLocked(active, now)
+	runAppHealthService(a, "patrol", active, delays, now)
 }
 
 // applyFailedSweepLocked records a sweep whose measurement could not be taken.
@@ -309,8 +276,7 @@ func (a *app) applyPatrolLocked(active string, delays map[string]int, now time.T
 // their earlier measurements stay valid and can still serve as a failover
 // target instead of being condemned along with the measurement that failed.
 func (a *app) applyFailedSweepLocked(active string, now time.Time) {
-	a.recordSweepLocked([]string{active}, map[string]int{active: 0}, now)
-	a.failoverIfUnhealthyLocked(active, now)
+	runAppHealthService(a, "failed", active, nil, now)
 }
 
 func (a *app) recordSweepLocked(watched []string, delays map[string]int, now time.Time) {
@@ -321,12 +287,12 @@ func (a *app) recordSweepLocked(watched []string, delays map[string]int, now tim
 		}
 		seen[name] = true
 		delay := delays[name]
-		record := a.health[name]
+		record := a.healthValueLocked(name)
 		if record.Name == "" {
 			record = newHealth(name)
 		}
 		previous := record.State
-		next := nextHealthState(record, delay > 0, delay, now, a.healthParams)
+		next := nextHealthState(record, delay > 0, delay, now, a.healthMetaLocked().Params)
 		a.recordHealthLocked(next)
 		if previous != healthUnhealthy && next.State == healthUnhealthy {
 			log.Printf("node %s became %s after a failed sweep", name, next.State)
@@ -337,24 +303,24 @@ func (a *app) recordSweepLocked(watched []string, delays map[string]int, now tim
 // failoverIfUnhealthyLocked moves traffic off the node in use once it is marked
 // unhealthy, unless there is no locked region to stay inside.
 func (a *app) failoverIfUnhealthyLocked(active string, now time.Time) {
-	if a.settings.Chain.Enabled {
+	if a.chainEnabledLocked() {
 		return
 	}
-	if a.health[active].State != healthUnhealthy || a.lockedRegion == "" {
+	if a.healthValueLocked(active).State != healthUnhealthy || a.controlMetaLocked().RuntimeLockedRegion == "" {
 		return
 	}
 	if !a.dwellElapsedLocked(now) {
 		return
 	}
 	a.failoverLocked(active, now, fmt.Sprintf("%s failed %d consecutive sweeps",
-		active, a.health[active].ConsecutiveFailures))
+		active, a.healthValueLocked(active).ConsecutiveFailures))
 }
 
 func (a *app) dwellElapsedLocked(now time.Time) bool {
-	if a.lastSwitch.IsZero() {
+	if a.healthMetaLocked().LastSwitch.IsZero() {
 		return true
 	}
-	return now.Sub(a.lastSwitch) >= time.Duration(a.healthParams.MinDwellSec)*time.Second
+	return now.Sub(a.healthMetaLocked().LastSwitch) >= time.Duration(a.healthMetaLocked().Params.MinDwellSec)*time.Second
 }
 
 // failoverLocked switches to a verified node of the same region. When the pool
@@ -369,10 +335,10 @@ func (a *app) failoverLocked(failed string, now time.Time, evidence string) {
 		a.blockLocked(failed, now, "无法切换到同地区备用节点")
 		return
 	}
-	next := a.health[failed]
+	next := a.healthValueLocked(failed)
 	next.Name = failed
 	next.State = healthCooldown
-	next.CooldownUntil = now.Add(time.Duration(a.healthParams.CooldownSec) * time.Second)
+	next.CooldownUntil = now.Add(time.Duration(a.healthMetaLocked().Params.CooldownSec) * time.Second)
 	next.ConsecutiveSuccesses = 0
 	next.UpdatedAt = now
 	a.recordHealthLocked(next)
@@ -380,11 +346,11 @@ func (a *app) failoverLocked(failed string, now time.Time, evidence string) {
 	if err := a.saveSettings(); err != nil {
 		log.Printf("could not persist the failover selection: %v", err)
 	}
-	a.lastSwitch = now
-	a.blocked = false
-	a.blockReason = ""
-	a.lockedNode = target
-	a.settings.LockedNode = target
+	a.setHealthLastSwitchLocked(now)
+	a.setHealthBlockedLocked(false)
+	a.setHealthReasonLocked("")
+	a.patchControlLocked(controlRuntimeLockedNode, serviceControlState{RuntimeLockedNode: target})
+	a.patchControlLocked(controlLockedNode, serviceControlState{LockedNode: target})
 	a.recordSwitchLocked(switchEvent{
 		At: now, Group: "SmartVPN", FromNode: failed, ToNode: target,
 		Trigger:  "unhealthy",
@@ -396,7 +362,7 @@ func (a *app) failoverLocked(failed string, now time.Time, evidence string) {
 // using the latencies the sweep already measured. It never contacts the kernel,
 // so it also works while disconnected.
 func (a *app) bestKnownCandidateLocked(now time.Time) string {
-	pool := candidatesForRegion(a.lockedRegion, a.regions, a.health, now)
+	pool := candidatesForRegion(a.controlMetaLocked().RuntimeLockedRegion, a.healthDomainLocked().Regions, a.healthDomainLocked().Health, now)
 	if len(pool) == 0 {
 		return ""
 	}
@@ -404,7 +370,7 @@ func (a *app) bestKnownCandidateLocked(now time.Time) string {
 	delays := map[string]int{}
 	for _, name := range pool {
 		nodes = append(nodes, proxyNode{Name: name})
-		if health, ok := a.health[name]; ok && health.LatencyMs > 0 {
+		if health, ok := a.healthRecordLocked(name); ok && health.LatencyMs > 0 {
 			delays[name] = health.LatencyMs
 		}
 	}
@@ -417,19 +383,19 @@ func (a *app) bestKnownCandidateLocked(now time.Time) string {
 // pickFailoverTargetLocked chooses the fastest ready node from the locked
 // region, preferring one already known to be healthy.
 func (a *app) pickFailoverTargetLocked(now time.Time) (string, int) {
-	pool := candidatesForRegion(a.lockedRegion, a.regions, a.health, now)
+	pool := candidatesForRegion(a.controlMetaLocked().RuntimeLockedRegion, a.healthDomainLocked().Regions, a.healthDomainLocked().Health, now)
 	if len(pool) == 0 {
 		return "", 0
 	}
-	timeout := time.Duration(a.healthParams.ConnectTimeoutMs) * time.Millisecond
+	timeout := time.Duration(a.healthMetaLocked().Params.ConnectTimeoutMs) * time.Millisecond
 	nodes := make([]proxyNode, 0, len(pool))
 	delays := map[string]int{}
 	for _, name := range pool {
-		if health, ok := a.health[name]; ok && health.State == healthUnhealthy {
+		if health, ok := a.healthRecordLocked(name); ok && health.State == healthUnhealthy {
 			continue
 		}
 		nodes = append(nodes, proxyNode{Name: name})
-		if health, ok := a.health[name]; ok && health.LatencyMs > 0 {
+		if health, ok := a.healthRecordLocked(name); ok && health.LatencyMs > 0 {
 			delays[name] = health.LatencyMs
 		}
 	}
@@ -437,7 +403,7 @@ func (a *app) pickFailoverTargetLocked(now time.Time) (string, int) {
 		return best, delay
 	}
 	// Nothing has a fresh measurement; ask Mihomo for the whole group once.
-	fresh, err := a.groupDelaysForURL(patrolTargetPrimary, timeout)
+	fresh, err := a.groupDelaysForURLLocked(patrolTargetPrimary, timeout)
 	if err != nil {
 		return "", 0
 	}
@@ -470,43 +436,24 @@ var confirmProbeTargets = []struct {
 // To avoid false fail-closed triggers when a single probe target is blocked or throttled,
 // multiple independent targets are checked.
 func (a *app) confirmTrafficFlowsLocked() bool {
-	if a.confirmProbe != nil {
-		return a.confirmProbe()
+	q := adaptiveServiceRequest{Op: "confirm"}
+	v := runAdaptiveWithEffects(q, newAdaptiveEffects(nil, a, q))
+	if v.Err != nil {
+		panic(v.Err)
 	}
-	if a.blocked {
-		// The group already points at REJECT, so a request would be refused by
-		// our own rule and the answer would say nothing about the region.
-		// Recovering from a block is the unblock path's job, not this one's.
-		return false
-	}
-	if !a.kernelRunningLocked() || a.mixedPort == 0 {
-		return false
-	}
-	proxyURL := &url.URL{
-		Scheme: "http",
-		Host:   net.JoinHostPort("127.0.0.1", strconv.Itoa(a.mixedPort)),
-	}
-	timeout := confirmProbeTimeout
-	if runtime.GOOS == "android" {
-		timeout = 6 * time.Second
-	}
-	for _, target := range confirmProbeTargets {
-		if pathPassed(checkSiteWithin(proxyURL, target.name, target.url, timeout)) {
-			return true
-		}
-	}
-	return false
+	return v.Bool
 }
 
 // noteSweepAnomalyLocked records that the region measured as dead while a real
 // request still got through, so the page can say what happened rather than
 // leaving the user to guess why the app did not fail over.
 func (a *app) noteSweepAnomalyLocked(failed string) {
-	if a.sweepNote == "" {
-		log.Printf("the locked region measured as exhausted while a request through %s still got through; not blocking",
-			failed)
+	q := adaptiveServiceRequest{Op: "note"}
+	e := newAdaptiveEffects(nil, a, q)
+	e.failed = failed
+	if v := runAdaptiveWithEffects(q, e); v.Err != nil {
+		panic(v.Err)
 	}
-	a.sweepNote = "同地区节点在延迟测试里全部不通，但经当前节点的实际请求仍然通行，因此没有阻断；以实测为准。"
 }
 
 // blockLocked points the group at REJECT so protected traffic fails closed
@@ -522,183 +469,80 @@ func (a *app) noteSweepAnomalyLocked(failed string) {
 // outage. Nothing leaks by waiting: the group is left where it is, on a concrete
 // node of the locked region, and the region is still never crossed.
 func (a *app) blockLocked(failed string, now time.Time, reason string) {
-	if a.confirmTrafficFlowsLocked() {
-		a.noteSweepAnomalyLocked(failed)
-		return
+	q := adaptiveServiceRequest{Op: "block"}
+	e := newAdaptiveEffects(nil, a, q)
+	e.failed, e.now, e.reason = failed, now, reason
+	if v := runAdaptiveWithEffects(q, e); v.Err != nil {
+		panic(v.Err)
 	}
-	if err := a.switchGroupLocked(blockedChoice); err != nil {
-		log.Printf("could not block traffic: %v", err)
-		return
-	}
-	a.blocked = true
-	a.blockReason = reason
-	a.lastSwitch = now
-	a.sweepNote = ""
-	a.recordSwitchLocked(switchEvent{
-		At: now, Group: "SmartVPN", FromNode: failed, ToNode: blockedChoice,
-		Trigger: "region_exhausted", Evidence: reason,
-	})
 }
 
 func (a *app) tryUnblockLocked(now time.Time) {
-	target, delay := a.pickFailoverTargetLocked(now)
-	if target == "" {
-		return
-	}
-	if err := a.switchGroupLocked(target); err != nil {
-		return
-	}
-	a.blocked = false
-	a.blockReason = ""
-	a.sweepNote = ""
-	a.lastSwitch = now
-	a.lockedNode = target
-	a.settings.LockedNode = target
-	_ = a.saveSettings()
-	a.recordSwitchLocked(switchEvent{
-		At: now, Group: "SmartVPN", FromNode: blockedChoice, ToNode: target,
-		Trigger:  "region_recovered",
-		Evidence: fmt.Sprintf("%s answered in %d ms", target, delay),
-	})
+	runAppHealthService(a, "unblock", "", nil, now)
 }
 
 func (a *app) startPatrolLocked() {
-	if a.patrolCancel != nil {
-		return
+	if r := a.runAppControl(appServiceRequest{Op: "start"}); r.Err != nil {
+		panic(r.Err)
 	}
-	cancel := make(chan struct{})
-	a.patrolCancel = cancel
-	interval := time.Duration(a.healthParams.PatrolIntervalSec) * time.Second
-	go a.patrolLoop(cancel, interval)
 }
 
 func (a *app) stopPatrolLocked() {
-	if a.patrolCancel != nil {
-		close(a.patrolCancel)
-		a.patrolCancel = nil
+	if r := a.runAppControl(appServiceRequest{Op: "stop"}); r.Err != nil {
+		panic(r.Err)
 	}
-	if !a.blocked {
-		return
-	}
-	// Leaving the group on REJECT would silently drop traffic on reconnect.
-	if a.kernelRunningLocked() {
-		if err := a.switchGroupLocked(a.selectedChoice()); err != nil {
-			log.Printf("could not clear the fail-closed selection: %v", err)
-		}
-	}
-	a.blocked = false
-	a.blockReason = ""
 }
 
 func (a *app) patrolLoop(cancel <-chan struct{}, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-cancel:
-			return
-		case <-ticker.C:
-			a.patrolOnce()
-		}
+	q := appServiceRequest{Op: "loop", Interval: interval}
+	e := newAppControlEffects(a, q)
+	e.cancel = cancel
+	if r := runAppControlWithEffects(q, e); r.Err != nil {
+		log.Printf("health patrol loop stopped: state unavailable: %v", r.Err)
 	}
 }
 
 func (a *app) healthSnapshotLocked() map[string]any {
-	counts := map[string]int{
-		healthHealthy: 0, healthSuspect: 0, healthUnhealthy: 0,
-		healthCooldown: 0, healthRecovery: 0,
+	return a.healthSnapshotFromDomainLocked(a.healthDomainLocked())
+}
+func (a *app) healthSnapshotFromDomainLocked(h healthDomainProjection) map[string]any {
+	q := appServiceRequest{Op: "snapshot"}
+	e := newAppControlEffects(a, q)
+	e.h = h
+	e.haveHealth = true
+	r := runAppControlWithEffects(q, e)
+	if r.Err != nil {
+		panic(r.Err)
 	}
-	now := time.Now()
-	for _, record := range a.health {
-		if record.cooldownActive(now) {
-			counts[healthCooldown]++
-			continue
-		}
-		counts[record.State]++
-	}
-	return map[string]any{
-		"counts":       counts,
-		"params":       a.healthParams,
-		"lockedRegion": a.lockedRegion,
-		"poolSize":     len(candidatesForRegion(a.lockedRegion, a.regions, a.health, now)),
-		"sweepNote":    a.sweepNote,
-	}
+	return appHealthProjection(h, r.Plan)
 }
 
 func (a *app) updateHealthParams(w http.ResponseWriter, r *http.Request) {
+	tracked := &authorityHTTPWriter{ResponseWriter: w}
+	defer tracked.recoverFailure()
 	var body healthParams
 	if err := decodeJSON(r.Body, &body); err != nil {
-		http.Error(w, "invalid health parameters", http.StatusBadRequest)
+		http.Error(tracked, "invalid health parameters", http.StatusBadRequest)
 		return
 	}
-	if body.PatrolIntervalSec != 0 && body.PatrolIntervalSec < 10 {
-		http.Error(w, "the patrol interval must be at least 10 seconds", http.StatusBadRequest)
-		return
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	params := body.normalized()
-	a.healthParams = params
-	if a.store != nil {
-		if err := a.store.saveHealthParams(params); err != nil {
-			http.Error(w, "could not save the health parameters", http.StatusInternalServerError)
-			return
-		}
-	}
-	if a.patrolCancel != nil && params.PatrolIntervalSec != 0 {
-		// Restart the loop so a new interval applies immediately.
-		close(a.patrolCancel)
-		a.patrolCancel = nil
-		a.startPatrolLocked()
-	}
-	a.startPathMonitorLocked()
-	writeJSON(w, map[string]any{"ok": true, "params": a.healthParams})
+	q := appServiceRequest{Op: "params", Params: body}
+	e := newAppControlEffects(a, q)
+	e.w = tracked
+	runAppControlWithEffects(q, e)
 }
 
 func (a *app) patrolNow(w http.ResponseWriter, _ *http.Request) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if !a.kernelRunningLocked() {
-		http.Error(w, "connect before running a health sweep", http.StatusConflict)
-		return
-	}
-	a.patrolLocked()
-	writeJSON(w, map[string]any{"ok": true, "health": a.healthSnapshotLocked()})
+	q := appServiceRequest{Op: "patrol"}
+	e := newAppControlEffects(a, q)
+	e.w = w
+	runAppControlWithEffects(q, e)
 }
 
 func (a *app) switchEvents(w http.ResponseWriter, r *http.Request) {
-	limit := 50
-	if raw := r.URL.Query().Get("limit"); raw != "" {
-		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 && parsed <= 500 {
-			limit = parsed
-		}
-	}
-	if a.store == nil {
-		http.Error(w, "the local database is not available", http.StatusInternalServerError)
-		return
-	}
-	events, err := a.store.recentSwitchEvents(limit)
-	if err != nil {
-		http.Error(w, "could not read the switch history", http.StatusInternalServerError)
-		return
-	}
-	type eventPayload struct {
-		At       string `json:"at"`
-		Group    string `json:"group"`
-		FromNode string `json:"fromNode"`
-		ToNode   string `json:"toNode"`
-		Trigger  string `json:"trigger"`
-		Evidence string `json:"evidence"`
-	}
-	payload := make([]eventPayload, 0, len(events))
-	for _, event := range events {
-		payload = append(payload, eventPayload{
-			At: event.At.Format(time.RFC3339), Group: event.Group,
-			FromNode: event.FromNode, ToNode: event.ToNode,
-			Trigger: event.Trigger, Evidence: event.Evidence,
-		})
-	}
-	writeJSON(w, map[string]any{"events": payload})
+	q := appServiceRequest{Op: "events", Limit: r.URL.Query().Get("limit")}
+	e := newAppControlEffects(a, q)
+	e.w = w
+	runAppControlWithEffects(q, e)
 }
 
 var errNoLockableRegion = errors.New("no verified node matches that region")

@@ -33,6 +33,13 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "service" -> result.success(startService())
                     "connect" -> connect(result)
+                    "systemOwnsVpn" -> result.success(CoreBridge.systemOwnsVpn())
+                    "openVpnSettings" -> try {
+                        startActivity(Intent(android.provider.Settings.ACTION_VPN_SETTINGS))
+                        result.success(null)
+                    } catch (_: android.content.ActivityNotFoundException) {
+                        result.error("vpn_settings", "请在系统设置中打开 VPN 设置", null)
+                    }
                     "listGames" -> listGames(result)
                     "openGitHubRelease" -> {
                         val url = android.net.Uri.parse("https://github.com/FORSTNOVA/VPN/releases/latest")
@@ -59,7 +66,7 @@ class MainActivity : FlutterActivity() {
      * address rather than starting a second service.
      */
     private fun startService(): String =
-        CoreBridge.start(filesDir.absolutePath, CoreBridge.CLASS_NAME)
+        CoreBridge.startConfigured(applicationContext)
             ?: JSONObject().put("error", "本地服务没有启动").toString()
 
     private fun listGames(result: MethodChannel.Result) {

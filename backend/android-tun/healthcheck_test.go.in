@@ -1,0 +1,115 @@
+package provider
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/metacubex/mihomo/common/utils"
+	C "github.com/metacubex/mihomo/constant"
+)
+
+type snapshotProbe struct {
+	C.Proxy
+	name    string
+	started chan string
+	proceed chan struct{}
+}
+
+func (p *snapshotProbe) Name() string                      { return p.name }
+func (p *snapshotProbe) AliveForTestUrl(string) bool       { return true }
+func (p *snapshotProbe) LastDelayForTestUrl(string) uint16 { return 1 }
+func (p *snapshotProbe) URLTest(ctx context.Context, url string, _ utils.IntRanges[uint16]) (uint16, error) {
+	p.started <- url
+	select {
+	case <-p.proceed:
+		return 1, nil
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	}
+}
+
+// Saturate all ten workers so configuration changes happen mid-batch.
+func TestSmartVPNHealthSnapshot(t *testing.T) {
+	p := &snapshotProbe{name: "old", started: make(chan string, 64), proceed: make(chan struct{})}
+	newer := &snapshotProbe{name: "new", started: make(chan string, 64), proceed: p.proceed}
+	proxies := make([]C.Proxy, 12)
+	for i := range proxies {
+		proxies[i] = p
+	}
+	hc := NewHealthCheck(proxies, "default", 10000, 0, true, nil)
+	defer hc.close()
+	hc.registerHealthCheckTask("extra", nil, "new", 1)
+	done := make(chan struct{})
+	go func() { hc.check(); close(done) }()
+	for i := 0; i < 10; i++ {
+		select {
+		case <-p.started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("workers did not start")
+		}
+	}
+	replacement := []C.Proxy{newer}
+	hc.setProxies(replacement)
+	replacement[0] = p
+	for i := range proxies {
+		proxies[i] = newer
+	}
+	hc.registerHealthCheckTask("extra", nil, "old", 1)
+	close(p.proceed)
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("workers did not finish")
+	}
+	if len(newer.started) != 0 || len(p.started) != 2 {
+		t.Fatal("in-flight batch changed after publication")
+	}
+	for len(p.started) > 0 {
+		if <-p.started != "default" {
+			t.Fatal("filter changed during the batch")
+		}
+	}
+
+	hc.singleDo.Reset()
+	hc.check()
+	if len(p.started) != 0 || len(newer.started) != 2 {
+		t.Fatal("replacement batch must run default and filtered checks on the new proxy")
+	}
+	<-newer.started
+	<-newer.started
+	hc.close()
+	hc.singleDo.Reset()
+	hc.check()
+	if len(newer.started) != 0 {
+		t.Fatal("retired provider dispatched another probe")
+	}
+}
+
+func TestSmartVPNHealthCancelQueued(t *testing.T) {
+	p := &snapshotProbe{name: "busy", started: make(chan string, 32), proceed: make(chan struct{})}
+	proxies := make([]C.Proxy, 24)
+	for i := range proxies {
+		proxies[i] = p
+	}
+	hc := NewHealthCheck(proxies, "default", 10000, 1, true, nil)
+	defer hc.close()
+	done := make(chan struct{})
+	go func() { hc.check(); close(done) }()
+	for i := 0; i < 10; i++ {
+		select {
+		case <-p.started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("workers did not start")
+		}
+	}
+	hc.close()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled probes did not finish")
+	}
+	if len(p.started) != 0 {
+		t.Fatal("queued probes ran after cancellation")
+	}
+}

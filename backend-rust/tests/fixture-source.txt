@@ -1,0 +1,2 @@
+backend/stun.go SHA256 8e935a79a4514e25402fb71bb6e870832efaf5196abe7813bcf0e4a948d33bcc
+197 deterministic offline Go oracle vectors

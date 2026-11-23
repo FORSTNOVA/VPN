@@ -75,10 +75,10 @@ func containsRange(ranges []string, want string) bool {
 
 func TestParseChinaIPListRefusesWhatIsNotAList(t *testing.T) {
 	cases := map[string][]byte{
-		"an error page":      []byte("<html><body>404 Not Found</body></html>"),
-		"empty":              nil,
-		"far too short":      chinaListBody(10),
-		"a range that is not one": []byte("1.2.3.4/33\n" + string(chinaListBody(1200))),
+		"an error page":               []byte("<html><body>404 Not Found</body></html>"),
+		"empty":                       nil,
+		"far too short":               chinaListBody(10),
+		"a range that is not one":     []byte("1.2.3.4/33\n" + string(chinaListBody(1200))),
 		"a host instead of a network": []byte("not-even-an-address\n" + string(chinaListBody(1200))),
 	}
 	for name, body := range cases {
@@ -219,7 +219,7 @@ func TestProbeChinaRuleAcceptsTheInstalledKernel(t *testing.T) {
 		t.Skip("no kernel installed to ask")
 	}
 	home := t.TempDir()
-	a := &app{home: home, settings: settings{MihomoPath: kernel}}
+	a := testControlApp(&app{home: home}, func(a *app) { testSetSettings(a, settings{MihomoPath: kernel}) })
 	if !a.probeChinaRule() {
 		t.Fatal("the installed kernel must accept the domestic address rules")
 	}
@@ -238,7 +238,7 @@ func TestProbeChinaRuleAcceptsTheInstalledKernel(t *testing.T) {
 	if empty := (&app{home: home}).probeChinaRule(); empty {
 		t.Error("a profile with no kernel must not be reported as accepted")
 	}
-	missing := &app{home: home, settings: settings{MihomoPath: filepath.Join(home, "missing.exe")}}
+	missing := testControlApp(&app{home: home}, func(a *app) { testSetSettings(a, settings{MihomoPath: filepath.Join(home, "missing.exe")}) })
 	if missing.probeChinaRule() {
 		t.Error("a missing kernel must not be reported as accepted")
 	}

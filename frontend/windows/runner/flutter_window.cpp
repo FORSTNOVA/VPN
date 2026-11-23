@@ -950,6 +950,44 @@ void FlutterWindow::HandleLifecycleCall(
     const flutter::MethodCall<flutter::EncodableValue>& call,
     std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
   const std::string& method = call.method_name();
+  if (method == "startupConnect") {
+    constexpr wchar_t key[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+    constexpr wchar_t name[] = L"SmartVPN";
+    wchar_t executable[32768]{};
+    DWORD length = GetModuleFileNameW(nullptr, executable, 32768);
+    if (!length || length >= 32768) {
+      result->Error("startup", "无法确定程序路径");
+      return;
+    }
+    const std::wstring command = L"\"" + std::wstring(executable) + L"\" --startup-connect";
+    wchar_t current[32768]{};
+    DWORD size = sizeof(current);
+    LONG status = RegGetValueW(HKEY_CURRENT_USER, key, name, RRF_RT_REG_SZ,
+                               nullptr, current, &size);
+    if (status != ERROR_SUCCESS && status != ERROR_FILE_NOT_FOUND) {
+      result->Error("startup", "无法读取当前用户的启动项");
+      return;
+    }
+    bool enabled = status == ERROR_SUCCESS && command == current;
+    const bool* change = call.arguments() ? std::get_if<bool>(call.arguments()) : nullptr;
+    if (change && *change != enabled) {
+      if (*change && command.size() >= 260) {
+        result->Error("startup", "便携目录路径过长，请移至较短路径后重试");
+        return;
+      }
+      status = *change
+          ? RegSetKeyValueW(HKEY_CURRENT_USER, key, name, REG_SZ, command.c_str(),
+                            static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t)))
+          : RegDeleteKeyValueW(HKEY_CURRENT_USER, key, name);
+      if (status != ERROR_SUCCESS) {
+        result->Error("startup", "无法更新当前用户的启动项");
+        return;
+      }
+      enabled = *change;
+    }
+    result->Success(flutter::EncodableValue(enabled));
+    return;
+  }
 
   if (method == "pickGame") {
     std::vector<wchar_t> path(32768);

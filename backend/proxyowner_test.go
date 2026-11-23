@@ -247,13 +247,9 @@ func TestProxyServedByAnotherInstance(t *testing.T) {
 // and the newcomer is told why instead of quietly taking it over.
 func TestConnectRefusesWhileAnotherInstanceHoldsTheProxy(t *testing.T) {
 	_, otherPort := identifyServer(t, `{"app":"`+appName+`","connected":true}`)
-	a := &app{
-		settings:       settings{ConnectionMode: modeSystemProxy},
-		proxyStateHook: func() (bool, string, error) { return true, "127.0.0.1:5555", nil },
-		proxyOwnerHook: func() (proxyOwner, bool) {
-			return proxyOwner{Home: `C:\other`, APIPort: otherPort, MixedPort: 5555}, true
-		},
-	}
+	a := testControlApp(&app{proxyStateHook: func() (bool, string, error) { return true, "127.0.0.1:5555", nil }, proxyOwnerHook: func() (proxyOwner, bool) {
+		return proxyOwner{Home: `C:\other`, APIPort: otherPort, MixedPort: 5555}, true
+	}}, func(a *app) { testSetSettings(a, settings{ConnectionMode: modeSystemProxy}) })
 	recorder := httptest.NewRecorder()
 	a.connect(recorder, httptest.NewRequest(http.MethodPost, "/api/connect", nil))
 
@@ -271,12 +267,9 @@ func TestConnectRefusesWhileAnotherInstanceHoldsTheProxy(t *testing.T) {
 // The same call without another copy in the way goes on to its own work, which
 // here is the missing kernel — the point is that the guard did not fire.
 func TestConnectProceedsWhenNobodyElseHoldsTheProxy(t *testing.T) {
-	a := &app{
-		home:     t.TempDir(),
-		settings: settings{ConnectionMode: modeSystemProxy, MihomoPath: filepath.Join("no", "mihomo.exe")},
-		proxyStateHook: func() (bool, string, error) { return true, "127.0.0.1:7890", nil },
-		proxyOwnerHook: func() (proxyOwner, bool) { return proxyOwner{}, false },
-	}
+	a := testControlApp(&app{home: t.TempDir(), proxyStateHook: func() (bool, string, error) { return true, "127.0.0.1:7890", nil }, proxyOwnerHook: func() (proxyOwner, bool) { return proxyOwner{}, false }}, func(a *app) {
+		testSetSettings(a, settings{ConnectionMode: modeSystemProxy, MihomoPath: filepath.Join("no", "mihomo.exe")})
+	})
 	recorder := httptest.NewRecorder()
 	a.connect(recorder, httptest.NewRequest(http.MethodPost, "/api/connect", nil))
 

@@ -1,0 +1,13 @@
+# Phase22: diagnostic report orchestration
+
+Optional `SMARTVPN_RUST_DIAGNOSTIC_FLOW=1` with `rustcore` and a trusted absolute core DLL selects Rust planning for diagnose, ensure, details, DNS and STUN workflows. Default Go remains. Rust owns multi-source/fallback decisions, temporary-kernel orchestration, quality keyword/score classification, site batch start/join plans, report assembly and leak decisions.
+
+Go retains JSON/response codecs, Unicode lower/address comparison facts, fixed-target single HTTP/UDP exchanges, actual kernel resources, mutex and goroutine scheduling. The native planner cannot supply arbitrary probe URLs. Site start and join are separate effects; actual workers keep configured result indices. Joining waits for all workers, including a captured worker panic, before temporary resource cleanup.
+
+Compatibility preserves the whole-handler app lock and response-before-temporary-stop-before-unlock ordering; start/pin failure variants; IPv4 double-failure early skip; details/source and STUN target order; DNS optional second query; case/text address semantics; original error and JSON shapes. There is no new request-context cancellation or global timeout. Existing per-request 8s HTTP and per-target 7s UDP timing is retained at Go ports, not represented as measured wall-clock verification.
+
+Standalone ensure now holds temporary cleanup responsibility until a validated successful Temporary result transfers it to its caller, before Release. Internal failure does not leak the temporary kernel. This is tested without running an actual kernel. Start returning an error preserves its original no-extra-stop behavior.
+
+Tests use fake HTTP/UDP/kernel/storage/clock and in-memory mutex/channel/barrier concurrency. They do not perform a diagnostic probe, connect nodes, modify networking or access user data. Successful default/disabled/missing selectors, strict actual-DLL full traces, independent legacy goldens, concurrency ordering and no-replay/resource cases are required. Android is compile-only. Existing low-level parsers remain Go ports; the retained parseIpQuality helper is also an independent legacy oracle for classification checks.
+
+Offline results: 297 Rust tests, 244 explicit safe default Go tests, 2,207 strict actual-DLL calls with zero recovery (including 49 legacy quality cases), 60 ABI fault boundaries and nine panic scenarios. Capacity64/cancel1200 and seven-site overlap with reverse completion passed. Twelve original literals match the pre-migration source. Timeout values are source-audited, including standalone zero/negative passthrough, not measured real network deadlines.

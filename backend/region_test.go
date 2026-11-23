@@ -117,23 +117,18 @@ func TestCombineRegionAnswers(t *testing.T) {
 
 func newTestApp(t *testing.T) *app {
 	t.Helper()
-	return &app{
-		home:    t.TempDir(),
-		health:  map[string]nodeHealth{},
-		regions: map[string]regionRecord{},
-	}
+	return testHealthApp(&app{home: t.TempDir()}, func(p *healthDomainProjection) {
+		p.Health = map[string]nodeHealth{}
+		p.Regions = map[string]regionRecord{}
+	})
 }
 
 func TestLockRegionRequiresAVerifiedNode(t *testing.T) {
 	now := time.Now()
 	a := newTestApp(t)
-	a.regions = map[string]regionRecord{
-		"verified":  {Name: "verified", Country: "JP", Status: regionVerified, VerifiedAt: now},
-		"single":    {Name: "single", Country: "US", Status: regionSingle, VerifiedAt: now},
-		"stale":     {Name: "stale", Country: "DE", Status: regionVerified, VerifiedAt: now.Add(-2 * regionTTL)},
-		"conflict":  {Name: "conflict", Country: "GB", Status: regionConflict, VerifiedAt: now},
-		"unreached": {Name: "unreached", Country: "FR", Status: regionUnreachable, VerifiedAt: now},
-	}
+	testEditHealth(a, func(p *healthDomainProjection) {
+		p.Regions = map[string]regionRecord{"verified": {Name: "verified", Country: "JP", Status: regionVerified, VerifiedAt: now}, "single": {Name: "single", Country: "US", Status: regionSingle, VerifiedAt: now}, "stale": {Name: "stale", Country: "DE", Status: regionVerified, VerifiedAt: now.Add(-2 * regionTTL)}, "conflict": {Name: "conflict", Country: "GB", Status: regionConflict, VerifiedAt: now}, "unreached": {Name: "unreached", Country: "FR", Status: regionUnreachable, VerifiedAt: now}}
+	})
 
 	for _, country := range []string{"US", "DE", "GB", "FR", "ZZ"} {
 		recorder := httptest.NewRecorder()
@@ -143,37 +138,36 @@ func TestLockRegionRequiresAVerifiedNode(t *testing.T) {
 			t.Errorf("locking %q returned %d, want 400: a region needs a verified node", country, recorder.Code)
 		}
 	}
-	if a.lockedRegion != "" {
-		t.Fatalf("a rejected lock must not change the locked region, got %q", a.lockedRegion)
+	if a.controlLocked().RuntimeLockedRegion != "" {
+		t.Fatalf("a rejected lock must not change the locked region, got %q", a.controlLocked().RuntimeLockedRegion)
 	}
 }
 
 func TestLockRegionAcceptsVerifiedCountry(t *testing.T) {
 	now := time.Now()
 	a := newTestApp(t)
-	a.regions = map[string]regionRecord{
-		"verified": {Name: "verified", Country: "JP", Status: regionVerified, VerifiedAt: now},
-		"second":   {Name: "second", Country: "JP", Status: regionVerified, VerifiedAt: now},
-	}
+	testEditHealth(a, func(p *healthDomainProjection) {
+		p.Regions = map[string]regionRecord{"verified": {Name: "verified", Country: "JP", Status: regionVerified, VerifiedAt: now}, "second": {Name: "second", Country: "JP", Status: regionVerified, VerifiedAt: now}}
+	})
 	recorder := httptest.NewRecorder()
 	a.lockRegion(recorder, httptest.NewRequest(http.MethodPut, "/api/region/lock",
 		strings.NewReader(`{"country":"jp"}`)))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200: %s", recorder.Code, recorder.Body.String())
 	}
-	if a.lockedRegion != "JP" {
-		t.Fatalf("lockedRegion = %q, want JP", a.lockedRegion)
+	if a.controlLocked().RuntimeLockedRegion != "JP" {
+		t.Fatalf("lockedRegion = %q, want JP", a.controlLocked().RuntimeLockedRegion)
 	}
-	if a.settings.LockedRegion != "JP" {
-		t.Fatalf("the lock must survive a restart, got %q", a.settings.LockedRegion)
+	if a.settingsLocked().LockedRegion != "JP" {
+		t.Fatalf("the lock must survive a restart, got %q", a.settingsLocked().LockedRegion)
 	}
 	// The pinned node must belong to the region the lock claims, otherwise the
 	// group could keep carrying an off-region node.
-	if a.lockedNode != "verified" && a.lockedNode != "second" {
-		t.Fatalf("lockedNode = %q, want one of the JP candidates", a.lockedNode)
+	if a.controlLocked().RuntimeLockedNode != "verified" && a.controlLocked().RuntimeLockedNode != "second" {
+		t.Fatalf("lockedNode = %q, want one of the JP candidates", a.controlLocked().RuntimeLockedNode)
 	}
-	if a.settings.LockedNode != a.lockedNode {
-		t.Fatalf("the pinned node must be persisted: %q / %q", a.settings.LockedNode, a.lockedNode)
+	if a.settingsLocked().LockedNode != a.controlLocked().RuntimeLockedNode {
+		t.Fatalf("the pinned node must be persisted: %q / %q", a.settingsLocked().LockedNode, a.controlLocked().RuntimeLockedNode)
 	}
 	if !strings.Contains(recorder.Body.String(), `"pool":2`) {
 		t.Errorf("response should report the pool size: %s", recorder.Body.String())
@@ -186,8 +180,8 @@ func TestLockRegionAcceptsVerifiedCountry(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200 when clearing the lock", recorder.Code)
 	}
-	if a.lockedRegion != "" {
-		t.Fatalf("lockedRegion = %q, want an empty lock", a.lockedRegion)
+	if a.controlLocked().RuntimeLockedRegion != "" {
+		t.Fatalf("lockedRegion = %q, want an empty lock", a.controlLocked().RuntimeLockedRegion)
 	}
 }
 
@@ -205,15 +199,13 @@ func TestLockRegionRejectsMalformedRequests(t *testing.T) {
 func TestLockRegionToFollowsAVerifiedNode(t *testing.T) {
 	now := time.Now()
 	a := newTestApp(t)
-	a.regions = map[string]regionRecord{
-		"jp":    {Name: "jp", Country: "JP", Status: regionVerified, VerifiedAt: now},
-		"stale": {Name: "stale", Country: "US", Status: regionVerified, VerifiedAt: now.Add(-2 * regionTTL)},
-		"weak":  {Name: "weak", Country: "DE", Status: regionSingle, VerifiedAt: now},
-	}
+	testEditHealth(a, func(p *healthDomainProjection) {
+		p.Regions = map[string]regionRecord{"jp": {Name: "jp", Country: "JP", Status: regionVerified, VerifiedAt: now}, "stale": {Name: "stale", Country: "US", Status: regionVerified, VerifiedAt: now.Add(-2 * regionTTL)}, "weak": {Name: "weak", Country: "DE", Status: regionSingle, VerifiedAt: now}}
+	})
 
 	a.lockRegionToLocked("jp")
-	if a.lockedRegion != "JP" {
-		t.Fatalf("lockedRegion = %q, want JP", a.lockedRegion)
+	if a.controlLocked().RuntimeLockedRegion != "JP" {
+		t.Fatalf("lockedRegion = %q, want JP", a.controlLocked().RuntimeLockedRegion)
 	}
 
 	// A stale or single-source node must not move the lock.
@@ -221,8 +213,8 @@ func TestLockRegionToFollowsAVerifiedNode(t *testing.T) {
 	a.lockRegionToLocked("weak")
 	a.lockRegionToLocked("unknown")
 	a.lockRegionToLocked("")
-	if a.lockedRegion != "JP" {
-		t.Fatalf("lockedRegion = %q, want the lock to stay on JP", a.lockedRegion)
+	if a.controlLocked().RuntimeLockedRegion != "JP" {
+		t.Fatalf("lockedRegion = %q, want the lock to stay on JP", a.controlLocked().RuntimeLockedRegion)
 	}
 }
 
@@ -238,8 +230,8 @@ func TestStartRegionVerificationRequiresSubscription(t *testing.T) {
 
 func TestStartRegionVerificationRejectsConcurrentJobs(t *testing.T) {
 	a := newTestApp(t)
-	a.settings = settings{SubscriptionURL: "https://example.com/sub", MihomoPath: filepath.Join(t.TempDir(), "missing.exe")}
-	a.regionJob = &regionJob{Running: true}
+	testSetSettings(a, settings{SubscriptionURL: "https://example.com/sub", MihomoPath: filepath.Join(t.TempDir(), "missing.exe")})
+	testEditHealth(a, func(p *healthDomainProjection) { p.Job = &regionJob{Running: true} })
 
 	recorder := httptest.NewRecorder()
 	a.startRegionVerification(recorder, httptest.NewRequest(http.MethodPost, "/api/regions/verify",
@@ -251,7 +243,7 @@ func TestStartRegionVerificationRejectsConcurrentJobs(t *testing.T) {
 
 func TestStartRegionVerificationAcceptsAnEmptyBody(t *testing.T) {
 	a := newTestApp(t)
-	a.settings = settings{SubscriptionURL: "https://example.com/sub", MihomoPath: filepath.Join(t.TempDir(), "missing.exe")}
+	testSetSettings(a, settings{SubscriptionURL: "https://example.com/sub", MihomoPath: filepath.Join(t.TempDir(), "missing.exe")})
 
 	recorder := httptest.NewRecorder()
 	a.startRegionVerification(recorder, httptest.NewRequest(http.MethodPost, "/api/regions/verify", nil))
@@ -265,8 +257,8 @@ func TestStartRegionVerificationAcceptsAnEmptyBody(t *testing.T) {
 		a.mu.Lock()
 		running := a.regionJobRunningLocked()
 		lastError := ""
-		if a.regionJob != nil {
-			lastError = a.regionJob.LastError
+		if a.healthDomainLocked().Job != nil {
+			lastError = a.healthDomainLocked().Job.LastError
 		}
 		a.mu.Unlock()
 		if !running {
@@ -282,11 +274,11 @@ func TestStartRegionVerificationAcceptsAnEmptyBody(t *testing.T) {
 
 func TestRegionJobSnapshotIsACopy(t *testing.T) {
 	a := newTestApp(t)
-	a.regionJob = &regionJob{Running: true, Total: 10, Done: 4}
+	testEditHealth(a, func(p *healthDomainProjection) { p.Job = &regionJob{Running: true, Total: 10, Done: 4} })
 	snapshot := a.regionJobSnapshotLocked()
 	snapshot.Done = 99
-	if a.regionJob.Done != 4 {
-		t.Fatalf("the snapshot must not alias the live job, got %d", a.regionJob.Done)
+	if a.healthDomainLocked().Job.Done != 4 {
+		t.Fatalf("the snapshot must not alias the live job, got %d", a.healthDomainLocked().Job.Done)
 	}
 	if empty := (&app{}).regionJobSnapshotLocked(); empty.Running {
 		t.Fatal("a missing job must read as not running")
@@ -309,7 +301,7 @@ func TestLockingWhileConnectedPinsTheRunningGroup(t *testing.T) {
 	} {
 		record.Status = regionVerified
 		record.VerifiedAt = now
-		a.regions[record.Name] = record
+		a.writeRegionRecordLocked(record.Name, record)
 	}
 
 	recorder := httptest.NewRecorder()
@@ -319,10 +311,10 @@ func TestLockingWhileConnectedPinsTheRunningGroup(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
 	}
-	if a.lockedRegion != "JP" || a.lockedNode == "" {
-		t.Fatalf("locked region = %q, node = %q", a.lockedRegion, a.lockedNode)
+	if a.controlLocked().RuntimeLockedRegion != "JP" || a.controlLocked().RuntimeLockedNode == "" {
+		t.Fatalf("locked region = %q, node = %q", a.controlLocked().RuntimeLockedRegion, a.controlLocked().RuntimeLockedNode)
 	}
-	if !stub.saw(http.MethodPut, "/proxies/SmartVPN", `"name":"`+a.lockedNode+`"`) {
+	if !stub.saw(http.MethodPut, "/proxies/SmartVPN", `"name":"`+a.controlLocked().RuntimeLockedNode+`"`) {
 		t.Fatalf("the running group must be moved onto the locked region, calls: %v", stub.calls)
 	}
 	if stub.saw(http.MethodPut, "/proxies/SmartVPN", "REJECT") {
@@ -337,11 +329,9 @@ func TestLockingWhileConnectedWithOnlyCoolingNodesBlocks(t *testing.T) {
 	a := stub.app(t)
 	runningKernel(t, a)
 	now := time.Now()
-	a.regions["jp-a"] = regionRecord{Name: "jp-a", Country: "JP", Status: regionVerified, VerifiedAt: now}
+	a.writeRegionRecordLocked("jp-a", regionRecord{Name: "jp-a", Country: "JP", Status: regionVerified, VerifiedAt: now})
 	// Verified, but parked after failing: not a candidate for anything.
-	a.health["jp-a"] = nodeHealth{
-		Name: "jp-a", State: healthCooldown, CooldownUntil: now.Add(time.Hour),
-	}
+	a.writeHealthRecordLocked("jp-a", nodeHealth{Name: "jp-a", State: healthCooldown, CooldownUntil: now.Add(time.Hour)})
 
 	recorder := httptest.NewRecorder()
 	a.lockRegion(recorder, httptest.NewRequest(http.MethodPost, "/api/region/lock",
@@ -350,10 +340,10 @@ func TestLockingWhileConnectedWithOnlyCoolingNodesBlocks(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
 	}
-	if a.lockedNode != "" {
-		t.Fatalf("a node in cooldown is not a candidate, got %q", a.lockedNode)
+	if a.controlLocked().RuntimeLockedNode != "" {
+		t.Fatalf("a node in cooldown is not a candidate, got %q", a.controlLocked().RuntimeLockedNode)
 	}
-	if !a.blocked {
+	if !a.healthDomainLocked().Blocked {
 		t.Fatalf("the region cannot carry traffic, so the connection must fail closed: %v", stub.calls)
 	}
 	if !stub.saw(http.MethodPut, "/proxies/SmartVPN", "REJECT") {
@@ -366,7 +356,7 @@ func TestLockingWhileDisconnectedTouchesNoGroup(t *testing.T) {
 	stub := newControllerStub(t, nil)
 	a := stub.app(t)
 	now := time.Now()
-	a.regions["jp-a"] = regionRecord{Name: "jp-a", Country: "JP", Status: regionVerified, VerifiedAt: now}
+	a.writeRegionRecordLocked("jp-a", regionRecord{Name: "jp-a", Country: "JP", Status: regionVerified, VerifiedAt: now})
 
 	recorder := httptest.NewRecorder()
 	a.lockRegion(recorder, httptest.NewRequest(http.MethodPost, "/api/region/lock",
@@ -375,8 +365,8 @@ func TestLockingWhileDisconnectedTouchesNoGroup(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
 	}
-	if a.lockedRegion != "JP" {
-		t.Fatalf("locked region = %q", a.lockedRegion)
+	if a.controlLocked().RuntimeLockedRegion != "JP" {
+		t.Fatalf("locked region = %q", a.controlLocked().RuntimeLockedRegion)
 	}
 	if len(stub.calls) != 0 {
 		t.Fatalf("a lock without a connection must not talk to the kernel, calls: %v", stub.calls)

@@ -1,0 +1,11 @@
+# Phase33: complete China Direct service and authority
+
+The sixth persistent domain owns China cache status, refresh admission, one-time probe outcome and active-rule flag. ABI v6 requires capability mask 63 and preserves default Go and older exports. Typed narrow commands share revision, Ack and checkpoint with the other domains; status projection does not rewrite active/probed state.
+
+Native workflows cover list parsing, ordered per-mirror downloads, cache strategies, temporary-file replacement, capability probe, refresh admission/completion and kernel-option composition. Go retains individual HTTP/filesystem/process/port operations, net.ParseCIDR compatibility facts, time facts, scheduling and configuration graphs. The entire ensure/probe operation is not delegated as a Go black box. Existing test fetch overrides remain supported.
+
+Cached mode never downloads. IfOverdue preserves the seven-day equality and future-time cases. Each mirror must supply both independently normalized/deduplicated files; combined results are sorted without cross-file deduplication until ensure reparses them. Fetch, parse and write failures preserve their distinct good-cache behavior. Probe marking precedes its one attempt; cleanup retains original ordering and uses per-resource ownership so faults cannot duplicate cleanup.
+
+Available and Active remain distinct; Active retains the original pre-runner assignment and nil-kernel stop behavior. Worker preflight checks authority availability before filesystem/network effects, without adding generation cancellation or cancelling admitted work merely because Fetching changed. Errors fail closed rather than appearing as unsupported configuration. Response errors are prepared before writing; writer failures after response start are not rewritten.
+
+Offline verification excludes TestProbeChinaRuleAcceptsTheInstalledKernel. All new HTTP/probe/port/process/scheduler effects are fake or use synthetic temporary files. No real China list download, VPN/node operation, DNS/route/proxy change, user database or running binary replacement is performed. Windows/Android compilation is not live platform acceptance. Remaining speedtest, TUN reporting and HTTP application composition are separate unfinished work.

@@ -4,9 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
-	"path"
 	"sort"
 	"strconv"
 	"strings"
@@ -54,6 +52,15 @@ type kernelMetadata struct {
 	UID             flexString `json:"uid"`
 }
 
+func (m *kernelMetadata) UnmarshalJSON(data []byte) error {
+	type wire kernelMetadata
+	if err := json.Unmarshal(data, (*wire)(m)); err != nil {
+		return err
+	}
+	m.Network = strings.ToLower(m.Network)
+	return nil
+}
+
 // flexString reads a value the kernel may send either quoted or bare. The kernel
 // binary is chosen by the user, and a decode error on one field would otherwise
 // empty the whole page.
@@ -91,7 +98,7 @@ type trafficSample struct {
 // rateFor turns two cumulative readings into bytes per second. A first reading,
 // a counter that went backwards (the kernel was restarted) or a non-advancing
 // clock all have to report zero rather than a spike or a negative rate.
-func rateFor(previous, current trafficSample) (int64, int64) {
+func rateForGo(previous, current trafficSample) (int64, int64) {
 	if previous.at.IsZero() {
 		return 0, 0
 	}
@@ -110,74 +117,23 @@ func rateFor(previous, current trafficSample) (int64, int64) {
 // process that opened the connection, where it is going, the rule and the
 // outbound that carried it, and how much it has moved.
 func connectionRows(connections []kernelConnection, now time.Time) []connectionRow {
-	rows := make([]connectionRow, 0, len(connections))
-	for _, connection := range connections {
-		row := connectionRow{
-			Process:  connectionProcess(connection.Metadata),
-			Target:   connectionTarget(connection.Metadata),
-			Network:  connection.Metadata.Network,
-			Type:     connection.Metadata.Type,
-			Rule:     connectionRule(connection.Rule, connection.RulePayload),
-			Chain:    connectionChain(connection.Chains),
-			Upload:   connection.Upload,
-			Download: connection.Download,
-		}
-		if start, err := time.Parse(time.RFC3339Nano, connection.Start); err == nil {
-			if elapsed := now.Sub(start); elapsed > 0 {
-				row.DurationMs = elapsed.Milliseconds()
-			}
-		}
-		rows = append(rows, row)
+	q := trafficProjectionRequest{Op: trafficProjectionRows}
+	for _, c := range connections {
+		q.Rows = append(q.Rows, trafficProjectionConnection(c, now))
 	}
-	sort.SliceStable(rows, func(i, j int) bool {
-		return rows[i].Upload+rows[i].Download > rows[j].Upload+rows[j].Download
-	})
-	if len(rows) > maxConnectionRows {
-		rows = rows[:maxConnectionRows]
-	}
-	return rows
+	return runSelectedTrafficProjection(q).Rows
 }
 
 func connectionProcess(metadata kernelMetadata) string {
-	if name := strings.TrimSpace(metadata.Process); name != "" {
-		return name
-	}
-	// The kernel reports a full path when it could not name the process.
-	trimmed := strings.TrimSpace(metadata.ProcessPath)
-	if trimmed == "" {
-		return ""
-	}
-	name := path.Base(strings.ReplaceAll(trimmed, `\`, "/"))
-	if name == "." || name == "/" {
-		return ""
-	}
-	return name
+	return runSelectedTrafficProjection(trafficProjectionRequest{Op: trafficProjectionProcess, Rows: []trafficProjectionFacts{trafficProjectionMetadata(metadata)}}).Text
 }
 
 func connectionTarget(metadata kernelMetadata) string {
-	host := strings.TrimSpace(metadata.Host)
-	if host == "" {
-		host = strings.TrimSpace(metadata.DestinationIP)
-	}
-	if host == "" {
-		return ""
-	}
-	if port := strings.TrimSpace(string(metadata.DestinationPort)); port != "" {
-		return net.JoinHostPort(host, port)
-	}
-	return host
+	return runSelectedTrafficProjection(trafficProjectionRequest{Op: trafficProjectionTarget, Rows: []trafficProjectionFacts{trafficProjectionMetadata(metadata)}}).Text
 }
 
 func connectionRule(rule, payload string) string {
-	rule = strings.TrimSpace(rule)
-	payload = strings.TrimSpace(payload)
-	if rule == "" {
-		return ""
-	}
-	if payload == "" {
-		return rule
-	}
-	return rule + "(" + payload + ")"
+	return runSelectedTrafficProjection(trafficProjectionRequest{Op: trafficProjectionRule, Rows: []trafficProjectionFacts{{Rule: strings.TrimSpace(rule), Payload: strings.TrimSpace(payload)}}}).Text
 }
 
 // connectionChain names the outbound that carried the connection. The kernel
@@ -185,12 +141,11 @@ func connectionRule(rule, payload string) string {
 // is the one that says where the traffic actually went — it reads "DIRECT" when
 // the connection never entered the tunnel.
 func connectionChain(chains []string) string {
-	for _, entry := range chains {
-		if trimmed := strings.TrimSpace(entry); trimmed != "" {
-			return trimmed
-		}
+	f := trafficProjectionFacts{}
+	for _, s := range chains {
+		f.Chains = append(f.Chains, strings.TrimSpace(s))
 	}
-	return ""
+	return runSelectedTrafficProjection(trafficProjectionRequest{Op: trafficProjectionChain, Rows: []trafficProjectionFacts{f}}).Text
 }
 
 // kernelTraffic reads the kernel's connection table. It is separate from
@@ -225,39 +180,9 @@ func kernelTrafficAt(ctrlPort int, ctrlSecret string) (kernelTraffic, error) {
 // traffic reports what the tunnel is carrying right now. Monitoring only means
 // something while the kernel runs, so it never starts one of its own.
 func (a *app) traffic(w http.ResponseWriter, _ *http.Request) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	writeTrafficServiceResult(w, a.runTrafficService(trafficServiceRequest{Op: "current"}, nil))
+}
 
-	if !a.kernelRunningLocked() {
-		writeJSON(w, map[string]any{
-			"available": false,
-			"reason":    "内核未运行：连接与流量监控只在连接期间有意义",
-		})
-		return
-	}
-	snapshot, err := a.kernelTraffic()
-	if err != nil {
-		// Without a reading there is no baseline either, so the next sample
-		// starts over instead of reporting the gap as a burst.
-		a.lastTraffic = trafficSample{}
-		writeJSON(w, map[string]any{"available": false, "reason": "无法读取内核连接表"})
-		return
-	}
-
-	now := time.Now()
-	current := trafficSample{at: now, up: snapshot.UploadTotal, down: snapshot.DownloadTotal}
-	upRate, downRate := rateFor(a.lastTraffic, current)
-	a.lastTraffic = current
-
-	rows := connectionRows(snapshot.Connections, now)
-	writeJSON(w, map[string]any{
-		"available":       true,
-		"uploadTotal":     snapshot.UploadTotal,
-		"downloadTotal":   snapshot.DownloadTotal,
-		"uploadRate":      upRate,
-		"downloadRate":    downRate,
-		"connectionCount": len(snapshot.Connections),
-		"shownCount":      len(rows),
-		"connections":     rows,
-	})
+func sortTrafficRowsGo(rows []connectionRow) {
+	sort.SliceStable(rows, func(i, j int) bool { return rows[i].Upload+rows[i].Download > rows[j].Upload+rows[j].Download })
 }

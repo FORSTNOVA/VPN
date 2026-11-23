@@ -5,12 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -114,26 +114,8 @@ func fetchBody(client *http.Client, address string) ([]byte, error) {
 // It is the only way to learn the operator and the exit country of the address
 // the tunnel actually presents.
 func fetchEgressDetails(proxyAddress string) (egressFacts, ipQualityFacts, error) {
-	client := diagnosableClient(proxyAddress, 8*time.Second)
-	var lastErr error
-	for _, source := range egressSources {
-		body, err := fetchBody(client, source.url)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		facts, err := source.parse(body)
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		quality := parseIpQuality(body)
-		return facts, quality, nil
-	}
-	if lastErr == nil {
-		lastErr = errors.New("没有可用的出口信息源")
-	}
-	return egressFacts{}, ipQualityFacts{}, lastErr
+	r := (*app)(nil).runDiagnoseService(diagnoseServiceRequest{Op: "details", ProxyAddress: proxyAddress}, nil)
+	return r.Egress, r.Quality, r.Err
 }
 
 func parseIpQuality(body []byte) ipQualityFacts {
@@ -301,27 +283,7 @@ func asnLabel(raw any) string {
 // name, so the answer describes the resolution that has just happened instead of
 // one a resolver had cached.
 func checkDNSLeak(proxyAddress string) dnsFacts {
-	body, err := fetchBody(diagnosableClient(proxyAddress, 8*time.Second),
-		"https://edns.ip-api.com/json")
-	if err != nil {
-		return dnsFacts{Error: err.Error()}
-	}
-	var answer struct {
-		DNS struct {
-			IP  string `json:"ip"`
-			Geo string `json:"geo"`
-		} `json:"dns"`
-	}
-	if err := json.Unmarshal(body, &answer); err != nil || answer.DNS.IP == "" {
-		return dnsFacts{Error: "解析器归属服务没有返回结果"}
-	}
-	facts := dnsFacts{Resolver: answer.DNS.IP, Geo: answer.DNS.Geo}
-	// The verdict compares countries, and the label above is a sentence rather
-	// than a code, so the resolver's address is looked up instead.
-	if country, err := lookupCountry(proxyAddress, answer.DNS.IP); err == nil {
-		facts.Country = country
-	}
-	return facts
+	return (*app)(nil).runDiagnoseService(diagnoseServiceRequest{Op: "dns", ProxyAddress: proxyAddress}, nil).DNS
 }
 
 // lookupCountry asks the geolocation source about one address, which is how the
@@ -380,99 +342,8 @@ func markSitesSkipped(sites []siteCheckResult) {
 // diagnose runs every check the page shows, once. It is the batch the page is
 // built around: one node, one kernel, one report.
 func (a *app) diagnose(w http.ResponseWriter, _ *http.Request) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	temporary, err := a.ensureKernelForCheckLocked()
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
-		return
+	r := a.runDiagnoseService(diagnoseServiceRequest{Op: "diagnose"}, w)
+	if r.Err != nil {
+		log.Print("diagnostic workflow incomplete")
 	}
-	if temporary {
-		defer a.stopMihomoLocked()
-	}
-	selected := a.activeNodeLocked()
-	if selected == "" || strings.EqualFold(selected, blockedChoice) {
-		http.Error(w, "select a subscription node before checking", http.StatusConflict)
-		return
-	}
-
-	proxyAddress := net.JoinHostPort("127.0.0.1", strconv.Itoa(a.mixedPort))
-	proxyURL := &url.URL{Scheme: "http", Host: proxyAddress}
-	report := diagnoseReport{
-		Node: selected, Temporary: temporary,
-		Sites: make([]siteCheckResult, len(checkTargets)),
-	}
-
-	// The sections run one after another rather than all at once. A relay that
-	// carries a handful of connections happily starts dropping when a check opens
-	// nine at the same moment, and a check that fails because of its own burst is
-	// worse than a slow one: one pass then reports the line, not the load.
-	report.Egress.IPv4 = checkExitIP(proxyURL, exitIPProbeURL(false), false).Address
-	if report.Egress.IPv4 == "" {
-		// A Cloudflare trace is a second opinion on the same question.
-		report.Egress.IPv4 = checkCloudflareExitIP(proxyURL, cloudflareTraceURL).Address
-	}
-	if report.Egress.IPv4 == "" {
-		// Nothing is leaving through the tunnel, so the rest would only be a row
-		// of timeouts. Saying so at once is both faster and more honest.
-		report.Egress.Error = "隧道出口不通（请求没有到达）"
-		markSitesSkipped(report.Sites)
-		writeJSON(w, report)
-		return
-	}
-	report.Egress.IPv6 = checkExitIP(proxyURL, exitIPProbeURL(true), true).Address
-
-	if details, quality, err := fetchEgressDetails(proxyAddress); err != nil {
-		report.Egress.Error = err.Error()
-	} else {
-		// The exit probes are the authority on the address; the details service
-		// only fills in what it knows about it, and stands in when they failed.
-		if report.Egress.IPv4 == "" && details.IPv4 != "" {
-			report.Egress.IPv4 = details.IPv4
-		}
-		if report.Egress.IPv6 == "" && details.IPv6 != "" {
-			report.Egress.IPv6 = details.IPv6
-		}
-		report.Egress.Country = details.Country
-		report.Egress.CountryCode = details.CountryCode
-		report.Egress.City = details.City
-		report.Egress.ASN = details.ASN
-		report.Egress.ISP = details.ISP
-		report.Egress.Org = details.Org
-		report.Quality = quality
-	}
-
-	report.DNS = checkDNSLeak(proxyAddress)
-
-	report.UDP.Relay = probeUDPRelay(proxyAddress, udpRelayTarget, udpRelayTimeout)
-	if mapped, _, err := probeUDPEgress(proxyAddress, udpRelayTimeout); err != nil {
-		report.UDP.Error = err.Error()
-	} else {
-		report.UDP.Mapped = mapped
-	}
-
-	// The sites are checked concurrently: that is the same width the speed test uses.
-	var pending sync.WaitGroup
-	for i, target := range checkTargets {
-		pending.Add(1)
-		go func(i int, name, address string) {
-			defer pending.Done()
-			report.Sites[i] = checkSite(proxyURL, name, address)
-		}(i, target.name, target.address)
-	}
-	pending.Wait()
-
-	// The verdicts are decided here, once, so the page only has to render them.
-	report.DNS.MatchesExit = dnsMatchesExit(report.DNS.Country, report.Egress.CountryCode)
-	report.UDP.MatchesExit = report.UDP.Mapped != "" &&
-		(udpMatchesExit(report.UDP.Mapped, report.Egress.IPv4) ||
-			udpMatchesExit(report.UDP.Mapped, report.Egress.IPv6))
-
-	// WebRTC / STUN 泄露检测：若 STUN 映射地址有效且与 TCP 出口不一致，标记为 WebRTC 泄露
-	report.Quality.WebRTCLeak = report.UDP.Mapped != "" && !report.UDP.MatchesExit
-	// DNS 跨国泄露检测：若 DNS 解析器非空且与出口国家不匹配，标记为 DNS 泄露
-	report.Quality.DNSLeak = report.DNS.Country != "" && report.Egress.CountryCode != "" && !report.DNS.MatchesExit
-
-	writeJSON(w, report)
 }

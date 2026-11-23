@@ -1,16 +1,11 @@
 package main
 
 import (
-	"errors"
 	"fmt"
-	"gopkg.in/yaml.v3"
 	"log"
 	"net"
-	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
-	"time"
 )
 
 // kernelRunner is a kernel this service drives through its control API.
@@ -42,147 +37,11 @@ func (a *app) kernelRunningLocked() bool {
 // startMihomoLocked brings the kernel up with the configuration the current
 // settings describe.
 func (a *app) startMihomoLocked() error {
-	if a.kernelRunningLocked() {
-		return nil
-	}
-	// Every mode except the system proxy needs a tunnel of its own, and a
-	// platform that cannot give it one says so before anything is started.
-	if a.connectionModeLocked() != modeSystemProxy {
-		if err := a.tunUnavailableLocked(); err != nil {
-			return err
-		}
-	}
-	// Nodes come from the subscription, from pasted links, or from both.
-	if a.settings.SubscriptionURL == "" && len(a.manualNodes) == 0 {
-		return errors.New("请先添加订阅地址，或手动添加至少一个节点")
-	}
-	if a.settings.SubscriptionURL != "" && a.settings.SubscriptionURL != mergedSubscriptionURL && !a.profileMatchesSubscription() {
-		if _, err := a.fetchProfileLocked(); err != nil {
-			return err
-		}
-	}
-	if err := a.writeManualProviderLocked(); err != nil {
-		return errors.New("could not write the file for the nodes added by hand")
-	}
-	var err error
-	a.mixedPort, err = proxyListenPort(a.settings.SocksPort)
-	if err != nil {
-		return err
-	}
-	a.ctrlPort, err = freeLoopbackPort()
-	if err != nil {
-		return errors.New("could not allocate a local control port")
-	}
-	for a.ctrlPort == a.mixedPort {
-		a.ctrlPort, err = freeLoopbackPort()
-		if err != nil {
-			return errors.New("could not allocate a local control port")
-		}
-	}
-	configPath := a.configPath()
-	profile, err := os.ReadFile(a.profilePath())
-	if err != nil && a.settings.SubscriptionURL != "" {
-		return errors.New("could not read the downloaded subscription")
-	}
-	options, err := a.kernelConfigOptions(profile, a.settings.SubscriptionURL != "")
-	if err != nil {
-		return err
-	}
-	a.chinaDirectActive = options.ChinaDirect && (!options.TUN || !options.active() || options.DomesticWeb)
-	var relay *adaptiveDNS
-	if options.TUN && options.DNSProtection {
-		relay, err = newAdaptiveDNS(a.mixedPort)
-		if err != nil {
-			return err
-		}
-		options.dnsRelayAddr = relay.listener.Addr().String()
-		defer func() {
-			if a.dnsRelay != relay {
-				relay.close()
-			}
-		}()
-	}
-	if err := os.WriteFile(configPath, []byte(generatedConfig(options)), 0600); err != nil {
-		return errors.New("could not write Mihomo configuration")
-	}
-	runner, err := a.newKernel()
-	if err != nil {
-		return err
-	}
-	if err := runner.Start(); err != nil {
-		return err
-	}
-	a.kernel = runner
-	a.started = time.Now()
-	if err := a.waitForMihomo(10 * time.Second); err != nil {
-		_ = a.stopMihomoLocked()
-		return errors.New("Mihomo did not become ready; see the local log")
-	}
-	if checker, ok := runner.(interface{ verifyPortOwner(int) error }); ok && a.settings.SocksPort != 0 {
-		if err := checker.verifyPortOwner(a.mixedPort); err != nil {
-			_ = a.stopMihomoLocked()
-			return err
-		}
-	}
-	if err := a.waitForNodes(20 * time.Second); err != nil {
-		_ = a.stopMihomoLocked()
-		return errors.New("subscription returned no selectable nodes; check the subscription and network")
-	}
-	if options.TUN && options.active() {
-		if err := a.verifyPrivacyTunnel(); err != nil {
-			_ = a.stopMihomoLocked()
-			return err
-		}
-	}
-	a.startTrafficHistoryLocked()
-	a.dnsRelay = relay
-	if relay != nil {
-		go relay.monitor()
-	}
-	return nil
+	return a.runKernelService(kernelServiceRequest{Op: "start"}).Err
 }
 
 func (a *app) kernelConfigOptions(profile []byte, hasSubscription bool) (configOptions, error) {
-	// Only the cached list is consulted here: a rule-provider file that is
-	// missing is a configuration the kernel refuses to start with, and a
-	// download has no place in the path the user is waiting on.
-	a.chinaDirect = a.chinaIPListStatus(chinaListCached)
-	options := configOptions{
-		MixedPort:            a.mixedPort,
-		ControllerPort:       a.ctrlPort,
-		ProviderPath:         filepath.Join("providers", "subscription.yaml"),
-		ControllerSecret:     a.ctrlSecret,
-		Rules:                subscriptionRules(profile),
-		EntryDNS:             entryDNS(profile),
-		TUN:                  a.connectionModeLocked() != modeSystemProxy,
-		trafficPolicy:        a.settings.trafficPolicy,
-		SubscriptionProvider: hasSubscription,
-		ManualProvider:       len(a.manualNodes) > 0,
-		ChinaDirect:          a.chinaDirect.Available && a.chinaRuleSupported(),
-	}
-	if a.settings.ImportPolicy {
-		options.SourceRuleOrder = true
-		var p sourcePolicy
-		if hasSubscription {
-			if yaml.Unmarshal(profile, &p) != nil {
-				return options, errors.New("无法解析订阅规则")
-			}
-		}
-		_, options.Rules = supportedRules(p)
-	}
-	if options.TUN && options.DomesticWeb && !options.ChinaDirect {
-		return options, errors.New("国内加速需要可用的国内直连列表，请获取或更新列表后重试")
-	}
-	var err error
-	options.ChainProxies, err = a.buildChain(a.settings.Chain, profile)
-	if err != nil {
-		return options, err
-	}
-	if options.TUN {
-		options.ProxyServerDomains = mergeProxyServerDomains(
-			proxyServerDomains(profile), manualServerDomains(a.manualNodes))
-	}
-	return options, nil
+	return a.runChinaOptions(profile, hasSubscription)
 }
 
 func proxyListenPort(saved int) (int, error) {
@@ -200,23 +59,7 @@ func proxyListenPort(saved int) (int, error) {
 // stopMihomoLocked ends the kernel and leaves nothing of the configuration in
 // place, so a later run cannot mistake a stale file for a live one.
 func (a *app) stopMihomoLocked() error {
-	if a.dnsRelay != nil {
-		a.dnsRelay.close()
-		a.dnsRelay = nil
-	}
-	if a.trafficHistoryCancel != nil {
-		a.collectTrafficHistoryLocked()
-		a.stopTrafficHistoryLocked()
-	}
-	if a.kernel == nil {
-		return nil
-	}
-	err := a.kernel.Stop()
-	a.kernel = nil
-	// Nothing is being routed any more, so no configuration is in effect.
-	a.chinaDirectActive = false
-	a.removeConfigLocked()
-	return err
+	return a.runKernelService(kernelServiceRequest{Op: "stop"}).Err
 }
 
 // kernelExited is the kernel reporting that it is gone by itself: it crashed,
@@ -227,34 +70,7 @@ func (a *app) stopMihomoLocked() error {
 // which names the kernel that reported it, because a kernel replaced in the
 // meantime has already been accounted for and must not be cleaned up twice.
 func (a *app) kernelExited(which kernelRunner) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.kernel != which {
-		return
+	if result := a.runExitService(which); result.Err != nil {
+		log.Printf("kernel exit cleanup incomplete: %v", result.Err)
 	}
-	if a.dnsRelay != nil {
-		a.dnsRelay.close()
-		a.dnsRelay = nil
-	}
-	a.stopTrafficHistoryLocked()
-	a.kernel = nil
-	a.chinaDirectActive = false
-	a.removeConfigLocked()
-	if a.patrolCancel != nil {
-		close(a.patrolCancel)
-		a.patrolCancel = nil
-	}
-	a.blocked = false
-	a.blockReason = ""
-	if a.proxyOn {
-		if err := a.setSystemProxy(false); err != nil {
-			log.Printf("could not restore system proxy after Mihomo exit: %v", err)
-		}
-		a.proxyOn = false
-	}
-	// Whatever this platform made for the connection has to go with it. On
-	// Android that is the tunnel itself, and leaving it up is not a detail: a
-	// tunnel nobody reads is where every application's traffic goes to be
-	// dropped.
-	a.dropTunnel()
 }

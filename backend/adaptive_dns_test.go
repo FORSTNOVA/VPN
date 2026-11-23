@@ -60,7 +60,7 @@ func TestAdaptiveDNSFailover(t *testing.T) {
 }
 
 func TestAdaptiveDNSRouting(t *testing.T) {
-	cfg := generatedConfig(configOptions{TUN: true, trafficPolicy: trafficPolicy{DNSProtection: true}, dnsRelayAddr: "127.0.0.1:43210", Rules: []string{"IP-CIDR,1.1.1.1/32,DIRECT"}})
+	cfg := generatedConfig(configOptions{TUN: true, trafficPolicy: trafficPolicy{DNSProtection: true, DomesticWeb: true}, dnsRelayAddr: "127.0.0.1:43210", Rules: []string{"IP-CIDR,1.1.1.1/32,DIRECT"}})
 	for _, fragment := range []string{"tcp://127.0.0.1:43210", "223.5.5.5/dns-query#DIRECT", "8.8.8.8/32,no-resolve)),SmartVPN"} {
 		if !strings.Contains(cfg, fragment) {
 			t.Fatalf("missing %q", fragment)

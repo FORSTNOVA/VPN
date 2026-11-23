@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"net"
-	"sync/atomic"
 	"time"
 )
 
@@ -42,19 +41,10 @@ func init() {
 	net.DefaultResolver = &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
-			count := len(androidDNSServers)
-			start := int(atomic.AddUint32(&androidDNSCounter, 1)) % count
-			var lastErr error
-			for i := 0; i < count; i++ {
-				server := androidDNSServers[(start+i)%count]
-				dialer := net.Dialer{Timeout: 2500 * time.Millisecond}
-				conn, err := dialer.DialContext(ctx, network, server)
-				if err == nil {
-					return conn, nil
-				}
-				lastErr = err
-			}
-			return nil, lastErr
+			return dialAndroidResolver(ctx, network, androidDNSServers, &androidDNSCounter, func(ctx context.Context, network, server string, timeout time.Duration) (net.Conn, error) {
+				dialer := net.Dialer{Timeout: timeout}
+				return dialer.DialContext(ctx, network, server)
+			})
 		},
 	}
 }

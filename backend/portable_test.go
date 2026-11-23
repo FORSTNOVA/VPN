@@ -94,11 +94,11 @@ func TestMihomoPathResolution(t *testing.T) {
 		t.Fatalf("the packaged kernel must win over the profile: %q", got)
 	}
 	// A path the user chose wins over everything, and is not rewritten.
-	a.settings.MihomoPath = `D:\tools\mihomo.exe`
+	testEditSettings(a, func(s *settings) { s.MihomoPath = `D:\tools\mihomo.exe` })
 	if got := a.mihomoPath(); got != `D:\tools\mihomo.exe` {
 		t.Fatalf("got %q, want the saved value", got)
 	}
-	a.settings.MihomoPath = "  "
+	testEditSettings(a, func(s *settings) { s.MihomoPath = "  " })
 	if got := a.mihomoPath(); got != filepath.Join(bundle, "mihomo.exe") {
 		t.Fatalf("a blank value means 'not chosen': %q", got)
 	}

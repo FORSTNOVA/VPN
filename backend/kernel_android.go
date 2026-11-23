@@ -3,19 +3,10 @@
 package main
 
 import (
-	"errors"
-	"fmt"
-	"os"
-	"path/filepath"
-	"strings"
-	"sync"
-	"time"
-
 	"github.com/metacubex/mihomo/common/observable"
-	"github.com/metacubex/mihomo/constant"
-	"github.com/metacubex/mihomo/hub"
-	"github.com/metacubex/mihomo/hub/executor"
 	mihomolog "github.com/metacubex/mihomo/log"
+	"os"
+	"sync"
 )
 
 // embeddedKernel is the kernel running inside this process.
@@ -29,7 +20,9 @@ import (
 // its own secret, and everything above this type talks to it over HTTP exactly
 // as it does on Windows.
 type embeddedKernel struct {
-	app *app
+	app        *app
+	monitor    *androidMonitor
+	generation uint64
 
 	mu      sync.Mutex
 	running bool
@@ -50,54 +43,15 @@ func (a *app) newKernel() (kernelRunner, error) {
 }
 
 func (k *embeddedKernel) Running() bool {
-	k.mu.Lock()
-	defer k.mu.Unlock()
-	return k.running
+	q := embeddedKernelRequest{Op: "running"}
+	r := runEmbeddedKernelOperation(q, &appEmbeddedKernelEffects{k: k, a: k.app, q: q})
+	return r.Status == 1
 }
 
 func (k *embeddedKernel) Start() error {
-	home := k.app.home
-	// The kernel resolves the paths in the configuration — the two provider
-	// files and the domestic address list — relative to its working directory,
-	// which is how the Windows copy starts it in the profile. Here the process
-	// is the app's, so the working directory has to be moved instead.
-	if err := os.Chdir(home); err != nil {
-		return fmt.Errorf("无法切换到配置目录：%w", err)
-	}
-	// The kernel keeps its own files — the selected-node cache, any geodata —
-	// under this directory, and reads its own configuration from it.
-	constant.SetHomeDir(home)
-	if err := os.MkdirAll(home, 0700); err != nil {
-		return fmt.Errorf("无法创建配置目录：%w", err)
-	}
-	body, err := os.ReadFile(k.app.configPath())
-	if err != nil {
-		return errors.New("could not read Mihomo configuration")
-	}
-	k.startLogging()
-	// hub.Parse is what the kernel's own command line does with a configuration:
-	// it parses it, applies it, and brings up the control interface the
-	// configuration names. A failure here is the configuration being refused,
-	// which is why the reason is passed on rather than replaced.
-	if err := hub.Parse(body); err != nil {
-		k.stopLogging()
-		return fmt.Errorf("Mihomo 拒绝了这份配置：%w", err)
-	}
-	if err := k.tunnelRefused(); err != nil {
-		// The kernel is up but cannot use the tunnel. It is taken down here
-		// rather than left running: a kernel with a control port and no tunnel
-		// is a connection the window would eventually report as working.
-		executor.Shutdown()
-		k.stopLogging()
-		return err
-	}
-	// The kernel has the tunnel now, and with it the descriptor: it closes it
-	// when it stops, and this side must not.
-	tunnel.handOver()
-	k.mu.Lock()
-	k.running = true
-	k.mu.Unlock()
-	return nil
+	q := embeddedKernelRequest{Op: "session-start"}
+	r := runEmbeddedKernelOperation(q, &appEmbeddedKernelEffects{k: k, a: k.app, q: q, home: k.app.home})
+	return r.Err
 }
 
 // tunnelRefused reports whether the kernel's TUN listener failed to start.
@@ -113,21 +67,15 @@ func (k *embeddedKernel) Start() error {
 // configuration is being applied, and this side reads it from a channel. Two
 // hundred milliseconds is far longer than that takes.
 func (k *embeddedKernel) tunnelRefused() error {
-	time.Sleep(200 * time.Millisecond)
-	if k.tunError == "" {
-		return nil
-	}
-	return fmt.Errorf("内核没能接管隧道：%s。"+
-		"为避免全部应用的流量被送进一条没人处理的隧道，本次连接已终止", k.tunError)
+	q := embeddedKernelRequest{Op: "refusal"}
+	r := runEmbeddedKernelOperation(q, &appEmbeddedKernelEffects{k: k, a: k.app, q: q})
+	return r.Err
 }
 
 func (k *embeddedKernel) Stop() error {
-	executor.Shutdown()
-	k.stopLogging()
-	k.mu.Lock()
-	k.running = false
-	k.mu.Unlock()
-	return nil
+	q := embeddedKernelRequest{Op: "session-stop"}
+	r := runEmbeddedKernelOperation(q, &appEmbeddedKernelEffects{k: k, a: k.app, q: q})
+	return r.Err
 }
 
 // checkKernelConfig parses a configuration with the kernel that is linked in
@@ -135,71 +83,29 @@ func (k *embeddedKernel) Stop() error {
 // asks by running the kernel's own preflight, answered without a process: the
 // parser is the kernel's.
 func (a *app) checkKernelConfig(configPath string) error {
-	body, err := os.ReadFile(configPath)
-	if err != nil {
-		return err
-	}
-	if _, err := executor.ParseWithBytes(body); err != nil {
-		return err
-	}
-	return nil
+	q := embeddedKernelRequest{Op: "check"}
+	return runEmbeddedKernelOperation(q, &appEmbeddedKernelEffects{a: a, q: q, path: configPath}).Err
 }
 
 // startLogging puts the kernel's lines into the profile's kernel log, through
 // the same redactor the service's own log uses: a subscription URL that reaches
 // a kernel message is stripped there too.
 func (k *embeddedKernel) startLogging() {
-	path := filepath.Join(k.app.home, "mihomo.log")
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
-	if err != nil {
-		// Without a file the kernel still logs to the system log, which is where
-		// an Android app's output goes; this is the copy that stays with the
-		// profile, and not having it is not a reason to refuse to connect.
-		return
-	}
-	redactor := newLogRedactor(file)
-	redactor.Set(k.app.subscriptionSecrets())
-	sub := mihomolog.Subscribe()
-	k.mu.Lock()
-	k.logFile, k.logSub = file, sub
-	// A failure from an earlier start is not this one's.
-	k.tunError = ""
-	k.mu.Unlock()
-	go func() {
-		for event := range sub {
-			if strings.Contains(event.Payload, "TUN listening error") {
-				k.mu.Lock()
-				if k.tunError == "" {
-					k.tunError = event.Payload
-				}
-				k.mu.Unlock()
-			}
-			_, _ = redactor.Write([]byte(fmt.Sprintf("time=\"%s\" level=%s msg=%q\n",
-				time.Now().Format(time.RFC3339), event.LogLevel.String(), event.Payload)))
-		}
-	}()
+	q := embeddedKernelRequest{Op: "start-logging"}
+	r := runEmbeddedKernelOperation(q, &appEmbeddedKernelEffects{k: k, a: k.app, q: q})
+	_ = r
 }
 
 func (k *embeddedKernel) stopLogging() {
-	k.mu.Lock()
-	file, sub := k.logFile, k.logSub
-	k.logFile, k.logSub = nil, nil
-	k.mu.Unlock()
-	if sub != nil {
-		mihomolog.UnSubscribe(sub)
-	}
-	if file != nil {
-		_ = file.Close()
-	}
+	q := embeddedKernelRequest{Op: "stop-logging"}
+	r := runEmbeddedKernelOperation(q, &appEmbeddedKernelEffects{k: k, a: k.app, q: q})
+	_ = r
 }
 
 // The CMFA build disables PUT /configs. Keep the VpnService descriptor
 // and listeners while applying the parsed configuration in-process.
 func (a *app) applyLiveConfig(payload string) error {
-	cfg, err := executor.ParseWithBytes([]byte(payload))
-	if err != nil {
-		return err
-	}
-	executor.ApplyConfig(cfg, false)
-	return nil
+	q := embeddedKernelRequest{Op: "session-apply"}
+	k, _ := a.kernel.(*embeddedKernel)
+	return runEmbeddedKernelOperation(q, &appEmbeddedKernelEffects{k: k, a: a, q: q, payload: payload}).Err
 }

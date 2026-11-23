@@ -2,12 +2,7 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
-	"fmt"
-	"net/url"
 	"strings"
-
-	"gopkg.in/yaml.v3"
 )
 
 // singboxConfig describes the structure of a Sing-Box profile.
@@ -25,341 +20,12 @@ type singboxOutboundBase struct {
 // parseSingboxProfile extracts both Mihomo proxy maps and UI proxyNode descriptors
 // from a Sing-Box configuration.
 func parseSingboxProfile(body []byte) ([]map[string]any, []proxyNode) {
-	var cfg singboxConfig
-	if err := json.Unmarshal(body, &cfg); err != nil || len(cfg.Outbounds) == 0 {
-		return nil, nil
+	q, e := converterBodyRequest("singbox", body)
+	p, n, err := converterProxyResult(e, runConverterService(q, e))
+	if err != nil {
+		panic(err)
 	}
-
-	proxies := make([]map[string]any, 0, len(cfg.Outbounds))
-	nodes := make([]proxyNode, 0, len(cfg.Outbounds))
-
-	for _, raw := range cfg.Outbounds {
-		var base singboxOutboundBase
-		if err := json.Unmarshal(raw, &base); err != nil {
-			continue
-		}
-		tag := strings.TrimSpace(base.Tag)
-		if tag == "" || isInformationalNode(tag) {
-			continue
-		}
-		server := strings.TrimSpace(base.Server)
-		port := base.ServerPort
-		kind := strings.ToLower(strings.TrimSpace(base.Type))
-
-		switch kind {
-		case "shadowsocks", "ss":
-			var ss struct {
-				Method   string `json:"method"`
-				Password string `json:"password"`
-			}
-			if json.Unmarshal(raw, &ss) != nil || ss.Method == "" || ss.Password == "" {
-				continue
-			}
-			proxy := map[string]any{
-				"name":     tag,
-				"type":     "ss",
-				"server":   server,
-				"port":     port,
-				"cipher":   ss.Method,
-				"password": ss.Password,
-				"udp":      true,
-			}
-			proxies = append(proxies, proxy)
-			nodes = append(nodes, proxyNode{
-				Name: tag, Type: "ss", Network: "tcp",
-			})
-
-		case "vmess":
-			var vmess struct {
-				UUID     string `json:"uuid"`
-				Security string `json:"security"`
-				AlterID  int    `json:"alter_id"`
-				TLS      *struct {
-					Enabled    bool     `json:"enabled"`
-					ServerName string   `json:"server_name"`
-					Insecure   bool     `json:"insecure"`
-					ALPN       []string `json:"alpn"`
-				} `json:"tls"`
-				Transport *struct {
-					Type    string            `json:"type"`
-					Path    string            `json:"path"`
-					Headers map[string]string `json:"headers"`
-				} `json:"transport"`
-			}
-			if json.Unmarshal(raw, &vmess) != nil || vmess.UUID == "" {
-				continue
-			}
-			proxy := map[string]any{
-				"name":    tag,
-				"type":    "vmess",
-				"server":  server,
-				"port":    port,
-				"uuid":    vmess.UUID,
-				"cipher":  firstNonEmpty(vmess.Security, "auto"),
-				"alterId": vmess.AlterID,
-				"udp":     true,
-			}
-			tls := false
-			if vmess.TLS != nil && vmess.TLS.Enabled {
-				tls = true
-				proxy["tls"] = true
-				if vmess.TLS.ServerName != "" {
-					proxy["servername"] = vmess.TLS.ServerName
-				}
-				if vmess.TLS.Insecure {
-					proxy["skip-cert-verify"] = true
-				}
-				if len(vmess.TLS.ALPN) > 0 {
-					proxy["alpn"] = vmess.TLS.ALPN
-				}
-			}
-			network := "tcp"
-			wsHost, wsPath := false, false
-			if vmess.Transport != nil {
-				network = vmess.Transport.Type
-				host := ""
-				if vmess.Transport.Headers != nil {
-					host = vmess.Transport.Headers["Host"]
-				}
-				if host != "" {
-					wsHost = true
-				}
-				if vmess.Transport.Path != "" {
-					wsPath = true
-				}
-				_ = transportOptions(proxy, vmess.Transport.Type, vmess.Transport.Path, host, vmess.Transport.Path)
-			}
-			proxies = append(proxies, proxy)
-			nodes = append(nodes, proxyNode{
-				Name: tag, Type: "vmess", Network: network, TLS: tls, WsHost: wsHost, WsPath: wsPath,
-			})
-
-		case "vless":
-			var vless struct {
-				UUID string `json:"uuid"`
-				Flow string `json:"flow"`
-				TLS  *struct {
-					Enabled    bool     `json:"enabled"`
-					ServerName string   `json:"server_name"`
-					Insecure   bool     `json:"insecure"`
-					ALPN       []string `json:"alpn"`
-					Reality    *struct {
-						Enabled   bool   `json:"enabled"`
-						PublicKey string `json:"public_key"`
-						ShortID   string `json:"short_id"`
-					} `json:"reality"`
-				} `json:"tls"`
-				Transport *struct {
-					Type    string            `json:"type"`
-					Path    string            `json:"path"`
-					Headers map[string]string `json:"headers"`
-				} `json:"transport"`
-			}
-			if json.Unmarshal(raw, &vless) != nil || vless.UUID == "" {
-				continue
-			}
-			proxy := map[string]any{
-				"name":   tag,
-				"type":   "vless",
-				"server": server,
-				"port":   port,
-				"uuid":   vless.UUID,
-				"udp":    true,
-			}
-			if vless.Flow != "" {
-				proxy["flow"] = vless.Flow
-			}
-			tls := false
-			if vless.TLS != nil && vless.TLS.Enabled {
-				tls = true
-				proxy["tls"] = true
-				if vless.TLS.ServerName != "" {
-					proxy["servername"] = vless.TLS.ServerName
-				}
-				if vless.TLS.Insecure {
-					proxy["skip-cert-verify"] = true
-				}
-				if len(vless.TLS.ALPN) > 0 {
-					proxy["alpn"] = vless.TLS.ALPN
-				}
-				if vless.TLS.Reality != nil && vless.TLS.Reality.Enabled {
-					ropts := map[string]any{"public-key": vless.TLS.Reality.PublicKey}
-					if vless.TLS.Reality.ShortID != "" {
-						ropts["short-id"] = vless.TLS.Reality.ShortID
-					}
-					proxy["reality-opts"] = ropts
-				}
-			}
-			network := "tcp"
-			wsHost, wsPath := false, false
-			if vless.Transport != nil {
-				network = vless.Transport.Type
-				host := ""
-				if vless.Transport.Headers != nil {
-					host = vless.Transport.Headers["Host"]
-				}
-				if host != "" {
-					wsHost = true
-				}
-				if vless.Transport.Path != "" {
-					wsPath = true
-				}
-				_ = transportOptions(proxy, vless.Transport.Type, vless.Transport.Path, host, vless.Transport.Path)
-			}
-			proxies = append(proxies, proxy)
-			nodes = append(nodes, proxyNode{
-				Name: tag, Type: "vless", Network: network, TLS: tls, WsHost: wsHost, WsPath: wsPath,
-			})
-
-		case "trojan":
-			var trojan struct {
-				Password string `json:"password"`
-				TLS      *struct {
-					Enabled    bool     `json:"enabled"`
-					ServerName string   `json:"server_name"`
-					Insecure   bool     `json:"insecure"`
-					ALPN       []string `json:"alpn"`
-				} `json:"tls"`
-				Transport *struct {
-					Type    string            `json:"type"`
-					Path    string            `json:"path"`
-					Headers map[string]string `json:"headers"`
-				} `json:"transport"`
-			}
-			if json.Unmarshal(raw, &trojan) != nil || trojan.Password == "" {
-				continue
-			}
-			proxy := map[string]any{
-				"name":     tag,
-				"type":     "trojan",
-				"server":   server,
-				"port":     port,
-				"password": trojan.Password,
-				"udp":      true,
-			}
-			tls := true
-			if trojan.TLS != nil {
-				if trojan.TLS.ServerName != "" {
-					proxy["sni"] = trojan.TLS.ServerName
-				}
-				if trojan.TLS.Insecure {
-					proxy["skip-cert-verify"] = true
-				}
-				if len(trojan.TLS.ALPN) > 0 {
-					proxy["alpn"] = trojan.TLS.ALPN
-				}
-			}
-			network := "tcp"
-			wsHost, wsPath := false, false
-			if trojan.Transport != nil {
-				network = trojan.Transport.Type
-				host := ""
-				if trojan.Transport.Headers != nil {
-					host = trojan.Transport.Headers["Host"]
-				}
-				if host != "" {
-					wsHost = true
-				}
-				if trojan.Transport.Path != "" {
-					wsPath = true
-				}
-				_ = transportOptions(proxy, trojan.Transport.Type, trojan.Transport.Path, host, trojan.Transport.Path)
-			}
-			proxies = append(proxies, proxy)
-			nodes = append(nodes, proxyNode{
-				Name: tag, Type: "trojan", Network: network, TLS: tls, WsHost: wsHost, WsPath: wsPath,
-			})
-
-		case "hysteria2":
-			var hy2 struct {
-				Password string `json:"password"`
-				TLS      *struct {
-					ServerName string   `json:"server_name"`
-					Insecure   bool     `json:"insecure"`
-					ALPN       []string `json:"alpn"`
-				} `json:"tls"`
-				Obfs *struct {
-					Type     string `json:"type"`
-					Password string `json:"password"`
-				} `json:"obfs"`
-			}
-			if json.Unmarshal(raw, &hy2) != nil || hy2.Password == "" {
-				continue
-			}
-			proxy := map[string]any{
-				"name":     tag,
-				"type":     "hysteria2",
-				"server":   server,
-				"port":     port,
-				"password": hy2.Password,
-			}
-			if hy2.TLS != nil {
-				if hy2.TLS.ServerName != "" {
-					proxy["sni"] = hy2.TLS.ServerName
-				}
-				if hy2.TLS.Insecure {
-					proxy["skip-cert-verify"] = true
-				}
-				if len(hy2.TLS.ALPN) > 0 {
-					proxy["alpn"] = hy2.TLS.ALPN
-				}
-			}
-			if hy2.Obfs != nil && hy2.Obfs.Type != "" {
-				proxy["obfs"] = hy2.Obfs.Type
-				if hy2.Obfs.Password != "" {
-					proxy["obfs-password"] = hy2.Obfs.Password
-				}
-			}
-			proxies = append(proxies, proxy)
-			nodes = append(nodes, proxyNode{
-				Name: tag, Type: "hysteria2", Network: "udp", TLS: true,
-			})
-
-		case "tuic":
-			var tuic struct {
-				UUID                 string `json:"uuid"`
-				Password             string `json:"password"`
-				CongestionController string `json:"congestion_controller"`
-				TLS                  *struct {
-					ServerName string   `json:"server_name"`
-					Insecure   bool     `json:"insecure"`
-					ALPN       []string `json:"alpn"`
-				} `json:"tls"`
-			}
-			if json.Unmarshal(raw, &tuic) != nil || (tuic.UUID == "" && tuic.Password == "") {
-				continue
-			}
-			proxy := map[string]any{
-				"name":     tag,
-				"type":     "tuic",
-				"server":   server,
-				"port":     port,
-				"uuid":     tuic.UUID,
-				"password": tuic.Password,
-				"udp":      true,
-			}
-			if tuic.CongestionController != "" {
-				proxy["congestion-controller"] = tuic.CongestionController
-			}
-			if tuic.TLS != nil {
-				if tuic.TLS.ServerName != "" {
-					proxy["sni"] = tuic.TLS.ServerName
-				}
-				if tuic.TLS.Insecure {
-					proxy["skip-cert-verify"] = true
-				}
-				if len(tuic.TLS.ALPN) > 0 {
-					proxy["alpn"] = tuic.TLS.ALPN
-				}
-			}
-			proxies = append(proxies, proxy)
-			nodes = append(nodes, proxyNode{
-				Name: tag, Type: "tuic", Network: "udp", TLS: true,
-			})
-		}
-	}
-
-	return proxies, uniqueNodes(nodes)
+	return p, n
 }
 
 func parseSingboxNodes(body []byte) []proxyNode {
@@ -368,7 +34,7 @@ func parseSingboxNodes(body []byte) []proxyNode {
 }
 
 // isProxyURILink reports whether text starts with a supported node proxy scheme.
-func isProxyURILink(text string) bool {
+func isProxyURILinkGo(text string) bool {
 	t := strings.ToLower(strings.TrimSpace(text))
 	for _, scheme := range []string{"vmess://", "vless://", "ss://", "ssr://", "trojan://", "hysteria2://", "hy2://", "hysteria://", "tuic://", "anytls://"} {
 		if strings.HasPrefix(t, scheme) {
@@ -379,7 +45,7 @@ func isProxyURILink(text string) bool {
 }
 
 // isInlineSubscription reports whether text contains node links, Base64 URI list, or JSON/YAML profile directly.
-func isInlineSubscription(raw string) bool {
+func isInlineSubscriptionGo(raw string) bool {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" {
 		return false
@@ -390,13 +56,13 @@ func isInlineSubscription(raw string) bool {
 	if strings.HasPrefix(trimmed, "{") {
 		return true
 	}
-	if hasProxyURI(trimmed) {
+	if hasProxyURIGo(trimmed) {
 		return true
 	}
 	// Check if base64 decodes to valid proxy content
-	if decoded, err := decodeSubscriptionBase64(trimmed); err == nil && len(decoded) > 0 {
+	if decoded, err := decodeSubscriptionBase64Go(trimmed); err == nil && len(decoded) > 0 {
 		decStr := strings.TrimSpace(string(decoded))
-		if hasProxyURI(decStr) || strings.HasPrefix(decStr, "proxies:") || strings.HasPrefix(decStr, "{") {
+		if hasProxyURIGo(decStr) || strings.HasPrefix(decStr, "proxies:") || strings.HasPrefix(decStr, "{") {
 			return true
 		}
 	}
@@ -405,7 +71,7 @@ func isInlineSubscription(raw string) bool {
 
 // categorizeSubscriptionInput divides user input containing URLs or node links
 // into remote HTTP(S) download targets and inline node lines.
-func categorizeSubscriptionInput(raw string) ([]string, []string) {
+func categorizeSubscriptionInputGo(raw string) ([]string, []string) {
 	raw = strings.ReplaceAll(raw, "\r\n", "\n")
 	raw = strings.ReplaceAll(raw, "\r", "\n")
 	scanner := func(c rune) bool {
@@ -421,14 +87,14 @@ func categorizeSubscriptionInput(raw string) ([]string, []string) {
 		}
 		if strings.HasPrefix(part, "http://") || strings.HasPrefix(part, "https://") {
 			remoteURLs = append(remoteURLs, part)
-		} else if isProxyURILink(part) {
+		} else if isProxyURILinkGo(part) {
 			inlineLines = append(inlineLines, part)
-		} else if isInlineSubscription(part) {
+		} else if isInlineSubscriptionGo(part) {
 			inlineLines = append(inlineLines, part)
 		}
 	}
 	// If fieldsFunc split didn't catch it (e.g. single block of YAML, Base64, or single link)
-	if len(remoteURLs) == 0 && len(inlineLines) == 0 && isInlineSubscription(raw) {
+	if len(remoteURLs) == 0 && len(inlineLines) == 0 && isInlineSubscriptionGo(raw) {
 		inlineLines = append(inlineLines, raw)
 	}
 	return remoteURLs, inlineLines
@@ -444,215 +110,15 @@ func splitSubscriptionURLs(raw string) []string {
 // parseSubscriptionBodyToProxies parses Clash YAML, Sing-Box JSON, or Base64 URI lists
 // into canonical Mihomo proxy maps and proxyNode items.
 func parseSubscriptionBodyToProxies(body []byte) ([]map[string]any, []proxyNode, error) {
-	text := strings.TrimSpace(string(body))
-	if text == "" {
-		return nil, nil, errNoUsableNodes
-	}
-
-	// 1. Direct Sing-Box JSON
-	if strings.HasPrefix(text, "{") {
-		if proxies, nodes := parseSingboxProfile(body); len(proxies) > 0 {
-			return proxies, nodes, nil
-		}
-	}
-
-	// 2. Direct Clash YAML
-	var clashDoc struct {
-		Proxies []map[string]any `yaml:"proxies"`
-	}
-	if yaml.Unmarshal(body, &clashDoc) == nil && len(clashDoc.Proxies) > 0 {
-		cleanProxies := make([]map[string]any, 0, len(clashDoc.Proxies))
-		for _, p := range clashDoc.Proxies {
-			name := stringValue(p["name"])
-			if name != "" && !isInformationalNode(name) {
-				cleanProxies = append(cleanProxies, p)
-			}
-		}
-		if len(cleanProxies) > 0 {
-			return cleanProxies, yamlProfileNodes(body), nil
-		}
-	}
-
-	// 3. Base64 decode attempt
-	if !hasProxyURI(text) {
-		if decoded, err := decodeSubscriptionBase64(text); err == nil {
-			decText := strings.TrimSpace(string(decoded))
-			if strings.HasPrefix(decText, "{") {
-				if proxies, nodes := parseSingboxProfile(decoded); len(proxies) > 0 {
-					return proxies, nodes, nil
-				}
-			}
-			var decClash struct {
-				Proxies []map[string]any `yaml:"proxies"`
-			}
-			if yaml.Unmarshal(decoded, &decClash) == nil && len(decClash.Proxies) > 0 {
-				cleanProxies := make([]map[string]any, 0, len(decClash.Proxies))
-				for _, p := range decClash.Proxies {
-					name := stringValue(p["name"])
-					if name != "" && !isInformationalNode(name) {
-						cleanProxies = append(cleanProxies, p)
-					}
-				}
-				if len(cleanProxies) > 0 {
-					return cleanProxies, yamlProfileNodes(decoded), nil
-				}
-			}
-			text = decText
-		}
-	}
-
-	// 4. Line-by-line URI parsing
-	var proxies []map[string]any
-	var nodes []proxyNode
-
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		kind, _, hasScheme := strings.Cut(line, "://")
-		if !hasScheme {
-			continue
-		}
-		kind = strings.ToLower(kind)
-		if kind == "vmess" {
-			encoded := strings.TrimPrefix(line, "vmess://")
-			decoded, err := decodeSubscriptionBase64(encoded)
-			if err != nil {
-				continue
-			}
-			var vmess vmessLink
-			if json.Unmarshal(decoded, &vmess) != nil {
-				continue
-			}
-			name := strings.TrimSpace(vmess.Name)
-			if name == "" {
-				name = fmt.Sprintf("%v:%v", vmess.Server, vmess.Port)
-			}
-			if isInformationalNode(name) {
-				continue
-			}
-			tls := strings.ToLower(strings.TrimSpace(vmess.TLS))
-			hasTLS := tls != "" && tls != "none" && tls != "false"
-			network := vmess.Network
-			if network == "" {
-				network = "tcp"
-			}
-			wsHost := vmess.Host != ""
-			wsPath := vmess.Path != ""
-			nodes = append(nodes, proxyNode{
-				Name: name, Type: "Vmess", Network: network,
-				TLS: hasTLS, WsHost: wsHost, WsPath: wsPath,
-			})
-			server := strings.TrimSpace(vmess.Server)
-			port, _ := portValue(vmess.Port)
-			proxy := map[string]any{
-				"name":    name,
-				"type":    "vmess",
-				"server":  server,
-				"port":    port,
-				"uuid":    firstNonEmpty(strings.TrimSpace(vmess.ID), "00000000-0000-0000-0000-000000000000"),
-				"alterId": intValue(vmess.AlterID),
-				"cipher":  vmessCipher(vmess.Cipher),
-				"udp":     true,
-			}
-			if hasTLS {
-				proxy["tls"] = true
-				if sni := firstNonEmpty(vmess.SNI, vmess.Host); sni != "" {
-					proxy["servername"] = sni
-				}
-			}
-			_ = transportOptions(proxy, vmess.Network, vmess.Path, vmess.Host, vmess.Path)
-			proxies = append(proxies, proxy)
-			continue
-		}
-
-		if kind == "vless" || kind == "trojan" || kind == "ss" || kind == "hysteria2" || kind == "hy2" || kind == "anytls" {
-			parsed, err := url.Parse(line)
-			if err != nil {
-				continue
-			}
-			name := linkName(parsed, parsed.Host)
-			if name == "" {
-				name = parsed.Fragment
-			}
-			if name == "" || isInformationalNode(name) {
-				continue
-			}
-			query := parsed.Query()
-			tls := tlsEnabled(query.Get("security")) || query.Get("tls") == "1"
-			if kind == "trojan" && (query.Get("security") == "" && query.Get("tls") == "") {
-				tls = true
-			}
-			if query.Get("security") == "none" {
-				tls = false
-			}
-			nodes = append(nodes, proxyNode{
-				Name: name, Type: kind, Network: query.Get("type"),
-				TLS: tls, WsHost: query.Get("host") != "", WsPath: query.Get("path") != "",
-			})
-			if mNode, err := parseNodeURI(line); err == nil {
-				proxies = append(proxies, mNode.Proxy)
-			}
-			continue
-		}
-
-		node, err := parseNodeURI(line)
-		if err != nil {
-			continue
-		}
-		if isInformationalNode(node.Name) {
-			continue
-		}
-		proxies = append(proxies, node.Proxy)
-		network, _ := node.Proxy["network"].(string)
-		tls, _ := node.Proxy["tls"].(bool)
-		wsHost, wsPath := false, false
-		if opts, ok := node.Proxy["ws-opts"].(map[string]any); ok {
-			if path, ok := opts["path"].(string); ok && path != "" {
-				wsPath = true
-			}
-			if _, ok := opts["headers"]; ok {
-				wsHost = true
-			}
-		}
-		nodes = append(nodes, proxyNode{
-			Name: node.Name, Type: node.Type, Network: network,
-			TLS: tls, WsHost: wsHost, WsPath: wsPath,
-		})
-	}
-
-	if len(proxies) == 0 {
-		return nil, nil, errNoUsableNodes
-	}
-	return proxies, uniqueNodes(nodes), nil
+	q, e := converterBodyRequest("parse-body", body)
+	return converterProxyResult(e, runConverterService(q, e))
 }
 
 // ensureClashYAML ensures that the subscription body stored in providers/subscription.yaml
 // is valid Clash YAML that Mihomo can always parse without error.
 func ensureClashYAML(body []byte) ([]byte, []proxyNode, error) {
-	if decoded, err := decodeSubscriptionBase64(string(body)); err == nil && len(yamlProfileNodes(decoded)) > 0 {
-		return decoded, yamlProfileNodes(decoded), nil
-	}
-	text := strings.TrimSpace(string(body))
-	// If already a valid Clash YAML with proxies, keep it
-	if (strings.HasPrefix(text, "proxies:") || strings.Contains(text, "\nproxies:")) &&
-		!strings.HasPrefix(text, "{") {
-		nodes := yamlProfileNodes(body)
-		if len(nodes) > 0 {
-			return body, nodes, nil
-		}
-	}
-
-	proxies, nodes, err := parseSubscriptionBodyToProxies(body)
-	if err != nil {
-		return nil, nil, err
-	}
-	marshaled, err := yaml.Marshal(map[string]any{"proxies": proxies})
-	if err != nil {
-		return nil, nil, errors.New("failed to marshal converted proxies to YAML")
-	}
-	return marshaled, nodes, nil
+	q, e := converterBodyRequest("ensure-yaml", body)
+	return converterByteResult(e, runConverterService(q, e))
 }
 
 // SubscriptionSource represents one subscription source during a multi-subscription merge.
@@ -666,126 +132,35 @@ type SubscriptionSource struct {
 // mergeSubscriptionSources merges multiple subscription sources into a single Clash YAML profile,
 // adding optional prefixes to node names and deduplicating names across sources.
 func mergeSubscriptionSources(sources []SubscriptionSource) ([]byte, []proxyNode, error) {
-	var allProxies []map[string]any
-	var allNodes []proxyNode
-	usedNames := make(map[string]struct{})
+	return mergeSubscriptionRows(sources, false)
+}
 
-	policies := map[string][]string{}
-	var merged sourcePolicy
-	labels := map[string]string{}
-	usedLabels := map[string]struct{}{}
-	var sections []policySection
-	for index, src := range sources {
-		proxies, nodes, err := parseSubscriptionBodyToProxies(src.Body)
-		if err != nil || len(proxies) == 0 {
-			continue
-		}
-		for host, urls := range entryDNS(src.Body) {
-			if _, exists := policies[host]; !exists {
-				policies[host] = urls
-			}
-		}
-		label := strings.TrimSpace(src.Label)
-		if label == "" {
-			label = fmt.Sprintf("订阅%d", index+1)
-		}
-		label = uniqueMergedNodeName(label, usedLabels)
-		names := map[string]string{}
-		prefix := strings.TrimSpace(src.Prefix)
-		for i, p := range proxies {
-			name := stringValue(p["name"])
-			if name == "" {
-				name = fmt.Sprintf("%s:%v", stringValue(p["server"]), p["port"])
-			}
-			if prefix != "" && !strings.HasPrefix(name, prefix) {
-				name = prefix + " " + name
-			}
-			name = uniqueMergedNodeName(name, usedNames)
-			names[stringValue(p["name"])] = name
-			p["name"] = name
-			labels[name] = label
-			if i < len(nodes) {
-				nodes[i].Name = name
-				nodes[i].SourceLabel = label
-			}
-			allProxies = append(allProxies, p)
-		}
-		var p sourcePolicy
-		if yaml.Unmarshal(src.Body, &p) == nil {
-			sections = append(sections, policySection{Label: label, Groups: p.Groups, Rules: append(append([]string{}, p.Rules...), p.MergedRules...)})
-			p.Groups = append([]sourceGroup(nil), p.Groups...)
-			for i := range p.Groups {
-				p.Groups[i].Members = append([]string(nil), p.Groups[i].Members...)
-			}
-			if len(sources) > 1 {
-				for i, g := range p.Groups {
-					alias := label + " / " + g.Name
-					names[g.Name] = alias
-					p.Groups[i].Name = alias
-				}
-			}
-			for i, g := range p.Groups {
-				for j, m := range g.Members {
-					if alias, ok := names[m]; ok && m != "DIRECT" && m != "REJECT" {
-						p.Groups[i].Members[j] = alias
-					}
-				}
-			}
-			merged.Groups = append(merged.Groups, p.Groups...)
-			for _, r := range append(p.Rules, p.MergedRules...) {
-				parts := strings.Split(r, ",")
-				j := len(parts) - 1
-				if j > 0 && strings.TrimSpace(parts[j]) == "no-resolve" {
-					j--
-				}
-				if j > 0 {
-					t := strings.TrimSpace(parts[j])
-					if alias, ok := names[t]; ok && t != "DIRECT" && t != "REJECT" {
-						parts[j] = alias
-						r = strings.Join(parts, ",")
-					}
-				}
-				merged.Rules = append(merged.Rules, r)
-			}
-		}
-		allNodes = append(allNodes, nodes...)
-	}
+// The converter API retains its historical positional summaries. A published
+// profile needs query metadata keyed by its final, unique provider names.
+func mergeSubscriptionSourcesForCache(sources []SubscriptionSource) ([]byte, []proxyNode, error) {
+	return mergeSubscriptionRows(sources, true)
+}
 
-	if len(allProxies) == 0 {
-		return nil, nil, errNoUsableNodes
+func mergeSubscriptionRows(sources []SubscriptionSource, publish bool) ([]byte, []proxyNode, error) {
+	e := newConverterEffects()
+	e.publishMetadata = publish
+	q := converterServiceRequest{Op: "merge-sources"}
+	for _, s := range sources {
+		q.Sources = append(q.Sources, converterSource{Body: e.put(s.Body), Label: s.Label, Prefix: s.Prefix})
 	}
-	out := map[string]any{"proxies": allProxies, "smartvpn-source-labels": labels, "smartvpn-policy-sections": sections}
-	if len(policies) > 0 {
-		out["dns"] = map[string]any{"nameserver-policy": policies}
-	}
-	if len(merged.Groups) > 0 {
-		out["proxy-groups"] = merged.Groups
-	}
-	if len(merged.Rules) > 0 {
-		out["smartvpn-source-rules"] = merged.Rules
-	}
-	mergedYAML, err := yaml.Marshal(out)
-	if err != nil {
-		return nil, nil, errors.New("could not marshal merged proxies")
-	}
-	return mergedYAML, uniqueNodes(allNodes), nil
+	return converterByteResult(e, runConverterService(q, e))
 }
 
 // uniqueMergedNodeName also checks names produced by suffixing. A later source
 // may already contain "Node (2)", so a duplicate "Node" must skip that name.
 func uniqueMergedNodeName(name string, used map[string]struct{}) string {
-	if _, exists := used[name]; !exists {
-		used[name] = struct{}{}
-		return name
+	e := newConverterEffects()
+	e.used = used
+	r := runConverterService(converterServiceRequest{Op: "unique-name", Name: name}, e)
+	if r.Err != nil {
+		panic(r.Err)
 	}
-	for suffix := 2; ; suffix++ {
-		candidate := fmt.Sprintf("%s (%d)", name, suffix)
-		if _, exists := used[candidate]; exists {
-			continue
-		}
-		used[candidate] = struct{}{}
-		return candidate
-	}
+	return r.Text
 }
 
 // mergeSubscriptionProfiles merges multiple profile bodies into a single Clash YAML profile,
@@ -795,5 +170,5 @@ func mergeSubscriptionProfiles(profiles [][]byte) ([]byte, []proxyNode, error) {
 	for i, p := range profiles {
 		sources[i] = SubscriptionSource{Body: p}
 	}
-	return mergeSubscriptionSources(sources)
+	return mergeSubscriptionSourcesForCache(sources)
 }

@@ -5,13 +5,8 @@ package main
 import (
 	"encoding/json"
 	"errors"
-	"io"
-	"net"
-	"net/http"
-	"strconv"
-	"time"
-
 	"golang.org/x/sys/windows/registry"
+	"time"
 )
 
 // A machine has exactly one system proxy setting, and the copy of this app that
@@ -88,16 +83,11 @@ func readProxyOwner() (proxyOwner, bool) {
 // directory, so a copy that is handing its own setting back cannot erase another
 // copy's claim to the setting it is still serving.
 func clearProxyOwner(home string) {
-	owner, ok := readProxyOwner()
-	if ok && owner.Home != home {
-		return
+	e := newBootstrapEffects(bootstrapServiceRequest{Op: "clear-owner"})
+	e.home = home
+	if r := runBootstrapWithEffects(e.q, e); r.Err != nil {
+		panic(r.Err)
 	}
-	key, err := registry.OpenKey(registry.CURRENT_USER, proxyOwnerKeyPath, registry.SET_VALUE)
-	if err != nil {
-		return
-	}
-	defer key.Close()
-	_ = key.DeleteValue(proxyOwnerValueName)
 }
 
 // readWindowsProxyState reads the system proxy setting as Windows holds it:
@@ -151,20 +141,14 @@ func (a *app) ownerRecord() (proxyOwner, bool) {
 // setting left behind by a run that is gone, including this app's own previous
 // run, which is exactly what the startup restore exists to clean up.
 func (a *app) proxyServedByAnotherInstance() bool {
-	enabled, server, err := a.proxyState()
-	if err != nil || !enabled || server == "" {
-		return false
+	e := newBootstrapEffects(bootstrapServiceRequest{Op: "owner"})
+	e.a = a
+	e.home = a.home
+	r := runBootstrapWithEffects(e.q, e)
+	if r.Err != nil {
+		panic(r.Err)
 	}
-	owner, ok := a.ownerRecord()
-	if !ok || owner.Home == a.home {
-		return false
-	}
-	// The setting has to still point where the record says it was pointed, or it
-	// has been changed since and the record describes nothing.
-	if server != net.JoinHostPort("127.0.0.1", strconv.Itoa(owner.MixedPort)) {
-		return false
-	}
-	return smartVPNIsListeningAt(net.JoinHostPort("127.0.0.1", strconv.Itoa(owner.APIPort)))
+	return r.Bool
 }
 
 // smartVPNIsListeningAt asks an address on this machine to name itself. A port
@@ -172,26 +156,8 @@ func (a *app) proxyServedByAnotherInstance() bool {
 // setting is not another copy's and may be taken over — which is what happens
 // with another proxy client's setting, restored afterwards as always.
 func smartVPNIsListeningAt(address string) bool {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	// The probe is to a loopback port; an application-level proxy would send it
-	// somewhere else entirely.
-	transport.Proxy = nil
-	transport.DisableKeepAlives = true
-	defer transport.CloseIdleConnections()
-	client := http.Client{Timeout: identifyTimeout, Transport: transport}
-	response, err := client.Get("http://" + address + "/api/identify")
-	if err != nil {
-		return false
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return false
-	}
-	var identity struct {
-		App string `json:"app"`
-	}
-	if json.NewDecoder(io.LimitReader(response.Body, 512)).Decode(&identity) != nil {
-		return false
-	}
-	return identity.App == appName
+	e := newBootstrapEffects(bootstrapServiceRequest{Op: "identify"})
+	e.address = address
+	r := runBootstrapWithEffects(e.q, e)
+	return r.Err == nil && r.Bool
 }

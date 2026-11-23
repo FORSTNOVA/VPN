@@ -221,6 +221,13 @@ extension _ConnectPage on _HomePageState {
             childrenPadding: const EdgeInsets.fromLTRB(18, 0, 18, 18),
             expandedCrossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              if (Platform.isWindows || Platform.isAndroid)
+                StartupTile(
+                  android: Platform.isAndroid,
+                  enabled: _startupEnabled,
+                  onChanged: (enabled) => unawaited(_startupSetting(enabled)),
+                  openVpnSettings: () => unawaited(_startupSetting()),
+                ),
               if (Platform.isAndroid)
                 const Text(
                   '连接由系统的 VPN 服务承载：授权之后，全部应用的流量都会经过 SmartVPN。',

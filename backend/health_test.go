@@ -313,17 +313,17 @@ func TestDwellElapsed(t *testing.T) {
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
 	params := defaultHealthParams()
 
-	never := &app{healthParams: params}
+	never := testHealthApp(&app{}, func(p *healthDomainProjection) { p.Params = params })
 	if !never.dwellElapsedLocked(now) {
 		t.Error("a node that was never switched must be past its dwell time")
 	}
 
-	recent := &app{healthParams: params, lastSwitch: now.Add(-time.Second)}
+	recent := testHealthApp(&app{}, func(p *healthDomainProjection) { p.Params = params; p.LastSwitch = now.Add(-time.Second) })
 	if recent.dwellElapsedLocked(now) {
 		t.Error("a switch one second ago must still be inside the dwell window")
 	}
 
-	old := &app{healthParams: params, lastSwitch: now.Add(-time.Minute)}
+	old := testHealthApp(&app{}, func(p *healthDomainProjection) { p.Params = params; p.LastSwitch = now.Add(-time.Minute) })
 	if !old.dwellElapsedLocked(now) {
 		t.Error("a switch a minute ago must be past the dwell window")
 	}
@@ -331,21 +331,13 @@ func TestDwellElapsed(t *testing.T) {
 
 func TestPickFailoverTargetPrefersMeasuredNodes(t *testing.T) {
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
-	a := &app{
-		healthParams: defaultHealthParams(),
-		lockedRegion: "JP",
-		regions: map[string]regionRecord{
-			"fast":      {Name: "fast", Country: "JP", Status: regionVerified, VerifiedAt: now},
-			"slow":      {Name: "slow", Country: "JP", Status: regionVerified, VerifiedAt: now},
-			"dead":      {Name: "dead", Country: "JP", Status: regionVerified, VerifiedAt: now},
-			"elsewhere": {Name: "elsewhere", Country: "US", Status: regionVerified, VerifiedAt: now},
-		},
-		health: map[string]nodeHealth{
-			"fast": {Name: "fast", State: healthHealthy, LatencyMs: 80},
-			"slow": {Name: "slow", State: healthHealthy, LatencyMs: 400},
-			"dead": {Name: "dead", State: healthUnhealthy, LatencyMs: 90},
-		},
-	}
+	a := testHealthApp(testControlApp(&app{}, func(a *app) {
+		a.patchControlLocked(controlRuntimeLockedRegion, serviceControlState{RuntimeLockedRegion: "JP"})
+	}), func(p *healthDomainProjection) {
+		p.Params = defaultHealthParams()
+		p.Regions = map[string]regionRecord{"fast": {Name: "fast", Country: "JP", Status: regionVerified, VerifiedAt: now}, "slow": {Name: "slow", Country: "JP", Status: regionVerified, VerifiedAt: now}, "dead": {Name: "dead", Country: "JP", Status: regionVerified, VerifiedAt: now}, "elsewhere": {Name: "elsewhere", Country: "US", Status: regionVerified, VerifiedAt: now}}
+		p.Health = map[string]nodeHealth{"fast": {Name: "fast", State: healthHealthy, LatencyMs: 80}, "slow": {Name: "slow", State: healthHealthy, LatencyMs: 400}, "dead": {Name: "dead", State: healthUnhealthy, LatencyMs: 90}}
+	})
 	target, delay := a.pickFailoverTargetLocked(now)
 	if target != "fast" || delay != 80 {
 		t.Fatalf("got (%q, %d), want the fastest healthy same-region node", target, delay)
@@ -354,21 +346,20 @@ func TestPickFailoverTargetPrefersMeasuredNodes(t *testing.T) {
 
 func TestPickFailoverTargetFailsClosed(t *testing.T) {
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
-	a := &app{
-		healthParams: defaultHealthParams(),
-		lockedRegion: "JP",
-		regions: map[string]regionRecord{
-			"only": {Name: "only", Country: "JP", Status: regionVerified, VerifiedAt: now},
-		},
-		health: map[string]nodeHealth{
-			"only": {Name: "only", State: healthUnhealthy, LatencyMs: 90},
-		},
-	}
+	a := testHealthApp(testControlApp(&app{}, func(a *app) {
+		a.patchControlLocked(controlRuntimeLockedRegion, serviceControlState{RuntimeLockedRegion: "JP"})
+	}), func(p *healthDomainProjection) {
+		p.Params = defaultHealthParams()
+		p.Regions = map[string]regionRecord{"only": {Name: "only", Country: "JP", Status: regionVerified, VerifiedAt: now}}
+		p.Health = map[string]nodeHealth{"only": {Name: "only", State: healthUnhealthy, LatencyMs: 90}}
+	})
 	if target, _ := a.pickFailoverTargetLocked(now); target != "" {
 		t.Fatalf("an unhealthy same-region pool must yield no target, got %q", target)
 	}
 
-	empty := &app{healthParams: defaultHealthParams(), lockedRegion: ""}
+	empty := testHealthApp(testControlApp(&app{}, func(a *app) {
+		a.patchControlLocked(controlRuntimeLockedRegion, serviceControlState{RuntimeLockedRegion: ""})
+	}), func(p *healthDomainProjection) { p.Params = defaultHealthParams() })
 	if target, _ := empty.pickFailoverTargetLocked(now); target != "" {
 		t.Fatalf("an unlocked region must yield no failover target, got %q", target)
 	}
@@ -376,19 +367,13 @@ func TestPickFailoverTargetFailsClosed(t *testing.T) {
 
 func TestHealthSnapshotCounts(t *testing.T) {
 	now := time.Now()
-	a := &app{
-		healthParams: defaultHealthParams(),
-		lockedRegion: "JP",
-		regions: map[string]regionRecord{
-			"n1": {Name: "n1", Country: "JP", Status: regionVerified, VerifiedAt: now},
-		},
-		health: map[string]nodeHealth{
-			"n1": {Name: "n1", State: healthHealthy},
-			"n2": {Name: "n2", State: healthUnhealthy},
-			"n3": {Name: "n3", State: healthCooldown, CooldownUntil: now.Add(time.Minute)},
-			"n4": {Name: "n4", State: healthHealthy, CooldownUntil: now.Add(time.Minute)},
-		},
-	}
+	a := testHealthApp(testControlApp(&app{}, func(a *app) {
+		a.patchControlLocked(controlRuntimeLockedRegion, serviceControlState{RuntimeLockedRegion: "JP"})
+	}), func(p *healthDomainProjection) {
+		p.Params = defaultHealthParams()
+		p.Regions = map[string]regionRecord{"n1": {Name: "n1", Country: "JP", Status: regionVerified, VerifiedAt: now}}
+		p.Health = map[string]nodeHealth{"n1": {Name: "n1", State: healthHealthy}, "n2": {Name: "n2", State: healthUnhealthy}, "n3": {Name: "n3", State: healthCooldown, CooldownUntil: now.Add(time.Minute)}, "n4": {Name: "n4", State: healthHealthy, CooldownUntil: now.Add(time.Minute)}}
+	})
 	snapshot := a.healthSnapshotLocked()
 	counts, ok := snapshot["counts"].(map[string]int)
 	if !ok {
@@ -451,12 +436,11 @@ func (c *controllerStub) app(t *testing.T) *app {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return &app{
-		home: t.TempDir(), ctrlPort: port, ctrlSecret: "controller-secret",
-		healthParams: defaultHealthParams(),
-		health:       map[string]nodeHealth{},
-		regions:      map[string]regionRecord{},
-	}
+	return testHealthApp(&app{home: t.TempDir(), ctrlPort: port, ctrlSecret: "controller-secret"}, func(p *healthDomainProjection) {
+		p.Params = defaultHealthParams()
+		p.Health = map[string]nodeHealth{}
+		p.Regions = map[string]regionRecord{}
+	})
 }
 
 func (c *controllerStub) saw(method, path, fragment string) bool {
@@ -477,14 +461,14 @@ func TestApplyPatrolRecordsTheActiveNode(t *testing.T) {
 
 	a.applyPatrolLocked("fast", map[string]int{"fast": 210}, now)
 
-	record := a.health["fast"]
+	record := a.healthDomainLocked().Health["fast"]
 	if record.State != healthHealthy {
 		t.Fatalf("state = %q, want %q", record.State, healthHealthy)
 	}
 	if record.LatencyMs != 210 {
 		t.Fatalf("latency = %d, want 210", record.LatencyMs)
 	}
-	if a.blocked {
+	if a.healthDomainLocked().Blocked {
 		t.Fatal("a healthy sweep must not block traffic")
 	}
 }
@@ -493,19 +477,19 @@ func TestApplyPatrolKeepsPoolHealthCurrent(t *testing.T) {
 	stub := newControllerStub(t, nil)
 	a := stub.app(t)
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
-	a.lockedRegion = "JP"
+	a.patchControlLocked(controlRuntimeLockedRegion, serviceControlState{RuntimeLockedRegion: "JP"})
 	for _, name := range []string{"active", "standby"} {
-		a.regions[name] = regionRecord{Name: name, Country: "JP", Status: regionVerified, VerifiedAt: now}
+		a.writeRegionRecordLocked(name, regionRecord{Name: name, Country: "JP", Status: regionVerified, VerifiedAt: now})
 	}
 
 	// One group measurement must update every node the sweep watches.
 	a.applyPatrolLocked("active", map[string]int{"active": 180, "standby": 240}, now)
 
-	if a.health["active"].State != healthHealthy || a.health["active"].LatencyMs != 180 {
-		t.Fatalf("active = %+v, want a healthy record at 180 ms", a.health["active"])
+	if a.healthDomainLocked().Health["active"].State != healthHealthy || a.healthDomainLocked().Health["active"].LatencyMs != 180 {
+		t.Fatalf("active = %+v, want a healthy record at 180 ms", a.healthDomainLocked().Health["active"])
 	}
-	if a.health["standby"].State != healthHealthy || a.health["standby"].LatencyMs != 240 {
-		t.Fatalf("standby = %+v, want a healthy record at 240 ms", a.health["standby"])
+	if a.healthDomainLocked().Health["standby"].State != healthHealthy || a.healthDomainLocked().Health["standby"].LatencyMs != 240 {
+		t.Fatalf("standby = %+v, want a healthy record at 240 ms", a.healthDomainLocked().Health["standby"])
 	}
 }
 
@@ -513,27 +497,27 @@ func TestApplyPatrolFailsClosedWhenTheRegionIsExhausted(t *testing.T) {
 	stub := newControllerStub(t, nil)
 	a := stub.app(t)
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
-	a.lockedRegion = "JP"
-	a.regions["active"] = regionRecord{Name: "active", Country: "JP", Status: regionVerified, VerifiedAt: now}
+	a.patchControlLocked(controlRuntimeLockedRegion, serviceControlState{RuntimeLockedRegion: "JP"})
+	a.writeRegionRecordLocked("active", regionRecord{Name: "active", Country: "JP", Status: regionVerified, VerifiedAt: now})
 
 	// The node in use is missing from the measurement: one strike, then a
 	// confirmed failure.
 	a.applyPatrolLocked("active", map[string]int{}, now)
-	if a.health["active"].State != healthSuspect {
-		t.Fatalf("state = %q, want %q after one failed sweep", a.health["active"].State, healthSuspect)
+	if a.healthDomainLocked().Health["active"].State != healthSuspect {
+		t.Fatalf("state = %q, want %q after one failed sweep", a.healthDomainLocked().Health["active"].State, healthSuspect)
 	}
-	if a.blocked {
+	if a.healthDomainLocked().Blocked {
 		t.Fatal("one failed sweep must not block traffic yet")
 	}
 
 	a.applyPatrolLocked("active", map[string]int{}, now.Add(time.Minute))
-	if a.health["active"].State != healthUnhealthy {
-		t.Fatalf("state = %q, want %q after two failed sweeps", a.health["active"].State, healthUnhealthy)
+	if a.healthDomainLocked().Health["active"].State != healthUnhealthy {
+		t.Fatalf("state = %q, want %q after two failed sweeps", a.healthDomainLocked().Health["active"].State, healthUnhealthy)
 	}
-	if !a.blocked {
+	if !a.healthDomainLocked().Blocked {
 		t.Fatal("an exhausted locked region must fail closed")
 	}
-	if a.blockReason == "" {
+	if a.healthDomainLocked().BlockReason == "" {
 		t.Fatal("blocking must explain itself to the user")
 	}
 	if !stub.saw(http.MethodPut, "/proxies/SmartVPN", `"name":"REJECT"`) {
@@ -573,10 +557,10 @@ func TestBlockLockedAsksAnIndependentProbeFirst(t *testing.T) {
 	if *asked == 0 {
 		t.Fatal("the verdict must be checked against a real request before traffic is dropped")
 	}
-	if a.blocked {
+	if a.healthDomainLocked().Blocked {
 		t.Fatal("traffic that still flows must not be dropped")
 	}
-	if a.sweepNote == "" {
+	if a.healthDomainLocked().SweepNote == "" {
 		t.Fatal("the page must be told why the app did not fail over")
 	}
 	if stub.saw(http.MethodPut, "/proxies/SmartVPN", `"name":"REJECT"`) {
@@ -593,16 +577,16 @@ func TestBlockLockedProceedsWhenTheTunnelIsDeadToo(t *testing.T) {
 
 	a.blockLocked("active", time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC), "同地区已无可用节点")
 
-	if !a.blocked {
+	if !a.healthDomainLocked().Blocked {
 		t.Fatal("a region whose probe fails as well must fail closed")
 	}
 	if !stub.saw(http.MethodPut, "/proxies/SmartVPN", `"name":"REJECT"`) {
 		t.Fatalf("the group should have been pointed at REJECT, calls: %v", stub.calls)
 	}
-	if a.sweepNote != "" {
+	if a.healthDomainLocked().SweepNote != "" {
 		t.Fatal("a confirmed block is not an anomaly and must not be reported as one")
 	}
-	if a.blockReason == "" {
+	if a.healthDomainLocked().BlockReason == "" {
 		t.Fatal("blocking must explain itself to the user")
 	}
 }
@@ -613,7 +597,7 @@ func TestBlockLockedWithoutAKernelDoesNotProbe(t *testing.T) {
 	// Disconnected: there is no tunnel to probe and nothing to leak either.
 	a.mixedPort = 1
 	a.blockLocked("active", time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC), "同地区已无可用节点")
-	if !a.blocked {
+	if !a.healthDomainLocked().Blocked {
 		t.Fatal("a region that cannot be measured at all must still fail closed")
 	}
 }
@@ -626,19 +610,19 @@ func TestApplyPatrolKeepsTrafficFlowingWhenTheMeasurementIsWrong(t *testing.T) {
 	runningKernel(t, a)
 	tunnelCarriesTraffic(t, a)
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
-	a.lockedRegion = "JP"
-	a.regions["active"] = regionRecord{Name: "active", Country: "JP", Status: regionVerified, VerifiedAt: now}
+	a.patchControlLocked(controlRuntimeLockedRegion, serviceControlState{RuntimeLockedRegion: "JP"})
+	a.writeRegionRecordLocked("active", regionRecord{Name: "active", Country: "JP", Status: regionVerified, VerifiedAt: now})
 
 	a.applyPatrolLocked("active", map[string]int{}, now)
 	a.applyPatrolLocked("active", map[string]int{}, now.Add(time.Minute))
 
-	if a.health["active"].State != healthUnhealthy {
-		t.Fatalf("state = %q, want the sweep's own verdict recorded", a.health["active"].State)
+	if a.healthDomainLocked().Health["active"].State != healthUnhealthy {
+		t.Fatalf("state = %q, want the sweep's own verdict recorded", a.healthDomainLocked().Health["active"].State)
 	}
-	if a.blocked {
+	if a.healthDomainLocked().Blocked {
 		t.Fatal("a request that still gets through must keep the connection alive")
 	}
-	if a.sweepNote == "" {
+	if a.healthDomainLocked().SweepNote == "" {
 		t.Fatal("the contradiction must be visible on the connection page")
 	}
 	if stub.saw(http.MethodPut, "/proxies/SmartVPN", `"name":"REJECT"`) {
@@ -648,7 +632,7 @@ func TestApplyPatrolKeepsTrafficFlowingWhenTheMeasurementIsWrong(t *testing.T) {
 	// A sweep that measured something means the machinery works again, so the
 	// note stops describing the present.
 	a.applyPatrolLocked("active", map[string]int{"active": 120}, now.Add(2*time.Minute))
-	if a.sweepNote != "" {
+	if a.healthDomainLocked().SweepNote != "" {
 		t.Fatal("a sweep that reached a node must clear the note")
 	}
 }
@@ -657,27 +641,27 @@ func TestApplyPatrolSwitchesToASameRegionStandby(t *testing.T) {
 	stub := newControllerStub(t, nil)
 	a := stub.app(t)
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
-	a.lockedRegion = "JP"
-	a.lastSwitch = now.Add(-time.Hour)
-	a.healthParams.FailureThreshold = 1
+	a.patchControlLocked(controlRuntimeLockedRegion, serviceControlState{RuntimeLockedRegion: "JP"})
+	testEditHealth(a, func(p *healthDomainProjection) { p.LastSwitch = now.Add(-time.Hour) })
+	testEditHealth(a, func(p *healthDomainProjection) { p.Params.FailureThreshold = 1 })
 	for _, name := range []string{"active", "standby"} {
-		a.regions[name] = regionRecord{Name: name, Country: "JP", Status: regionVerified, VerifiedAt: now}
+		a.writeRegionRecordLocked(name, regionRecord{Name: name, Country: "JP", Status: regionVerified, VerifiedAt: now})
 	}
 
 	a.applyPatrolLocked("active", map[string]int{"standby": 150}, now)
 
 	// The failed node is parked in cooldown once traffic has moved off it.
-	if a.health["active"].State != healthCooldown {
+	if a.healthDomainLocked().Health["active"].State != healthCooldown {
 		t.Fatalf("state = %q, want %q for the node that was switched away from",
-			a.health["active"].State, healthCooldown)
+			a.healthDomainLocked().Health["active"].State, healthCooldown)
 	}
-	if a.blocked {
+	if a.healthDomainLocked().Blocked {
 		t.Fatal("a usable standby means traffic must keep flowing")
 	}
 	if !stub.saw(http.MethodPut, "/proxies/SmartVPN", `"name":"standby"`) {
 		t.Fatalf("the group should have moved to the standby, calls: %v", stub.calls)
 	}
-	if !a.health["active"].cooldownActive(now) {
+	if !a.healthDomainLocked().Health["active"].cooldownActive(now) {
 		t.Fatal("the failed node must be sent to cooldown")
 	}
 }
@@ -689,24 +673,24 @@ func TestFailedSweepMarksTheNodeInUse(t *testing.T) {
 	stub := newControllerStub(t, nil)
 	a := stub.app(t)
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
-	a.lockedRegion = "JP"
-	a.lastSwitch = now.Add(-time.Hour)
-	a.healthParams.FailureThreshold = 1
+	a.patchControlLocked(controlRuntimeLockedRegion, serviceControlState{RuntimeLockedRegion: "JP"})
+	testEditHealth(a, func(p *healthDomainProjection) { p.LastSwitch = now.Add(-time.Hour) })
+	testEditHealth(a, func(p *healthDomainProjection) { p.Params.FailureThreshold = 1 })
 	for _, name := range []string{"active", "standby"} {
-		a.regions[name] = regionRecord{Name: name, Country: "JP", Status: regionVerified, VerifiedAt: now}
+		a.writeRegionRecordLocked(name, regionRecord{Name: name, Country: "JP", Status: regionVerified, VerifiedAt: now})
 	}
 
 	a.applyFailedSweepLocked("active", now)
 
-	if a.health["active"].State != healthUnhealthy {
-		t.Fatalf("the node in use must count the failure, got %q", a.health["active"].State)
+	if a.healthDomainLocked().Health["active"].State != healthUnhealthy {
+		t.Fatalf("the node in use must count the failure, got %q", a.healthDomainLocked().Health["active"].State)
 	}
-	if _, recorded := a.health["standby"]; recorded {
+	if _, recorded := a.healthDomainLocked().Health["standby"]; recorded {
 		t.Fatal("a candidate that was not measured must keep its earlier health")
 	}
 	// Nothing was learned about any candidate, so there is no evidence that
 	// another node would work: protected traffic fails closed instead.
-	if !a.blocked {
+	if !a.healthDomainLocked().Blocked {
 		t.Fatalf("an unmeasured region must fail closed, calls: %v", stub.calls)
 	}
 	if !stub.saw(http.MethodPut, "/proxies/SmartVPN", "REJECT") {
@@ -720,17 +704,17 @@ func TestFailedSweepKeepsAKnownStandby(t *testing.T) {
 	stub := newControllerStub(t, nil)
 	a := stub.app(t)
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
-	a.lockedRegion = "JP"
-	a.lastSwitch = now.Add(-time.Hour)
-	a.healthParams.FailureThreshold = 1
+	a.patchControlLocked(controlRuntimeLockedRegion, serviceControlState{RuntimeLockedRegion: "JP"})
+	testEditHealth(a, func(p *healthDomainProjection) { p.LastSwitch = now.Add(-time.Hour) })
+	testEditHealth(a, func(p *healthDomainProjection) { p.Params.FailureThreshold = 1 })
 	for _, name := range []string{"active", "standby"} {
-		a.regions[name] = regionRecord{Name: name, Country: "JP", Status: regionVerified, VerifiedAt: now}
+		a.writeRegionRecordLocked(name, regionRecord{Name: name, Country: "JP", Status: regionVerified, VerifiedAt: now})
 	}
-	a.health["standby"] = nodeHealth{Name: "standby", State: healthHealthy, UpdatedAt: now, LastSuccessAt: now, LatencyMs: 150}
+	a.writeHealthRecordLocked("standby", nodeHealth{Name: "standby", State: healthHealthy, UpdatedAt: now, LastSuccessAt: now, LatencyMs: 150})
 
 	a.applyFailedSweepLocked("active", now)
 
-	if a.blocked {
+	if a.healthDomainLocked().Blocked {
 		t.Fatal("a known-good standby means traffic must keep flowing")
 	}
 	if !stub.saw(http.MethodPut, "/proxies/SmartVPN", `"name":"standby"`) {
@@ -745,8 +729,8 @@ func TestFailedSweepWithoutALockedRegionOnlyRecords(t *testing.T) {
 
 	a.applyFailedSweepLocked("active", now)
 
-	if a.health["active"].State != healthSuspect {
-		t.Fatalf("state = %q, want the first failure recorded as a suspicion", a.health["active"].State)
+	if a.healthDomainLocked().Health["active"].State != healthSuspect {
+		t.Fatalf("state = %q, want the first failure recorded as a suspicion", a.healthDomainLocked().Health["active"].State)
 	}
 	if len(stub.calls) != 0 {
 		t.Fatalf("without a locked region nothing may be switched: %v", stub.calls)
@@ -754,16 +738,20 @@ func TestFailedSweepWithoutALockedRegionOnlyRecords(t *testing.T) {
 }
 
 func TestSelectedChoicePrefersTheLockedNode(t *testing.T) {
-	locked := &app{
-		settings:     settings{SelectionMode: "auto", SelectedNode: "other"},
-		lockedRegion: "JP", lockedNode: "jp-a",
-	}
+	locked := testControlApp(&app{}, func(a *app) {
+		testSetSettings(a, settings{SelectionMode: "auto", SelectedNode: "other"})
+		a.patchControlLocked(controlRuntimeLockedRegion, serviceControlState{RuntimeLockedRegion: "JP"})
+		a.patchControlLocked(controlRuntimeLockedNode, serviceControlState{RuntimeLockedNode: "jp-a"})
+	})
 	if got := locked.selectedChoice(); got != "jp-a" {
 		t.Fatalf("got %q, want the pinned node so automatic groups cannot leave the region", got)
 	}
 
 	// A pinned node without a locked region must not override the user's mode.
-	stale := &app{settings: settings{SelectionMode: "auto"}, lockedNode: "jp-a"}
+	stale := testControlApp(&app{}, func(a *app) {
+		testSetSettings(a, settings{SelectionMode: "auto"})
+		a.patchControlLocked(controlRuntimeLockedNode, serviceControlState{RuntimeLockedNode: "jp-a"})
+	})
 	if got := stale.selectedChoice(); got != autoGroup {
 		t.Fatalf("got %q, want %q", got, autoGroup)
 	}
@@ -771,17 +759,14 @@ func TestSelectedChoicePrefersTheLockedNode(t *testing.T) {
 
 func TestBestLockedCandidateStaysInsideTheRegion(t *testing.T) {
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
-	a := &app{
-		healthParams: defaultHealthParams(),
-		lockedRegion: "JP",
-		lockedNode:   "jp-b",
-		health:       map[string]nodeHealth{},
-		regions: map[string]regionRecord{
-			"jp-a": {Name: "jp-a", Country: "JP", Status: regionVerified, VerifiedAt: now},
-			"jp-b": {Name: "jp-b", Country: "JP", Status: regionVerified, VerifiedAt: now},
-			"us-a": {Name: "us-a", Country: "US", Status: regionVerified, VerifiedAt: now},
-		},
-	}
+	a := testHealthApp(testControlApp(&app{}, func(a *app) {
+		a.patchControlLocked(controlRuntimeLockedRegion, serviceControlState{RuntimeLockedRegion: "JP"})
+		a.patchControlLocked(controlRuntimeLockedNode, serviceControlState{RuntimeLockedNode: "jp-b"})
+	}), func(p *healthDomainProjection) {
+		p.Params = defaultHealthParams()
+		p.Health = map[string]nodeHealth{}
+		p.Regions = map[string]regionRecord{"jp-a": {Name: "jp-a", Country: "JP", Status: regionVerified, VerifiedAt: now}, "jp-b": {Name: "jp-b", Country: "JP", Status: regionVerified, VerifiedAt: now}, "us-a": {Name: "us-a", Country: "US", Status: regionVerified, VerifiedAt: now}}
+	})
 
 	// The pinned node wins while it is still reachable, even when it is slower.
 	if target, delay := a.bestLockedCandidateLocked(map[string]int{"jp-a": 100, "jp-b": 300, "us-a": 50}, now); target != "jp-b" || delay != 300 {
@@ -803,19 +788,19 @@ func TestApplyPatrolKeepsThePinInsideTheRegion(t *testing.T) {
 	stub := newControllerStub(t, nil)
 	a := stub.app(t)
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
-	a.lockedRegion = "JP"
-	a.lockedNode = "active"
-	a.lastSwitch = now.Add(-time.Hour)
-	a.healthParams.FailureThreshold = 1
+	a.patchControlLocked(controlRuntimeLockedRegion, serviceControlState{RuntimeLockedRegion: "JP"})
+	a.patchControlLocked(controlRuntimeLockedNode, serviceControlState{RuntimeLockedNode: "active"})
+	testEditHealth(a, func(p *healthDomainProjection) { p.LastSwitch = now.Add(-time.Hour) })
+	testEditHealth(a, func(p *healthDomainProjection) { p.Params.FailureThreshold = 1 })
 	for _, name := range []string{"active", "standby"} {
-		a.regions[name] = regionRecord{Name: name, Country: "JP", Status: regionVerified, VerifiedAt: now}
+		a.writeRegionRecordLocked(name, regionRecord{Name: name, Country: "JP", Status: regionVerified, VerifiedAt: now})
 	}
-	a.regions["other"] = regionRecord{Name: "other", Country: "US", Status: regionVerified, VerifiedAt: now}
+	a.writeRegionRecordLocked("other", regionRecord{Name: "other", Country: "US", Status: regionVerified, VerifiedAt: now})
 
 	a.applyPatrolLocked("active", map[string]int{"standby": 200, "other": 90}, now)
 
-	if a.lockedNode != "standby" || a.settings.LockedNode != "standby" {
-		t.Fatalf("the pin should follow the failover, got %q / %q", a.lockedNode, a.settings.LockedNode)
+	if a.controlLocked().RuntimeLockedNode != "standby" || a.settingsLocked().LockedNode != "standby" {
+		t.Fatalf("the pin should follow the failover, got %q / %q", a.controlLocked().RuntimeLockedNode, a.settingsLocked().LockedNode)
 	}
 	if got := a.selectedChoice(); got != "standby" {
 		t.Fatalf("selectedChoice = %q, want the standby", got)
@@ -826,22 +811,22 @@ func TestApplyPatrolRespectsTheMinDwellTime(t *testing.T) {
 	stub := newControllerStub(t, nil)
 	a := stub.app(t)
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
-	a.lockedRegion = "JP"
-	a.lastSwitch = now.Add(-time.Second)
-	a.healthParams.FailureThreshold = 1
+	a.patchControlLocked(controlRuntimeLockedRegion, serviceControlState{RuntimeLockedRegion: "JP"})
+	testEditHealth(a, func(p *healthDomainProjection) { p.LastSwitch = now.Add(-time.Second) })
+	testEditHealth(a, func(p *healthDomainProjection) { p.Params.FailureThreshold = 1 })
 	for _, name := range []string{"active", "standby"} {
-		a.regions[name] = regionRecord{Name: name, Country: "JP", Status: regionVerified, VerifiedAt: now}
+		a.writeRegionRecordLocked(name, regionRecord{Name: name, Country: "JP", Status: regionVerified, VerifiedAt: now})
 	}
 
 	a.applyPatrolLocked("active", map[string]int{"standby": 150}, now)
 
-	if a.health["active"].State != healthUnhealthy {
-		t.Fatalf("state = %q, want a recorded failure", a.health["active"].State)
+	if a.healthDomainLocked().Health["active"].State != healthUnhealthy {
+		t.Fatalf("state = %q, want a recorded failure", a.healthDomainLocked().Health["active"].State)
 	}
 	if stub.saw(http.MethodPut, "/proxies/SmartVPN", `"name":"standby"`) {
 		t.Fatal("a switch inside the dwell window must wait")
 	}
-	if a.blocked {
+	if a.healthDomainLocked().Blocked {
 		t.Fatal("the dwell window must not block traffic either")
 	}
 }
@@ -850,11 +835,11 @@ func TestApplyPatrolNeverCrossesRegions(t *testing.T) {
 	stub := newControllerStub(t, nil)
 	a := stub.app(t)
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
-	a.lockedRegion = "JP"
-	a.lastSwitch = now.Add(-time.Hour)
-	a.healthParams.FailureThreshold = 1
-	a.regions["active"] = regionRecord{Name: "active", Country: "JP", Status: regionVerified, VerifiedAt: now}
-	a.regions["other"] = regionRecord{Name: "other", Country: "US", Status: regionVerified, VerifiedAt: now}
+	a.patchControlLocked(controlRuntimeLockedRegion, serviceControlState{RuntimeLockedRegion: "JP"})
+	testEditHealth(a, func(p *healthDomainProjection) { p.LastSwitch = now.Add(-time.Hour) })
+	testEditHealth(a, func(p *healthDomainProjection) { p.Params.FailureThreshold = 1 })
+	a.writeRegionRecordLocked("active", regionRecord{Name: "active", Country: "JP", Status: regionVerified, VerifiedAt: now})
+	a.writeRegionRecordLocked("other", regionRecord{Name: "other", Country: "US", Status: regionVerified, VerifiedAt: now})
 
 	// A fast node in another region must never be chosen.
 	a.applyPatrolLocked("active", map[string]int{"other": 120}, now)
@@ -862,7 +847,7 @@ func TestApplyPatrolNeverCrossesRegions(t *testing.T) {
 	if stub.saw(http.MethodPut, "/proxies/SmartVPN", `"name":"other"`) {
 		t.Fatalf("traffic must not cross regions, calls: %v", stub.calls)
 	}
-	if !a.blocked {
+	if !a.healthDomainLocked().Blocked {
 		t.Fatal("with no same-region node left the sweep must fail closed")
 	}
 }
@@ -871,23 +856,26 @@ func TestApplyPatrolDoesNotFailOverWithoutALockedRegion(t *testing.T) {
 	stub := newControllerStub(t, nil)
 	a := stub.app(t)
 	now := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
-	a.healthParams.FailureThreshold = 1
-	a.regions["active"] = regionRecord{Name: "active", Country: "JP", Status: regionVerified, VerifiedAt: now}
+	testEditHealth(a, func(p *healthDomainProjection) { p.Params.FailureThreshold = 1 })
+	a.writeRegionRecordLocked("active", regionRecord{Name: "active", Country: "JP", Status: regionVerified, VerifiedAt: now})
 
 	// Without a locked region the health is still recorded, but selection keeps
 	// belonging to Mihomo's own automatic group.
 	a.applyPatrolLocked("active", map[string]int{}, now)
 
-	if a.health["active"].State != healthUnhealthy {
-		t.Fatalf("state = %q, want the failure recorded", a.health["active"].State)
+	if a.healthDomainLocked().Health["active"].State != healthUnhealthy {
+		t.Fatalf("state = %q, want the failure recorded", a.healthDomainLocked().Health["active"].State)
 	}
-	if a.blocked || stub.saw(http.MethodPut, "/proxies/SmartVPN", "REJECT") {
+	if a.healthDomainLocked().Blocked || stub.saw(http.MethodPut, "/proxies/SmartVPN", "REJECT") {
 		t.Fatalf("an unlocked region must not block or switch, calls: %v", stub.calls)
 	}
 }
 
 func TestNodeLatencyRequiresTheKernel(t *testing.T) {
-	a := &app{home: t.TempDir(), health: map[string]nodeHealth{}, regions: map[string]regionRecord{}}
+	a := testHealthApp(&app{home: t.TempDir()}, func(p *healthDomainProjection) {
+		p.Health = map[string]nodeHealth{}
+		p.Regions = map[string]regionRecord{}
+	})
 	recorder := httptest.NewRecorder()
 	a.nodeLatency(recorder, httptest.NewRequest(http.MethodGet, "/api/nodes/latency", nil))
 	if recorder.Code != http.StatusConflict {
@@ -937,9 +925,12 @@ func TestNodeLatencyReportsAMeasurementFailure(t *testing.T) {
 
 func TestSelectingANodeWhileDisconnectedMovesTheLock(t *testing.T) {
 	now := time.Now()
-	a := &app{home: t.TempDir(), health: map[string]nodeHealth{}, regions: map[string]regionRecord{}}
+	a := testHealthApp(&app{home: t.TempDir()}, func(p *healthDomainProjection) {
+		p.Health = map[string]nodeHealth{}
+		p.Regions = map[string]regionRecord{}
+	})
 	a.cachedNodes = []proxyNode{{Name: "jp-a"}}
-	a.regions["jp-a"] = regionRecord{Name: "jp-a", Country: "JP", Status: regionVerified, VerifiedAt: now}
+	a.writeRegionRecordLocked("jp-a", regionRecord{Name: "jp-a", Country: "JP", Status: regionVerified, VerifiedAt: now})
 
 	recorder := httptest.NewRecorder()
 	a.selectNode(recorder, httptest.NewRequest(http.MethodPut, "/api/nodes/select",
@@ -947,19 +938,22 @@ func TestSelectingANodeWhileDisconnectedMovesTheLock(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("code = %d, want 200: %s", recorder.Code, recorder.Body.String())
 	}
-	if a.lockedRegion != "JP" {
-		t.Fatalf("lockedRegion = %q, want JP: the lock follows the chosen node", a.lockedRegion)
+	if a.controlLocked().RuntimeLockedRegion != "JP" {
+		t.Fatalf("lockedRegion = %q, want JP: the lock follows the chosen node", a.controlLocked().RuntimeLockedRegion)
 	}
-	if a.settings.LockedRegion != "JP" || a.settings.LockedNode != "jp-a" {
-		t.Fatalf("the lock must be persisted: %+v", a.settings)
+	if a.settingsLocked().LockedRegion != "JP" || a.settingsLocked().LockedNode != "jp-a" {
+		t.Fatalf("the lock must be persisted: %+v", a.settingsLocked())
 	}
-	if a.settings.SelectedNode != "jp-a" || a.settings.SelectionMode != "manual" {
-		t.Fatalf("the pending selection must be saved: %+v", a.settings)
+	if a.settingsLocked().SelectedNode != "jp-a" || a.settingsLocked().SelectionMode != "manual" {
+		t.Fatalf("the pending selection must be saved: %+v", a.settingsLocked())
 	}
 }
 
 func TestSelectingAnUnknownNodeWhileDisconnectedIsRefused(t *testing.T) {
-	a := &app{home: t.TempDir(), health: map[string]nodeHealth{}, regions: map[string]regionRecord{}}
+	a := testHealthApp(&app{home: t.TempDir()}, func(p *healthDomainProjection) {
+		p.Health = map[string]nodeHealth{}
+		p.Regions = map[string]regionRecord{}
+	})
 	a.cachedNodes = []proxyNode{{Name: "jp-a"}}
 
 	recorder := httptest.NewRecorder()

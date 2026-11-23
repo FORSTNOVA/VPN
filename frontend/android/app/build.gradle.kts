@@ -4,7 +4,20 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+// The Go rollback package supplies an explicit false value.
+val smartvpnRustCoreEnabled = providers.gradleProperty("smartvpnRustCoreEnabled")
+    .map { value ->
+        require(value == "true" || value == "false") {
+            "smartvpnRustCoreEnabled must be true or false"
+        }
+        value.toBoolean()
+    }.orElse(true)
+
 android {
+    providers.gradleProperty("smartvpnNativeDir").orNull?.let {
+        sourceSets.getByName("main").jniLibs.setSrcDirs(listOf(it))
+    }
+    buildFeatures { buildConfig = true }
     namespace = "com.smartvpn.client"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = "27.2.12479018"
@@ -16,6 +29,7 @@ android {
 
     defaultConfig {
         applicationId = "com.smartvpn.client"
+        buildConfigField("boolean", "SMARTVPN_RUST_CORE_ENABLED", smartvpnRustCoreEnabled.get().toString())
         // The kernel is built against API 26 (see the arm64 build of
         // libsmartvpn.so), and 26 is also where the notification channel and
         // foreground service rules this app relies on begin.
@@ -24,11 +38,11 @@ android {
         versionCode = flutter.versionCode
         versionName = flutter.versionName
 
-        // One architecture, because that is what the kernel is built for and
-        // what the device this is developed against uses. A second ABI would
-        // add another copy of a 58 MB library to every package.
         ndk {
-            abiFilters += listOf("arm64-v8a")
+            val abis = providers.gradleProperty("smartvpnAndroidAbi").orElse("arm64-v8a").get().split(",")
+            require(abis.all { it in setOf("arm64-v8a", "x86_64") }) { "Unsupported SmartVPN ABIs: $abis" }
+            abiFilters.clear()
+            abiFilters.addAll(abis)
         }
     }
 

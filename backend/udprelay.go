@@ -39,9 +39,9 @@ func probeUDPRelay(proxyAddress, target string, timeout time.Duration) udpRelayR
 		result.Reason = "无法构造探测报文"
 		return result
 	}
-	answer, elapsed, err := socksUDPExchange(proxyAddress, target, query,
-		func(payload []byte) bool {
-			return len(payload) >= 2 && binary.BigEndian.Uint16(payload[:2]) == id
+	answer, elapsed, err := socksUDPExchangeSelected(proxyAddress, target, query,
+		func(packet []byte) []byte {
+			return selectDNSRelayReply(packet, id)
 		}, timeout)
 	if err != nil {
 		result.Reason = err.Error()
@@ -58,6 +58,22 @@ func probeUDPRelay(proxyAddress, target string, timeout time.Duration) udpRelayR
 	return result
 }
 
+func selectDNSRelayReplyGo(packet []byte, id uint16) []byte {
+	reply, err := socks5UDPPayload(packet)
+	if err != nil || len(reply) < 2 || binary.BigEndian.Uint16(reply[:2]) != id {
+		return nil
+	}
+	return reply
+}
+
+func selectSTUNRelayReplyGo(packet, request []byte) []byte {
+	reply, err := socks5UDPPayload(packet)
+	if err != nil || !matchesSTUNReply(request, reply) {
+		return nil
+	}
+	return reply
+}
+
 // socksUDPExchange sends one datagram to target through the kernel's SOCKS5 UDP
 // association and returns the first reply that match accepts, along with how
 // long the round trip took. The QUIC probe and the STUN probe are the same
@@ -65,6 +81,17 @@ func probeUDPRelay(proxyAddress, target string, timeout time.Duration) udpRelayR
 // rather than believed, because a relay may hand back anything.
 func socksUDPExchange(proxyAddress, target string, payload []byte,
 	match func([]byte) bool, timeout time.Duration) ([]byte, int64, error) {
+	return socksUDPExchangeSelected(proxyAddress, target, payload, func(packet []byte) []byte {
+		reply, err := socks5UDPPayload(packet)
+		if err != nil || len(reply) == 0 || (match != nil && !match(reply)) {
+			return nil
+		}
+		return reply
+	}, timeout)
+}
+
+func socksUDPExchangeSelected(proxyAddress, target string, payload []byte,
+	selectReply func([]byte) []byte, timeout time.Duration) ([]byte, int64, error) {
 	deadline := time.Now().Add(timeout)
 
 	tunnel, err := net.DialTimeout("tcp", proxyAddress, timeout)
@@ -105,35 +132,48 @@ func socksUDPExchange(proxyAddress, target string, payload []byte,
 		if err != nil {
 			return nil, 0, errors.New("节点没有回传 UDP（超时未收到应答）")
 		}
-		reply, err := socks5UDPPayload(buffer[:read])
-		if err != nil || len(reply) == 0 {
-			continue
+		if reply := selectReply(buffer[:read]); reply != nil {
+			return reply, time.Since(start).Milliseconds(), nil
 		}
-		if match != nil && !match(reply) {
-			continue
-		}
-		return reply, time.Since(start).Milliseconds(), nil
 	}
 }
 
 // socks5UDPAssociate performs the SOCKS5 handshake and asks the proxy for a UDP
 // relay address. The returned address is where datagrams have to be sent.
-func socks5UDPAssociate(conn net.Conn) (string, error) {
-	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+func socks5UDPAssociate(conn io.ReadWriter) (string, error) {
+	hello, _ := relayHandshakeFrame(nil)
+	if _, err := conn.Write(hello); err != nil {
 		return "", errors.New("SOCKS5 握手失败")
 	}
 	greeting := make([]byte, 2)
 	if _, err := io.ReadFull(conn, greeting); err != nil {
 		return "", errors.New("SOCKS5 握手没有响应")
 	}
-	if greeting[0] != 0x05 || greeting[1] != 0x00 {
+	associate, accepted := relayHandshakeFrame(greeting)
+	if !accepted {
 		return "", errors.New("本机代理不接受无认证的 SOCKS5 连接")
 	}
 	// The client address is left unspecified: the relay address in the reply is
 	// what matters.
-	if _, err := conn.Write([]byte{0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
+	if _, err := conn.Write(associate); err != nil {
 		return "", errors.New("UDP 转发请求发送失败")
 	}
+	return readRelayEndpoint(conn)
+}
+
+// A nil method reply starts negotiation. Otherwise only SOCKS5 no-auth
+// authorizes the UDP ASSOCIATE request.
+func relayHandshakeFrameGo(method []byte) ([]byte, bool) {
+	if method == nil {
+		return []byte{5, 1, 0}, true
+	}
+	if len(method) != 2 || method[0] != 5 || method[1] != 0 {
+		return nil, false
+	}
+	return []byte{5, 3, 0, 1, 0, 0, 0, 0, 0, 0}, true
+}
+
+func readRelayEndpointGo(conn io.Reader) (string, error) {
 	head := make([]byte, 4)
 	if _, err := io.ReadFull(conn, head); err != nil {
 		return "", errors.New("本机代理没有回应 UDP 转发请求")
@@ -202,24 +242,27 @@ func socks5UDPHeader(target string) ([]byte, error) {
 		return nil, errors.New("探测目标地址无效")
 	}
 	ip := net.ParseIP(host)
-	header := []byte{0x00, 0x00, 0x00}
 	if ipv4 := ip.To4(); ipv4 != nil {
-		header = append(header, 0x01)
-		header = append(header, ipv4...)
-	} else if ip != nil {
-		header = append(header, 0x04)
-		header = append(header, ip.To16()...)
-	} else {
-		// Send the hostname to the relay, so diagnostics do not issue a
-		// local DNS query before the STUN request enters the proxy.
-		header = append(header, 0x03, byte(len(host)))
-		header = append(header, host...)
+		return encodeRelayHeader(1, ipv4, uint16(port)), nil
 	}
-	return append(header, byte(port>>8), byte(port)), nil
+	if ip != nil {
+		return encodeRelayHeader(4, ip.To16(), uint16(port)), nil
+	}
+	// Pass the hostname to the relay without resolving it locally.
+	return encodeRelayHeader(3, []byte(host), uint16(port)), nil
+}
+
+func encodeRelayHeaderGo(kind byte, address []byte, port uint16) []byte {
+	header := []byte{0, 0, 0, kind}
+	if kind == 3 {
+		header = append(header, byte(len(address)))
+	}
+	header = append(header, address...)
+	return append(header, byte(port>>8), byte(port))
 }
 
 // socks5UDPPayload strips the envelope from a datagram the relay returned.
-func socks5UDPPayload(packet []byte) ([]byte, error) {
+func socks5UDPPayloadGo(packet []byte) ([]byte, error) {
 	if len(packet) < 4 || packet[2] != 0x00 {
 		return nil, errors.New("UDP 回包无效")
 	}
@@ -249,19 +292,27 @@ func buildDNSQuery(name string) ([]byte, uint16, error) {
 	if _, err := rand.Read(idBytes[:]); err != nil {
 		return nil, 0, err
 	}
-	encoded, err := encodeDNSName(name)
+	id := binary.BigEndian.Uint16(idBytes[:])
+	message, err := encodeDNSQuery(name, id)
 	if err != nil {
 		return nil, 0, err
 	}
-	id := binary.BigEndian.Uint16(idBytes[:])
+	return message, id, nil
+}
+
+func encodeDNSQueryGo(name string, id uint16) ([]byte, error) {
+	encoded, err := encodeDNSName(name)
+	if err != nil {
+		return nil, err
+	}
 	message := make([]byte, 0, 12+len(encoded)+4)
-	message = append(message, idBytes[:]...)
+	message = append(message, byte(id>>8), byte(id))
 	message = append(message, 0x01, 0x00) // standard query, recursion desired
 	message = append(message, 0x00, 0x01) // one question
 	message = append(message, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00)
 	message = append(message, encoded...)
 	message = append(message, 0x00, 0x01, 0x00, 0x01) // type A, class IN
-	return message, id, nil
+	return message, nil
 }
 
 func encodeDNSName(name string) ([]byte, error) {
@@ -293,7 +344,7 @@ func splitLabels(name string) []string {
 	return append(labels, current)
 }
 
-func parseDNSFirstA(message []byte) (string, error) {
+func parseDNSFirstAGo(message []byte) (string, error) {
 	if len(message) < 12 {
 		return "", errors.New("DNS 应答过短")
 	}

@@ -1,15 +1,10 @@
 package main
 
 import (
-	"errors"
 	"fmt"
 	"io"
-	"log"
-	"net"
 	"net/http"
-	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 )
@@ -76,75 +71,28 @@ func chinaIPListPath(home string) string {
 // short to be the country's own addresses is refused too, which is what catches
 // an error page served in place of the file.
 func parseChinaIPList(body []byte) ([]string, error) {
-	seen := map[string]bool{}
-	ranges := make([]string, 0, 8192)
-	for _, line := range strings.Split(string(body), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		if cut := strings.IndexAny(line, " \t#"); cut >= 0 {
-			line = line[:cut]
-		}
-		_, network, err := net.ParseCIDR(line)
-		if err != nil {
-			return nil, fmt.Errorf("not an address range: %q", line)
-		}
-		normalised := network.String()
-		if seen[normalised] {
-			continue
-		}
-		seen[normalised] = true
-		ranges = append(ranges, normalised)
-	}
-	if len(ranges) < chinaIPMinRanges {
-		return nil, fmt.Errorf("only %d address ranges, expected at least %d",
-			len(ranges), chinaIPMinRanges)
-	}
-	sort.Strings(ranges)
-	return ranges, nil
+	r := (&app{}).runChinaService(chinaServiceRequest{Op: "parse", Body: body})
+	return r.Ranges, r.Err
 }
 
 // downloadChinaIPList fetches every part of the list from the first mirror that
 // serves all of them, and returns the merged body.
 func downloadChinaIPList() ([]byte, string, error) {
-	var lastErr error
-	for _, mirror := range chinaIPMirrors {
-		ranges := make([]string, 0, 16384)
-		failed := false
-		for _, name := range chinaIPListFiles {
-			body, err := fetchChinaIPFile(mirror + name)
-			if err != nil {
-				lastErr = err
-				failed = true
-				break
-			}
-			part, err := parseChinaIPList(body)
-			if err != nil {
-				lastErr = fmt.Errorf("%s%s: %w", mirror, name, err)
-				failed = true
-				break
-			}
-			ranges = append(ranges, part...)
-		}
-		if failed || len(ranges) == 0 {
-			continue
-		}
-		sort.Strings(ranges)
-		return []byte(strings.Join(ranges, "\n") + "\n"), mirror, nil
-	}
-	if lastErr == nil {
-		lastErr = errors.New("no source for the address list answered")
-	}
-	return nil, "", lastErr
+	r := (&app{}).runChinaService(chinaServiceRequest{Op: "download"})
+	return r.Body, r.Source, r.Err
 }
 
 func fetchChinaIPFile(url string) ([]byte, error) {
 	// The list is fetched without any application-level proxy: it is needed
 	// before the proxy is up, and it is served from a host that answers here.
+	return fetchChinaIPFileUsing(url, newChinaIPHTTPClient())
+}
+func newChinaIPHTTPClient() *http.Client {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
-	client := http.Client{Timeout: chinaIPFetchWait, Transport: transport}
+	return &http.Client{Timeout: chinaIPFetchWait, Transport: transport}
+}
+func fetchChinaIPFileUsing(url string, client *http.Client) ([]byte, error) {
 	response, err := client.Get(url)
 	if err != nil {
 		return nil, err
@@ -166,19 +114,10 @@ func fetchChinaIPFile(url string) ([]byte, error) {
 // readChinaIPList reports what a cached list holds, so a file that was damaged
 // or truncated is treated the same as one that was never fetched.
 func readChinaIPList(path string) (int, time.Time, error) {
-	info, err := os.Stat(path)
-	if err != nil {
-		return 0, time.Time{}, err
-	}
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return 0, time.Time{}, err
-	}
-	ranges, err := parseChinaIPList(body)
-	if err != nil {
-		return 0, time.Time{}, err
-	}
-	return len(ranges), info.ModTime(), nil
+	e := newAppChinaEffects(&app{home: filepath.Dir(filepath.Dir(path))}, chinaServiceRequest{})
+	e.path = path
+	r := runSelectedChinaService(chinaServiceRequest{Op: "read"}, e)
+	return r.Status.Entries, r.Now, r.Err
 }
 
 // chinaListMode is how much a caller is willing to do for the list. The three
@@ -202,66 +141,18 @@ const (
 // the country's own addresses still routes almost everything correctly, and it
 // is always better than falling back to sending domestic traffic abroad.
 func ensureChinaIPList(home string, fetch func() ([]byte, string, error), mode chinaListMode) chinaIPStatus {
-	path := chinaIPListPath(home)
-	entries, updated, err := readChinaIPList(path)
-	cached := err == nil
-	intact := func() chinaIPStatus {
-		return chinaIPStatus{Available: true, Entries: entries, UpdatedAt: updated.Format(time.RFC3339)}
+	r := (&app{home: home}).runChinaService(chinaServiceRequest{Op: "ensure", Mode: mode, Fetch: fetch})
+	if r.Err != nil {
+		panic(r.Err)
 	}
-
-	if mode == chinaListCached {
-		if !cached {
-			return chinaIPStatus{Available: false, Error: err.Error()}
-		}
-		return intact()
-	}
-	// A launch refreshes only what has aged out, which is what keeps it from
-	// downloading the list on every start.
-	if cached && mode == chinaListIfOverdue && time.Since(updated) <= chinaIPListTTL {
-		return intact()
-	}
-
-	body, source, fetchErr := fetch()
-	if fetchErr != nil {
-		status := chinaIPStatus{Available: false, Error: fetchErr.Error()}
-		if cached {
-			status = intact()
-			status.Error = "刷新失败，继续使用已有的列表：" + fetchErr.Error()
-		}
-		return status
-	}
-	ranges, parseErr := parseChinaIPList(body)
-	if parseErr != nil {
-		status := chinaIPStatus{Available: false, Error: parseErr.Error()}
-		if cached {
-			status = intact()
-		}
-		return status
-	}
-	if err := writeChinaIPList(path, ranges); err != nil {
-		status := chinaIPStatus{Available: false, Error: err.Error()}
-		if cached {
-			status = intact()
-			status.Error = "写入失败，继续使用已有的列表：" + err.Error()
-		}
-		return status
-	}
-	return chinaIPStatus{
-		Available: true, Entries: len(ranges), Source: source,
-		UpdatedAt: time.Now().Format(time.RFC3339),
-	}
+	return r.Status
 }
 
 func writeChinaIPList(path string, ranges []string) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return err
-	}
-	temp := path + ".tmp"
-	body := strings.Join(ranges, "\n") + "\n"
-	if err := os.WriteFile(temp, []byte(body), 0600); err != nil {
-		return err
-	}
-	return os.Rename(temp, path)
+	e := newAppChinaEffects(&app{home: filepath.Dir(filepath.Dir(path))}, chinaServiceRequest{})
+	e.path = path
+	r := runSelectedChinaService(chinaServiceRequest{Op: "write", Ranges: ranges}, e)
+	return r.Err
 }
 
 // ---------------------------------------------------------------------------
@@ -279,48 +170,47 @@ func (a *app) downloadChinaIPList() ([]byte, string, error) {
 // is called without the lock held: a refresh waits on the network, and holding
 // the lock across that would stall every page that polls the service.
 func (a *app) chinaIPListStatus(mode chinaListMode) chinaIPStatus {
-	return ensureChinaIPList(a.home, a.downloadChinaIPList, mode)
+	r := a.runChinaService(chinaServiceRequest{Op: "ensure", Mode: mode})
+	if r.Err != nil {
+		panic(r.Err)
+	}
+	return r.Status
 }
 
 // startChinaIPRefresh fetches in the background, so a connect that is waiting on
 // the user is never held up by a download, and reports whether it started one.
 func (a *app) startChinaIPRefresh(mode chinaListMode) bool {
-	a.mu.Lock()
-	if a.chinaFetching {
-		a.mu.Unlock()
-		return false
+	r := a.runChinaService(chinaServiceRequest{Op: "start-refresh", Mode: mode})
+	if r.Err != nil {
+		panic(r.Err)
 	}
-	a.chinaFetching = true
-	a.mu.Unlock()
-	go func() {
-		status := a.chinaIPListStatus(mode)
-		a.mu.Lock()
-		a.chinaFetching = false
-		a.chinaDirect = status
-		a.mu.Unlock()
-		if status.Source != "" {
-			log.Printf("domestic address list: %d ranges from %s", status.Entries, status.Source)
-		} else if !status.Available {
-			log.Printf("domestic traffic will be carried by the proxy: %s", status.Error)
-		}
-	}()
-	return true
+	return r.Flag
 }
 
 // chinaIPStatusLocked is what the pages read.
 func (a *app) chinaIPStatusLocked() chinaIPStatus {
-	status := a.chinaDirect
-	status.Refreshing = a.chinaFetching
-	status.Active = a.chinaDirectActive
-	return status
+	r := a.runChinaService(chinaServiceRequest{Op: "status"})
+	if r.Err != nil {
+		panic(r.Err)
+	}
+	return r.Status
 }
 
 // refreshChinaDirect fetches the list again. It answers at once: the download
 // runs in the background and the page reads the result from the state it polls,
 // the same way the exit-region verification reports its progress.
 func (a *app) refreshChinaDirect(w http.ResponseWriter, _ *http.Request) {
+	tracked := &authorityHTTPWriter{ResponseWriter: w}
+	defer func() {
+		if v := recover(); v != nil {
+			if tracked.started {
+				panic(v)
+			}
+			chinaHTTPFailure(w, nil)
+		}
+	}()
 	a.startChinaIPRefresh(chinaListNow)
-	writeJSON(w, map[string]any{"ok": true})
+	writeJSON(tracked, map[string]any{"ok": true})
 }
 
 // chinaRuleProbe is the smallest configuration that uses the rules the domestic
@@ -345,12 +235,11 @@ rules:
 // fails, which leaves the user with no connection at all rather than an
 // imperfect one.
 func (a *app) chinaRuleSupported() bool {
-	if a.chinaProbed {
-		return a.chinaRuleOK
+	r := a.runChinaService(chinaServiceRequest{Op: "supported"})
+	if r.Err != nil {
+		panic(r.Err)
 	}
-	a.chinaProbed = true
-	a.chinaRuleOK = a.probeChinaRule()
-	return a.chinaRuleOK
+	return r.Flag
 }
 
 // probeChinaRule writes a configuration whose only job is to load the domestic
@@ -359,33 +248,11 @@ func (a *app) chinaRuleSupported() bool {
 // built, and it must be answerable before the subscription's provider file is
 // known to exist.
 func (a *app) probeChinaRule() bool {
-	port, err := freeLoopbackPort()
-	if err != nil {
-		return false
+	r := a.runChinaService(chinaServiceRequest{Op: "probe"})
+	if r.Err != nil {
+		panic(r.Err)
 	}
-	dir := filepath.Join(a.home, "providers")
-	if err := os.MkdirAll(dir, 0700); err != nil {
-		return false
-	}
-	listName := "china-probe.txt"
-	configPath := filepath.Join(a.home, "china-probe.yaml")
-	defer func() {
-		_ = os.Remove(filepath.Join(dir, listName))
-		_ = os.Remove(configPath)
-	}()
-	if err := os.WriteFile(filepath.Join(dir, listName), []byte("1.0.1.0/24\n223.255.252.0/23\n"), 0600); err != nil {
-		return false
-	}
-	config := fmt.Sprintf(chinaRuleProbe, port, chinaProviderName,
-		filepath.Join("providers", listName), chinaProviderName)
-	if err := os.WriteFile(configPath, []byte(config), 0600); err != nil {
-		return false
-	}
-	if err := a.checkKernelConfig(configPath); err != nil {
-		log.Printf("the kernel did not accept the domestic address rules, connecting without them: %v", err)
-		return false
-	}
-	return true
+	return r.Flag
 }
 
 // lastLine keeps a kernel error report to something that fits on one log line.

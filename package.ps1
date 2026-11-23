@@ -18,6 +18,9 @@ param(
   [string]$OutputDir = '',
   [string]$ReleaseDir = '',
   [switch]$SkipBuild,
+  [switch]$SkipFrontendBuild,
+  [ValidateSet('Rust','Go')][string]$BackendMode='Rust',
+  [string]$RustHostPath = '',
   [switch]$AllowMissingKernel
 )
 
@@ -35,27 +38,11 @@ if ($ReleaseDir) {
 $dataDir = Join-Path $env:APPDATA 'SmartVPN'
 
 $version = '0.0.0'
-$match = Select-String -Path (Join-Path $frontend 'pubspec.yaml') -Pattern '^version:\s*([0-9]+\.[0-9]+\.[0-9]+)' |
+$match = Select-String -Path (Join-Path $frontend 'pubspec.yaml') -Pattern '^version:\s*([\w.-]+)' |
   Select-Object -First 1
 if ($match) { $version = $match.Matches.Groups[1].Value }
 
-if (-not $SkipBuild) {
-  Write-Host '== service =='
-  $env:GOCACHE = Join-Path $tools 'go-cache'
-  $env:GOPATH = Join-Path $tools 'gopath'
-  $env:GOPROXY = 'https://goproxy.cn,direct'
-  $env:GOTOOLCHAIN = 'local'
-  # Stripped on purpose: an unstripped build of this size is quarantined by
-  # Huorong as an obfuscator (see the README).
-  Push-Location $backend
-  try {
-    & (Join-Path $tools 'go\bin\go.exe') build -ldflags='-s -w' `
-      -o (Join-Path $release 'smartvpn-service-current.exe') .
-    if ($LASTEXITCODE -ne 0) { throw 'the service build failed' }
-  } finally {
-    Pop-Location
-  }
-
+if (-not $SkipBuild -and -not $SkipFrontendBuild) {
   Write-Host '== window =='
   Push-Location $frontend
   try {
@@ -81,7 +68,43 @@ if (Test-Path -LiteralPath (Join-Path $release 'native_assets.json')) {
   Copy-Item -LiteralPath (Join-Path $release 'native_assets.json') -Destination $stage
 }
 # The local service, and the helper it shells out to for the Windows proxy.
-Copy-Item (Join-Path $release 'smartvpn-service-current.exe') $stage
+$serviceName='smartvpn-service-current.exe'
+if($SkipBuild){
+  $service=Join-Path $release $serviceName
+  $metadata=(& (Join-Path $tools 'go/bin/go.exe') version -m $service | Out-String)
+  if($BackendMode -eq 'Rust' -and $metadata -notmatch 'main\.releaseBackend=rust'){throw 'Selected service was not built for the Rust distribution'}
+  if($BackendMode -eq 'Go' -and $metadata -notmatch 'main\.releaseBackend=go'){throw 'Selected service was not built for the Go rollback distribution'}
+  Copy-Item -LiteralPath $service -Destination $stage
+}else{
+  $env:GOOS='windows'
+  $env:GOARCH='amd64'
+  $env:CGO_ENABLED='0'
+  $env:GOCACHE=Join-Path $tools 'go-cache'
+  $env:GOPATH=Join-Path $tools 'gopath'
+  $env:GOTOOLCHAIN='local'
+  $tags=if($BackendMode -eq 'Rust'){@('-tags','rustcore')}else{@()}
+  Push-Location $backend
+  try {
+    & (Join-Path $tools 'go/bin/go.exe') build @tags "-ldflags=-s -w -X main.releaseBackend=$($BackendMode.ToLowerInvariant())" -o (Join-Path $stage $serviceName) .
+    if($LASTEXITCODE){throw 'Service build failed'}
+  }finally{Pop-Location}
+}
+$reader=[IO.BinaryReader]::new([IO.File]::OpenRead((Join-Path $stage $serviceName)))
+try {
+  if($reader.ReadUInt16() -ne 0x5a4d){throw 'The packaged service is not a Windows executable'}
+  $reader.BaseStream.Position=60
+  $reader.BaseStream.Position=$reader.ReadInt32()
+  if($reader.ReadUInt32() -ne 0x4550 -or $reader.ReadUInt16() -ne 0x8664){throw 'The packaged service must be Windows x64'}
+}finally{$reader.Dispose()}
+if($BackendMode -eq 'Rust'){
+  if($SkipBuild){
+    foreach($file in 'smartvpn_core.dll','smartvpn_store.dll','smartvpn_engine.dll','smartvpn-host.exe'){Copy-Item -LiteralPath (Join-Path $release $file) -Destination $stage}
+  }else{ & "$root/backend-rust/build-distribution.ps1" -Destination $stage }
+}
+if($RustHostPath){
+  if($BackendMode -eq 'Go'){throw 'RustHostPath requires BackendMode Rust'}
+  Copy-Item -LiteralPath (Resolve-Path -LiteralPath $RustHostPath).Path -Destination (Join-Path $stage 'smartvpn-host.exe') -Force
+}
 Copy-Item (Join-Path $backend 'proxy.ps1') $stage
 
 $missing = @()
@@ -152,6 +175,7 @@ Copy-Item (Join-Path $root 'licenses\使用说明.txt') $stage
 if ($OutputDir -eq '') { $OutputDir = Join-Path $root 'dist' }
 New-Item -ItemType Directory -Path $OutputDir -Force | Out-Null
 $zip = Join-Path $OutputDir "SmartVPN-$version-portable.zip"
+if ($BackendMode -eq "Go") { $zip = Join-Path $OutputDir "SmartVPN-$version-portable-go-rollback.zip" }
 if (Test-Path $zip) { Remove-Item $zip -Force }
 
 Write-Host '== compressing =='
@@ -168,4 +192,5 @@ Write-Host ''
 Write-Host "package: $zip ($size MB)"
 Write-Host 'contents: smartvpn_windows.exe, flutter_windows.dll, data\,'
 Write-Host '          smartvpn-service-current.exe,'
+if ($BackendMode -eq 'Rust') { Write-Host '          smartvpn-host.exe, smartvpn_core.dll, smartvpn_store.dll, smartvpn_engine.dll,' }
 Write-Host '          proxy.ps1, mihomo.exe, wintun.dll, portable.txt, 使用说明.txt, LICENSES\'
