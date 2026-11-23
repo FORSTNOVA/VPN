@@ -45,6 +45,13 @@ class ProbeBook extends ChangeNotifier {
     return '${hops.length} 跳 · ${hops.join(" → ")}\n${row["target"] ?? "https://www.gstatic.com/generate_204"}\n$time$entry$stage\n${row["error"] ?? label(hops)}${row["warmError"] == null ? "" : "\n${row["warmError"]}"}';
   }
 
+  List<Map<String, dynamic>> get allRows {
+    final rows = _results.values.toList();
+    rows.sort((a, b) =>
+        ((b['measured'] as int?) ?? 0).compareTo((a['measured'] as int?) ?? 0));
+    return rows;
+  }
+
   List<List<String>> pathsTo(String name) => _results.values
       .where((r) {
         final h = r['hops'] as List;

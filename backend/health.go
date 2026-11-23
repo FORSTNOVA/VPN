@@ -1,15 +1,21 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 
 	"net/http"
+	"os"
+	"path/filepath"
 
 	"runtime"
 	"sort"
+	"strconv"
+	"strings"
 
 	"time"
 )
@@ -539,10 +545,89 @@ func (a *app) patrolNow(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (a *app) switchEvents(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("include") == "logs" {
+		a.switchEventsWithLogs(w, r)
+		return
+	}
 	q := appServiceRequest{Op: "events", Limit: r.URL.Query().Get("limit")}
 	e := newAppControlEffects(a, q)
 	e.w = w
 	runAppControlWithEffects(q, e)
+}
+
+func (a *app) switchEventsWithLogs(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	events := []appEventPayload{}
+	if a.store != nil {
+		if rows, err := a.store.recentSwitchEvents(limit); err == nil {
+			events = make([]appEventPayload, 0, len(rows))
+			for _, v := range rows {
+				events = append(events, appEventPayload{v.At.Format(time.RFC3339), v.Group, v.FromNode, v.ToNode, v.Trigger, v.Evidence})
+			}
+		}
+	}
+	serviceLogs := tailSanitizedLog(filepath.Join(a.home, "service.log"), 150, a.redactor)
+	kernelLogs := tailSanitizedLog(filepath.Join(a.home, "mihomo.log"), 150, a.redactor)
+	writeJSON(w, map[string]any{
+		"events":      events,
+		"serviceLogs": serviceLogs,
+		"kernelLogs":  kernelLogs,
+	})
+}
+
+func tailSanitizedLog(path string, maxLines int, redactor *logRedactor) []string {
+	if path == "" || maxLines <= 0 {
+		return []string{}
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return []string{}
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || info.Size() == 0 {
+		return []string{}
+	}
+	const maxBytes = 64 << 10
+	offset := int64(0)
+	if info.Size() > maxBytes {
+		offset = info.Size() - maxBytes
+	}
+	if _, err := f.Seek(offset, io.SeekStart); err != nil {
+		return []string{}
+	}
+	raw, err := io.ReadAll(io.LimitReader(f, maxBytes))
+	if err != nil {
+		return []string{}
+	}
+	if redactor != nil {
+		redactor.mu.Lock()
+		secrets := redactor.secrets
+		redactor.mu.Unlock()
+		for _, secret := range secrets {
+			if len(secret) > 0 {
+				raw = bytes.ReplaceAll(raw, secret, []byte(redacted))
+			}
+		}
+	}
+	text := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	lines := strings.Split(strings.TrimRight(text, "\n"), "\n")
+	if offset > 0 && len(lines) > 1 {
+		lines = lines[1:]
+	}
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if strings.TrimSpace(line) != "" {
+			out = append(out, line)
+		}
+	}
+	if len(out) > maxLines {
+		out = out[len(out)-maxLines:]
+	}
+	return out
 }
 
 var errNoLockableRegion = errors.New("no verified node matches that region")

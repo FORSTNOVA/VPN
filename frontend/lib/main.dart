@@ -3,6 +3,7 @@ import 'ui/startup_tile.dart';
 import 'ui/chain_editor.dart';
 import 'ui/subscription_policy_page.dart';
 import 'ui/probe_book.dart';
+import 'ui/logs_page.dart';
 import 'ui/desktop_pet_settings_dialog.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -30,7 +31,7 @@ void main(List<String> args) => runApp(SmartVpnApp(
 
 /// The sub-pages of the rail, in the order they are offered:
 /// 总览, 线路, 订阅, 流量, 保护策略, 工具.
-enum _AppPage { connect, nodes, subscription, traffic, region, checks }
+enum _AppPage { connect, nodes, subscription, traffic, region, checks, logs }
 
 extension on _AppPage {
   String get label => switch (this) {
@@ -40,6 +41,7 @@ extension on _AppPage {
         _AppPage.traffic => '流量',
         _AppPage.region => '保护策略',
         _AppPage.checks => '工具',
+        _AppPage.logs => '日志',
       };
 
   String get englishCode => switch (this) {
@@ -49,6 +51,7 @@ extension on _AppPage {
         _AppPage.traffic => 'TELEMETRY',
         _AppPage.region => 'PROTECTION',
         _AppPage.checks => 'DIAGNOSTICS',
+        _AppPage.logs => 'LOGS',
       };
 
   IconData get icon => switch (this) {
@@ -58,6 +61,7 @@ extension on _AppPage {
         _AppPage.traffic => Icons.monitor_heart_outlined,
         _AppPage.region => Icons.security_rounded,
         _AppPage.checks => Icons.construction_rounded,
+        _AppPage.logs => Icons.receipt_long_rounded,
       };
 }
 
@@ -153,6 +157,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   int _desktopPetHeight = 82;
 
   _AppPage _page = _AppPage.connect;
+  int _logsRefreshTick = 0;
   NodeGrouping _nodeGrouping = NodeGrouping.source;
  final _expandedSources=<String>{};
   String _nodeQuery = '';
@@ -818,6 +823,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     if (page == _AppPage.checks) {
       unawaited(_loadPathChecks());
+    }
+    if (page == _AppPage.logs) {
+      _logsRefreshTick++;
     }
     // The path status is only interesting while its page is open, and the monitor
     // may have been switched on from there.
@@ -2583,7 +2591,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _AppPage.nodes => 1,
       _AppPage.subscription => 2,
       _AppPage.traffic => 3,
-      _AppPage.region || _AppPage.checks => 4,
+      _AppPage.region || _AppPage.checks || _AppPage.logs => 4,
     };
 
     return Container(
@@ -2735,6 +2743,28 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 onTap: () {
                   Navigator.pop(context);
                   _goTo(_AppPage.checks);
+                },
+              ),
+              ListTile(
+                dense: true,
+                leading: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Tokens.surface,
+                    borderRadius: BorderRadius.circular(Tokens.radiusBadge),
+                    border: Border.all(color: Tokens.hairline),
+                  ),
+                  child: const Icon(Icons.receipt_long_rounded,
+                      size: 18, color: Tokens.yellow),
+                ),
+                title: const Text('日志中心',
+                    style:
+                        TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                subtitle: const Text('代理链测速、节点切换、内核与服务日志', style: Tokens.hint),
+                trailing: const Icon(Icons.chevron_right_rounded, size: 18),
+                onTap: () {
+                  Navigator.pop(context);
+                  _goTo(_AppPage.logs);
                 },
               ),
               if (Platform.isWindows) ...[
@@ -3029,6 +3059,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _AppPage.nodes => _nodesPage(),
           _AppPage.region => _regionPage(),
           _AppPage.checks => _checksPage(),
+          _AppPage.logs => LogsPage(
+              probes: _probes,
+              refreshTick: _logsRefreshTick,
+              fetchLogs: () => _request('GET', '/api/events?include=logs'),
+            ),
           _AppPage.subscription => _subscriptionPage(),
         },
       ),

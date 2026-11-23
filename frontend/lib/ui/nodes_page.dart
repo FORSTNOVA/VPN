@@ -429,20 +429,6 @@ extension _NodesPage on _HomePageState {
                 ),
                 const SizedBox(height: 3),
                 meta,
-                ListenableBuilder(
-                    listenable: _probes,
-                    builder: (context, _) {
-                      final paths = _probes.pathsTo(node.name);
-                      if (paths.isEmpty) return const SizedBox.shrink();
-                      return Wrap(children: [
-                        for (final path in paths)
-                          Tooltip(
-                              message: _probes.detail(path),
-                              child: Text(
-                                  '${path.join(" → ")} · ${_probes.label(path)}  ',
-                                  style: Tokens.hint))
-                      ]);
-                    }),
                 if (narrow) ...[
                   const SizedBox(height: 6),
                   Wrap(
