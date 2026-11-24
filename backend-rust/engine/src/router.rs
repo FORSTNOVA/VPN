@@ -128,10 +128,44 @@ impl Router {
         port: u16,
         budget: std::time::Duration,
     ) -> io::Result<i64> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         if tokio::runtime::Handle::try_current().is_err() {
-            return Err(io::Error::other("no tokio handle in router.rs"));
+            static FALLBACK_RT: std::sync::OnceLock<io::Result<tokio::runtime::Runtime>> =
+                std::sync::OnceLock::new();
+            let rt = FALLBACK_RT
+                .get_or_init(|| {
+                    tokio::runtime::Builder::new_multi_thread()
+                        .worker_threads(2)
+                        .enable_all()
+                        .build()
+                })
+                .as_ref()
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            let router = Arc::new(self.clone_for_probe());
+            let host = host.to_owned();
+            return rt
+                .spawn(async move { router.probe_http_204_inner(&host, port, budget).await })
+                .await
+                .map_err(|e| io::Error::other(format!("probe task join error: {e}")))?;
         }
+        self.probe_http_204_inner(host, port, budget).await
+    }
+
+    fn clone_for_probe(&self) -> Self {
+        Self {
+            rules: self.rules.clone(),
+            outbounds: self.outbounds.clone(),
+            fake_ip_pool: self.fake_ip_pool.clone(),
+            process_resolver: self.process_resolver.clone(),
+        }
+    }
+
+    async fn probe_http_204_inner(
+        &self,
+        host: &str,
+        port: u16,
+        budget: std::time::Duration,
+    ) -> io::Result<i64> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let t0 = std::time::Instant::now();
         let src = SocketAddr::from(([127, 0, 0, 1], 0));
         let target = TargetAddr::domain(host, port);
