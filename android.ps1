@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Builds the Android app: the kernel library first, then the package around it.
 
@@ -83,35 +83,25 @@ foreach ($oneAbi in $Abi) {
   $env:GOARCH = $arch
   $env:CC = Join-Path $ndkBin ($clang + $ApiLevel + '-clang.cmd')
 
-  if ($BackendMode -eq 'Rust') { & "$root/backend-rust/build-distribution.ps1" -Destination $out -Platform $oneAbi -Compiler $env:CC }
-  Write-Host "== service library for $oneAbi =="
-  Push-Location $backend
-  $overlay = New-TemporaryFile
-  try {
-    & "$backend/android-tun/overlay.ps1" -GoExe "$tools/go/bin/go.exe" -OutFile $overlay.FullName
-    # Stripped for the same reason the Windows service is, and because this one
-    # is inside a package someone downloads.
-    #
-    # The build tags are not optional.
-    #
-    # cmfa: without it the kernel builds its own Android routing rules when its
-    # TUN starts, which means reading the system's package list — a file no
-    # ordinary app may open. The listener then fails, and nothing works. With
-    # the tag, the kernel leaves routing to the VpnService that made the tunnel,
-    # which is where it belongs.
-    #
-    # with_gvisor: the tunnel's stack in the generated configuration is gvisor,
-    # and the cmfa tag drops it, so the kernel refuses to start the listener
-    # with a message saying exactly that.
-    & (Join-Path $tools 'go\bin\go.exe') build "-overlay=$($overlay.FullName)" -tags $tags -buildmode=c-shared -ldflags='-s -w -extldflags=-Wl,-z,max-page-size=16384' `
-      -o (Join-Path $out 'libsmartvpn.so') .
-    if ($LASTEXITCODE -ne 0) { throw "the library build failed for $oneAbi" }
-  } finally {
-    Remove-Item -LiteralPath $overlay.FullName
-    Pop-Location
+  if ($BackendMode -eq 'Rust') {
+    & "$root/backend-rust/build-distribution.ps1" -Destination $out -Platform $oneAbi -Compiler $env:CC
+    Remove-Item -LiteralPath (Join-Path $out 'libsmartvpn.so') -Force -ErrorAction SilentlyContinue
+  } else {
+    Write-Host "== service library for $oneAbi =="
+    Push-Location $backend
+    $overlay = New-TemporaryFile
+    try {
+      & "$backend/android-tun/overlay.ps1" -GoExe "$tools/go/bin/go.exe" -OutFile $overlay.FullName
+      & (Join-Path $tools 'go\bin\go.exe') build "-overlay=$($overlay.FullName)" -tags $tags -buildmode=c-shared -ldflags='-s -w -extldflags=-Wl,-z,max-page-size=16384' `
+        -o (Join-Path $out 'libsmartvpn.so') .
+      if ($LASTEXITCODE -ne 0) { throw "the library build failed for $oneAbi" }
+    } finally {
+      Remove-Item -LiteralPath $overlay.FullName
+      Pop-Location
+    }
+    $size = [math]::Round((Get-Item (Join-Path $out 'libsmartvpn.so')).Length / 1MB, 1)
+    Write-Host "   libsmartvpn.so $size MB"
   }
-  $size = [math]::Round((Get-Item (Join-Path $out 'libsmartvpn.so')).Length / 1MB, 1)
-  Write-Host "   libsmartvpn.so $size MB"
 }
 
 Write-Host '== package =='

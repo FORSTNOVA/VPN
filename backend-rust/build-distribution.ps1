@@ -7,7 +7,7 @@ $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 $targetDir=Join-Path $root '.tools/distribution-cargo'
 $android=$Platform -ne 'windows'
-$options=@('--locked','--release','--target-dir',$targetDir)
+$options=@('--locked','--release','--target-dir',$targetDir,'--config','source.crates-io.replace-with="ustc"','--config','source.ustc.registry="sparse+https://mirrors.ustc.edu.cn/crates.io-index/"')
 $output=Join-Path $targetDir 'release'
 $save=@{}
 function ProcessEnv($name,$value) {

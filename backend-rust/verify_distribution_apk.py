@@ -5,9 +5,11 @@ import zipfile
 
 
 def verify(apk, mode, abis):
-    required = {"libsmartvpn.so"}
-    if mode == "Rust":
-        required.update({"libsmartvpn_core.so", "libsmartvpn_host.so", "libsmartvpn_store.so", "libsmartvpn_engine.so"})
+    required = (
+        {"libsmartvpn_core.so", "libsmartvpn_host.so", "libsmartvpn_store.so", "libsmartvpn_engine.so"}
+        if mode == "Rust"
+        else {"libsmartvpn.so"}
+    )
     with zipfile.ZipFile(apk) as source:
         actual = {path for path in source.namelist() if path.startswith("lib/") and path.endswith(".so")}
         if {path.split("/")[1] for path in actual} != set(abis):

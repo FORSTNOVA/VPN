@@ -53,7 +53,7 @@ public final class CoreBridge {
     private static volatile SmartVpnService service;
 
     static {
-        System.loadLibrary("smartvpn");
+        System.loadLibrary("smartvpn_host");
     }
 
     private CoreBridge() {}

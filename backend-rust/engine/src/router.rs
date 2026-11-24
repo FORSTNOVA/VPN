@@ -122,6 +122,46 @@ impl Router {
     ) -> io::Result<RouteResult> {
         self.dial(src, target, sniffed_host, None).await
     }
+    pub async fn probe_http_204(
+        &self,
+        host: &str,
+        port: u16,
+        budget: std::time::Duration,
+    ) -> io::Result<i64> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let t0 = std::time::Instant::now();
+        let src = SocketAddr::from(([127, 0, 0, 1], 0));
+        let target = TargetAddr::domain(host, port);
+        let mut stream = match tokio::time::timeout(budget, self.dial_tcp(src, &target, None))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "connect timeout"))??
+        {
+            RouteResult::Connected { stream, .. } => stream,
+            RouteResult::Reject => {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "rejected by rules",
+                ))
+            }
+        };
+        let req = format!(
+            "HEAD /generate_204 HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+        );
+        tokio::time::timeout(budget, stream.write_all(req.as_bytes()))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "write timeout"))??;
+        let mut buf = [0u8; 64];
+        let n = tokio::time::timeout(budget, stream.read(&mut buf))
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "read timeout"))??;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "empty HTTP response",
+            ));
+        }
+        Ok(t0.elapsed().as_millis() as i64)
+    }
     pub(crate) async fn dial(
         &self,
         src: SocketAddr,
