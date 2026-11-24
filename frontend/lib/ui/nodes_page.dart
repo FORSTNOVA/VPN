@@ -372,6 +372,13 @@ extension _NodesPage on _HomePageState {
         if (country != '—')
           Text(country, style: Tokens.hint.copyWith(color: Tokens.inkMuted)),
         Text(node.type, style: Tokens.hint),
+        _Badge(
+          label: nodeTransportProtocol(node),
+          color: nodeTransportProtocol(node) == 'TCP' ? Tokens.cyan : Tokens.yellow,
+          tint: nodeTransportProtocol(node) == 'TCP'
+              ? Tokens.cyanTint
+              : Tokens.yellowTint,
+        ),
         if (node.network.isNotEmpty && node.network != '—')
           Text(node.network, style: Tokens.hint),
         if (node.tls)

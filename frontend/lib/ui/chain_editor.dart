@@ -4,6 +4,7 @@ import 'probe_book.dart';
 class ChainEditor extends StatefulWidget {
   final List<String> available;
   final Map<String, String> nodeGroups;
+  final Map<String, String> nodeTransports;
   final List<String> initialHops;
   final String initialName;
   final bool tunnelActive;
@@ -14,6 +15,7 @@ class ChainEditor extends StatefulWidget {
     super.key,
     required this.available,
     this.nodeGroups = const {},
+    this.nodeTransports = const {},
     required this.initialHops,
     required this.initialName,
     this.tunnelActive = false,
@@ -93,6 +95,7 @@ class _ChainEditorState extends State<ChainEditor> {
         current: current,
         nodes: candidates,
         nodeGroups: widget.nodeGroups,
+        nodeTransports: widget.nodeTransports,
       ),
     );
 
@@ -126,6 +129,7 @@ class _ChainEditorState extends State<ChainEditor> {
         title: '选择第 ${_hops.length + 1} 跳节点',
         nodes: candidates,
         nodeGroups: widget.nodeGroups,
+        nodeTransports: widget.nodeTransports,
       ),
     );
 
@@ -415,6 +419,7 @@ class _NodeSelectionSheet extends StatefulWidget {
   final String? current;
   final List<String> nodes;
   final Map<String, String> nodeGroups;
+  final Map<String, String> nodeTransports;
   final ProbeBook book;
   final List<String> prefix;
 
@@ -423,6 +428,7 @@ class _NodeSelectionSheet extends StatefulWidget {
     this.current,
     required this.nodes,
     required this.nodeGroups,
+    this.nodeTransports = const {},
     required this.book,
     required this.prefix,
   });
@@ -461,9 +467,14 @@ class _NodeSelectionSheetState extends State<_NodeSelectionSheet> {
 
   Widget _nodeTile(String node) {
     final current = node == widget.current;
+    final transport = widget.nodeTransports[node] ?? '';
+    final hop1Only = widget.prefix.isNotEmpty && transport == 'QUIC/UDP';
     return ListTile(
       dense: true,
-      title: Text(node,
+      title: Text(
+          transport.isEmpty
+              ? node
+              : '$node [$transport${hop1Only ? ' · 仅第1跳' : ''}]',
           style: TextStyle(
             fontWeight: current ? FontWeight.bold : FontWeight.normal,
             color: current ? Theme.of(context).colorScheme.primary : null,

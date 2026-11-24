@@ -1137,6 +1137,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               nodeGroups: {
                                 for (final n in _nodes) n.name: nodeSourceKind(n),
                               },
+                              nodeTransports: {
+                                for (final n in _nodes)
+                                  n.name: nodeTransportProtocol(n),
+                              },
                               initialHops: _chains[original] ?? [],
                               tunnelActive: Platform.isWindows && _kernelRunning &&
                                   _connectionMode != 'system-proxy',

@@ -1519,6 +1519,19 @@ String protectionStateDetail({
       : 'Windows 系统代理已关闭或被其他程序修改，浏览器可能没有经过 SmartVPN。';
 }
 
+/// Returns the underlying transport family label (`QUIC/UDP`, `UDP`, or `TCP`)
+/// for a proxy node so users can tell which hops can be chained as TCP tunnels.
+String nodeTransportProtocol(ProxyNode node) {
+  final kind = node.type.trim().toLowerCase();
+  if (kind == 'hysteria2' || kind == 'hysteria' || kind == 'tuic') {
+    return 'QUIC/UDP';
+  }
+  if (kind == 'wireguard' || node.network.trim().toLowerCase() == 'udp') {
+    return 'UDP';
+  }
+  return 'TCP';
+}
+
 /// The exit address readout on the connection page.
 String exitAddressLabel({required String ipv4, required String ipv4Error}) {
   if (ipv4.isNotEmpty) return ipv4;
