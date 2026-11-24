@@ -33,7 +33,7 @@ pub struct EngineYamlBundle {
 struct Config {
     mixed_port: u16,
     #[serde(default)]
-    proxies: Vec<Proxy>,
+    proxies: Vec<serde_yaml_ng::Value>,
     #[serde(default)]
     proxy_groups: Vec<Group>,
     rules: Vec<String>,
@@ -124,6 +124,7 @@ struct Group {
     name: String,
     #[serde(rename = "type")]
     kind: GroupKind,
+    #[serde(default)]
     proxies: Vec<String>,
     url: Option<String>,
     interval: Option<u64>,
@@ -332,11 +333,11 @@ fn resolve(
     name: &str,
     defs: &HashMap<String, Definition>,
     visiting: &mut HashSet<String>,
-    cache: &mut HashMap<String, NodeSpec>,
-) -> io::Result<NodeSpec> {
+    cache: &mut HashMap<String, Option<NodeSpec>>,
+) -> io::Result<Option<NodeSpec>> {
     match name {
-        "DIRECT" => return Ok(NodeSpec::Direct),
-        "REJECT" => return Ok(NodeSpec::Reject),
+        "DIRECT" => return Ok(Some(NodeSpec::Direct)),
+        "REJECT" => return Ok(Some(NodeSpec::Reject)),
         _ => {}
     }
     if let Some(spec) = cache.get(name) {
@@ -345,45 +346,48 @@ fn resolve(
     if !visiting.insert(name.into()) {
         return Err(invalid(format!("cyclic outbound reference at {name}")));
     }
-    let spec = match defs
-        .get(name)
-        .ok_or_else(|| invalid(format!("unknown outbound {name}")))?
-    {
-        Definition::Node(node, None) => node.clone(),
-        Definition::Node(node, Some(parent)) => {
-            NodeSpec::Chain(vec![resolve(parent, defs, visiting, cache)?, node.clone()])
-        }
-        Definition::Group(g) => {
+    let spec = match defs.get(name) {
+        None => None,
+        Some(Definition::Node(node, None)) => Some(node.clone()),
+        Some(Definition::Node(node, Some(parent))) => resolve(parent, defs, visiting, cache)?
+            .map(|hop| NodeSpec::Chain(vec![hop, node.clone()])),
+        Some(Definition::Group(g)) => {
             let members = g
                 .proxies
                 .iter()
                 .map(|m| resolve(m, defs, visiting, cache))
                 .collect::<io::Result<Vec<_>>>()?;
-            if members.is_empty() {
-                return Err(invalid(format!("empty group {name}")));
-            }
-            match g.kind {
-                GroupKind::Select => members.into_iter().next().unwrap(),
-                GroupKind::Relay => NodeSpec::Chain(members),
-                GroupKind::UrlTest | GroupKind::Fallback => {
-                    let url = g
-                        .url
-                        .as_deref()
-                        .unwrap_or("https://www.gstatic.com/generate_204")
-                        .parse::<http::Uri>()
-                        .map_err(|e| invalid(e.to_string()))?;
-                    if !matches!(url.scheme_str(), Some("http" | "https")) || url.host().is_none() {
-                        return Err(invalid("health check requires an HTTP(S) URL"));
+            let incomplete_chain =
+                matches!(g.kind, GroupKind::Relay) && members.iter().any(Option::is_none);
+            let members: Vec<_> = members.into_iter().flatten().collect();
+            if members.is_empty() || incomplete_chain {
+                None
+            } else {
+                Some(match g.kind {
+                    GroupKind::Select => members.into_iter().next().unwrap(),
+                    GroupKind::Relay => NodeSpec::Chain(members),
+                    GroupKind::UrlTest | GroupKind::Fallback => {
+                        let url = g
+                            .url
+                            .as_deref()
+                            .unwrap_or("https://www.gstatic.com/generate_204")
+                            .parse::<http::Uri>()
+                            .map_err(|e| invalid(e.to_string()))?;
+                        if !matches!(url.scheme_str(), Some("http" | "https"))
+                            || url.host().is_none()
+                        {
+                            return Err(invalid("health check requires an HTTP(S) URL"));
+                        }
+                        NodeSpec::Tested(
+                            ProbeConfig {
+                                url,
+                                interval: Duration::from_secs(g.interval.unwrap_or(300)),
+                                fastest: matches!(g.kind, GroupKind::UrlTest),
+                            },
+                            members,
+                        )
                     }
-                    NodeSpec::Tested(
-                        ProbeConfig {
-                            url,
-                            interval: Duration::from_secs(g.interval.unwrap_or(300)),
-                            fastest: matches!(g.kind, GroupKind::UrlTest),
-                        },
-                        members,
-                    )
-                }
+                })
             }
         }
     };
@@ -409,13 +413,20 @@ pub fn build_router_from_clash_yaml(
         }
         Ok(())
     };
-    for mut p in config.proxies {
-        let name = std::mem::take(&mut p.name);
-        let parent = p.dialer_proxy.take();
-        let spec = p
-            .into_spec()
-            .map_err(|e| invalid(format!("proxy {name}: {e}")))?;
-        insert(name, Definition::Node(spec, parent))?;
+    for row in config.proxies {
+        // Providers can mix protocols and incomplete rows. Keep only nodes the
+        // engine can construct, before resolving group and dialer-proxy edges.
+        let Ok(mut proxy) = serde_yaml_ng::from_value::<Proxy>(row) else {
+            continue;
+        };
+        if proxy.name.trim().is_empty() {
+            continue;
+        }
+        let name = std::mem::take(&mut proxy.name);
+        let parent = proxy.dialer_proxy.take();
+        if let Ok(spec) = proxy.into_spec() {
+            insert(name, Definition::Node(spec, parent))?;
+        }
     }
     for g in config.proxy_groups {
         insert(g.name.clone(), Definition::Group(g))?;
@@ -426,15 +437,17 @@ pub fn build_router_from_clash_yaml(
         resolve(name, &defs, &mut visiting, &mut specs)?;
     }
     let mut rules =
-        RuleSet::from_lines(&config.rules.iter().map(String::as_str).collect::<Vec<_>>())?;
+        RuleSet::from_clash_lines(&config.rules.iter().map(String::as_str).collect::<Vec<_>>())?;
     rules.resolve_actions(|name| match specs.get(name) {
-        Some(NodeSpec::Direct) => Ok(RuleAction::Direct),
-        Some(NodeSpec::Reject) => Ok(RuleAction::Reject),
-        Some(_) => Ok(RuleAction::Proxy(name.into())),
+        Some(Some(NodeSpec::Direct)) => Ok(RuleAction::Direct),
+        Some(Some(NodeSpec::Reject)) => Ok(RuleAction::Reject),
+        Some(None) => Err(invalid(format!("no available outbound for {name}"))),
+        Some(Some(_)) => Ok(RuleAction::Proxy(name.into())),
         None => Err(invalid(format!("unknown rule outbound {name}"))),
     })?;
     let mut outbounds = HashMap::new();
     for (name, spec) in specs {
+        let Some(spec) = spec else { continue };
         outbounds.insert(
             name.clone(),
             build_dialer(&spec).map_err(|e| invalid(format!("outbound {name}: {e}")))?,

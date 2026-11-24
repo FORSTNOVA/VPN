@@ -3,6 +3,7 @@
 package main
 
 import (
+	"fmt"
 	"github.com/metacubex/mihomo/common/observable"
 	mihomolog "github.com/metacubex/mihomo/log"
 	"os"
@@ -39,6 +40,13 @@ type embeddedKernel struct {
 }
 
 func (a *app) newKernel() (kernelRunner, error) {
+	enabled, err := rustTunEnabled(a.home)
+	if err != nil {
+		return nil, err
+	}
+	if enabled {
+		return &rustTunKernel{app: a}, nil
+	}
 	return &embeddedKernel{app: a}, nil
 }
 
@@ -105,6 +113,9 @@ func (k *embeddedKernel) stopLogging() {
 // The CMFA build disables PUT /configs. Keep the VpnService descriptor
 // and listeners while applying the parsed configuration in-process.
 func (a *app) applyLiveConfig(payload string) error {
+	if _, ok := a.kernel.(*rustTunKernel); ok {
+		return fmt.Errorf("reconnect to apply configuration to Rust TUN")
+	}
 	q := embeddedKernelRequest{Op: "session-apply"}
 	k, _ := a.kernel.(*embeddedKernel)
 	return runEmbeddedKernelOperation(q, &appEmbeddedKernelEffects{k: k, a: a, q: q, payload: payload}).Err

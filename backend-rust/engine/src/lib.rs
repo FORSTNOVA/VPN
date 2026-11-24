@@ -1,7 +1,7 @@
 //! Proxy transports for the standalone SmartVPN data plane.
 pub mod chain;
 pub mod dialer;
-mod ffi;
+pub mod ffi;
 pub mod http_connect;
 pub mod protocol;
 pub mod socks5;

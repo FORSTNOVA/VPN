@@ -170,6 +170,8 @@ func runGoConnectionService(q connectionServiceRequest, fx connectionServiceEffe
 		}
 		if out := a.call(connectionEffect{Kind: "start-kernel"}); out.Err != nil {
 			return connectionFailure(502, out.Err.Error())
+		} else if out.Bool {
+			return ok
 		}
 		out := a.call(connectionEffect{Kind: "list"})
 		nodes := out.Nodes

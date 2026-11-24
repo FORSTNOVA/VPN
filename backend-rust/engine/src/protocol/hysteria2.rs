@@ -176,7 +176,7 @@ impl Hysteria2Dialer {
         };
         let runtime = Arc::new(quinn::TokioRuntime);
         let socket = Arc::new(PacketTransport::new(
-            runtime.wrap_udp_socket(std::net::UdpSocket::bind(bind)?)?,
+            runtime.wrap_udp_socket(socket::bind_protected(bind)?)?,
             peer,
             cfg.hop_ports.clone(),
             cfg.obfs_salamander.clone(),

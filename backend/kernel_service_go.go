@@ -122,6 +122,8 @@ func runGoKernelService(q kernelServiceRequest, fx kernelServiceEffects) (result
 	if r := a.call(kernelEffect{Kind: "runner-start", Token: runner.Token}); r.Err != nil {
 		result.Err = r.Err
 		return
+	} else if r.Bool {
+		return
 	}
 	if a.call(kernelEffect{Kind: "ready"}).Err != nil {
 		_ = a.stop()

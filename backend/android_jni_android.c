@@ -293,3 +293,69 @@ JNIEXPORT jint JNICALL Java_com_smartvpn_client_CoreBridge_configureRustCore(
     return (jint)SmartVPNRustCoreConfigureN(bytes, (size_t)length,
                                           enabled == JNI_TRUE ? 1 : 0);
 }
+
+#include <android/log.h>
+#include <dlfcn.h>
+#include <pthread.h>
+#include <stdint.h>
+
+static int rust_tun_protect_cb(int fd) {
+    // Rust worker threads terminate on stop. Balance only attachments we own.
+    int attached;
+    if (!attach(&attached)) return 0;
+    int ok = smartvpn_protect(fd) == 0 ? 1 : 0;
+    if (attached) (*g_vm)->DetachCurrentThread(g_vm);
+    return ok;
+}
+
+static int32_t rust_tun_resolve_cb(uint8_t proto, const char *src_ip, uint16_t src_port,
+                                    const char *dst_ip, uint16_t dst_port, char *out, size_t cap) {
+    int attached;
+    if (!attach(&attached)) return -1;
+    char *owner = smartvpn_resolve_owner_package(proto, src_ip, src_port, dst_ip, dst_port);
+    if (attached) (*g_vm)->DetachCurrentThread(g_vm);
+    if (!owner) return 0;
+    size_t len = strlen(owner);
+    int32_t count = -1;
+    if (len <= cap && len <= INT32_MAX) {
+        memcpy(out, owner, len);
+        count = (int32_t)len;
+    }
+    free(owner);
+    return count;
+}
+
+static pthread_once_t rust_tun_once = PTHREAD_ONCE_INIT;
+static int rust_tun_loaded;
+static int32_t (*tun_validate)(const char *);
+static int64_t (*tun_start)(int, const char *, __typeof__(&rust_tun_protect_cb), __typeof__(&rust_tun_resolve_cb));
+static int32_t (*tun_running)(int64_t);
+static int32_t (*tun_stop)(int64_t);
+
+static void load_rust_tun(void) {
+    void *lib = dlopen("libsmartvpn_engine.so", RTLD_NOW | RTLD_LOCAL);
+    if (lib &&
+        (tun_validate = dlsym(lib, "smartvpn_engine_tun_validate_yaml_v1")) &&
+        (tun_start = dlsym(lib, "smartvpn_engine_tun_start_v1")) &&
+        (tun_running = dlsym(lib, "smartvpn_engine_tun_running_v1")) &&
+        (tun_stop = dlsym(lib, "smartvpn_engine_tun_stop_v1"))) {
+        rust_tun_loaded = 1;
+        return;
+    }
+    __android_log_print(ANDROID_LOG_ERROR, "SmartVPN", "load Rust TUN: %s", dlerror());
+    if (lib) dlclose(lib);
+}
+
+int smartvpn_rust_tun_validate(const char *yaml) {
+    pthread_once(&rust_tun_once, load_rust_tun);
+    return rust_tun_loaded ? tun_validate(yaml) : -3;
+}
+
+int64_t smartvpn_rust_tun_start(int fd, const char *yaml) {
+    pthread_once(&rust_tun_once, load_rust_tun);
+    return rust_tun_loaded ? tun_start(fd, yaml, rust_tun_protect_cb, rust_tun_resolve_cb) : -3;
+}
+
+// Positive handles can only be obtained after a successful load.
+int smartvpn_rust_tun_running(int64_t handle) { return tun_running(handle); }
+int smartvpn_rust_tun_stop(int64_t handle) { return tun_stop(handle); }

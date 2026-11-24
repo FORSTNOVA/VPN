@@ -132,6 +132,14 @@ func (e *appKernelEffects) Call(q kernelEffect) (r kernelReply) {
 	case "write-config":
 		r.Err = os.WriteFile(e.a.configPath(), []byte(q.Text), 0600)
 	case "runner-new":
+		// A Rust worker can exit while the handle and original fd still need reaping.
+		if _, ok := e.a.kernel.(interface{ standaloneTUN() }); ok {
+			r.Err = e.a.kernel.Stop()
+			e.a.kernel = nil
+			if r.Err != nil {
+				return
+			}
+		}
 		var runner kernelRunner
 		runner, r.Err = e.a.newKernel()
 		if r.Err == nil {
@@ -147,6 +155,7 @@ func (e *appKernelEffects) Call(q kernelEffect) (r kernelReply) {
 		r.Err = runner.Start()
 		// Publish before acknowledging a successful Start, so no ABI gap can lose ownership.
 		if r.Err == nil {
+			_, r.Bool = runner.(interface{ standaloneTUN() })
 			e.a.kernel = runner
 			e.a.started = time.Now()
 		}

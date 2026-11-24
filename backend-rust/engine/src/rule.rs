@@ -29,6 +29,14 @@ pub struct RuleSet(Vec<(Rule, RuleAction)>);
 
 impl RuleSet {
     pub fn from_lines(lines: &[&str]) -> io::Result<Self> {
+        Self::parse(lines, false)
+    }
+
+    pub(crate) fn from_clash_lines(lines: &[&str]) -> io::Result<Self> {
+        Self::parse(lines, true)
+    }
+
+    fn parse(lines: &[&str], clash: bool) -> io::Result<Self> {
         let mut rules = Vec::new();
         for (i, line) in lines.iter().enumerate() {
             let invalid = || {
@@ -38,6 +46,31 @@ impl RuleSet {
                 )
             };
             let parts: Vec<_> = line.split(',').map(str::trim).collect();
+            if clash {
+                match parts.as_slice() {
+                    ["GEOIP", "LAN", tag] | ["GEOIP", "LAN", tag, "no-resolve"]
+                        if !tag.is_empty() =>
+                    {
+                        for cidr in [
+                            "10.0.0.0/8",
+                            "172.16.0.0/12",
+                            "192.168.0.0/16",
+                            "127.0.0.0/8",
+                            "169.254.0.0/16",
+                            "::1/128",
+                            "fc00::/7",
+                            "fe80::/10",
+                        ] {
+                            rules.extend(Self::from_lines(&[&format!("IP-CIDR,{cidr},{tag}")])?.0);
+                        }
+                        continue;
+                    }
+                    ["GEOIP", "LAN", ..] => return Err(invalid()),
+                    ["MATCH" | "DOMAIN" | "DOMAIN-SUFFIX" | "DOMAIN-KEYWORD" | "PROCESS-NAME"
+                    | "IP-CIDR" | "IP-CIDR6", ..] => {}
+                    _ => continue,
+                }
+            }
             if parts.contains(&"") {
                 return Err(invalid());
             }

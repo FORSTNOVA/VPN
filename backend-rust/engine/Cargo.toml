@@ -8,6 +8,7 @@ publish = false
 crate-type = ["rlib", "cdylib"]
 
 [dependencies]
+socket2 = "0.6"
 smoltcp = { version = "0.12", default-features = false, features = ["std", "medium-ip", "proto-ipv4", "proto-ipv6", "socket-tcp", "socket-udp"] }
 aes-gcm = "0.10"
 base64 = "0.22"

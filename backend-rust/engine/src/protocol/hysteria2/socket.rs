@@ -18,6 +18,13 @@ use std::{
 };
 use tokio::time::{Instant, Sleep};
 
+pub(super) fn bind_protected(addr: SocketAddr) -> io::Result<std::net::UdpSocket> {
+    let socket = std::net::UdpSocket::bind(addr)?;
+    #[cfg(unix)]
+    crate::dialer::protect_socket_fd(std::os::fd::AsRawFd::as_raw_fd(&socket))?;
+    Ok(socket)
+}
+
 fn scramble(password: &[u8], salt: &[u8], payload: &mut [u8]) {
     let mask = Blake2b::<U32>::new()
         .chain_update(password)

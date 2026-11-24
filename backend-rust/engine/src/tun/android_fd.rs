@@ -10,22 +10,27 @@ use std::{
 use tokio::io::unix::AsyncFd;
 
 pub struct AndroidTun(AsyncFd<File>);
+
 impl AndroidTun {
-    /// Duplicate the VpnService descriptor. Nonblocking mode is shared with the
-    /// original open file description. Only the engine should perform packet I/O.
     pub fn new(tun_fd: i32) -> io::Result<Self> {
-        let fd = unsafe { libc::fcntl(tun_fd, libc::F_DUPFD_CLOEXEC, 0) };
-        if fd < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let file = unsafe { File::from_raw_fd(fd) };
-        let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
-        if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        // File owns the duplicated descriptor for the entire registration.
-        Ok(Self(unsafe { AsyncFd::register(file) }?))
+        open_tun_fd(tun_fd)
     }
+}
+
+/// Duplicate the VpnService descriptor. Nonblocking mode is shared with the
+/// original open file description. Only the engine should perform packet I/O.
+pub fn open_tun_fd(tun_fd: i32) -> io::Result<AndroidTun> {
+    let fd = unsafe { libc::fcntl(tun_fd, libc::F_DUPFD_CLOEXEC, 0) };
+    if fd < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let file = unsafe { File::from_raw_fd(fd) };
+    let flags = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // File owns the duplicated descriptor for the entire registration.
+    Ok(AndroidTun(unsafe { AsyncFd::register(file) }?))
 }
 impl TunDevice for AndroidTun {
     fn recv_packet(&mut self) -> BoxFuture<'_, io::Result<Vec<u8>>> {
@@ -58,11 +63,10 @@ impl TunDevice for AndroidTun {
         })
     }
 }
-/// The callback receives NUL-terminated source and destination IP:port strings,
+/// The callback receives NUL-terminated source and destination IP strings and separate ports,
 /// IP protocol 6/17, and a caller-owned UTF-8 output buffer. Return the byte
 /// count excluding NUL, zero for unknown owner, or a negative value on error.
-pub type OwnerCallback =
-    unsafe extern "C" fn(*const c_char, *const c_char, u8, *mut u8, usize) -> i32;
+pub use crate::ffi::OwnerCallback;
 pub struct CallbackProcessResolver(OwnerCallback);
 impl CallbackProcessResolver {
     /// # Safety
@@ -83,18 +87,18 @@ impl ProcessResolver for CallbackProcessResolver {
         dst: SocketAddr,
         udp: bool,
     ) -> io::Result<Option<String>> {
-        let src = CString::new(src.to_string()).unwrap();
-        let dst = CString::new(dst.to_string()).unwrap();
+        let src_ip = CString::new(src.ip().to_string()).unwrap();
+        let dst_ip = CString::new(dst.ip().to_string()).unwrap();
         let mut out = [0; 512];
-        let len = unsafe {
-            (self.0)(
-                src.as_ptr(),
-                dst.as_ptr(),
-                if udp { 17 } else { 6 },
-                out.as_mut_ptr(),
-                out.len(),
-            )
-        };
+        let len = (self.0)(
+            if udp { 17 } else { 6 },
+            src_ip.as_ptr(),
+            src.port(),
+            dst_ip.as_ptr(),
+            dst.port(),
+            out.as_mut_ptr().cast::<c_char>(),
+            out.len(),
+        );
         if len == 0 {
             return Ok(None);
         }

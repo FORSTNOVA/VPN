@@ -10,7 +10,7 @@ use std::{
 
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite},
-    net::TcpStream,
+    net::{TcpSocket, TcpStream},
 };
 
 /// Object-safe async bidirectional stream.
@@ -142,6 +142,53 @@ pub trait OutboundDialer: Send + Sync {
     fn dial_tcp<'a>(&'a self, target: &'a TargetAddr) -> BoxFuture<'a, io::Result<BoxedStream>>;
 }
 
+pub type SocketProtectHook = extern "C" fn(i32) -> i32;
+
+static PROTECT: std::sync::RwLock<Option<SocketProtectHook>> = std::sync::RwLock::new(None);
+
+/// Install a process-wide protector. Return 1 for VpnService.protect success, 0 or negative on failure.
+pub fn set_socket_protect_hook(hook: Option<SocketProtectHook>) {
+    *PROTECT.write().unwrap() = hook;
+}
+
+pub fn protect_socket_fd(fd: i32) -> io::Result<()> {
+    let hook = *PROTECT.read().unwrap();
+    if let Some(protect) = hook {
+        let result = protect(fd);
+        if result != 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("protect socket fd {fd} returned {result}"),
+            ));
+        }
+    }
+    Ok(())
+}
+
+// Like TcpStream::connect, try the resolved addresses in order. Protection
+// and socket creation errors are fatal before any connect attempt.
+async fn connect_addresses(addresses: impl Iterator<Item = SocketAddr>) -> io::Result<TcpStream> {
+    let mut error = io::Error::new(io::ErrorKind::InvalidInput, "no TCP target addresses");
+    for addr in addresses {
+        let socket = socket2::Socket::new(
+            socket2::Domain::for_address(addr),
+            socket2::Type::STREAM,
+            Some(socket2::Protocol::TCP),
+        )?;
+        #[cfg(unix)]
+        protect_socket_fd(std::os::fd::AsRawFd::as_raw_fd(&socket))?;
+        socket.set_nonblocking(true)?;
+        match TcpSocket::from_std_stream(socket.into())
+            .connect(addr)
+            .await
+        {
+            Ok(stream) => return Ok(stream),
+            Err(err) => error = err,
+        }
+    }
+    Err(error)
+}
+
 /// Direct TCP dialer connecting straight to the target address.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct DirectDialer;
@@ -150,12 +197,13 @@ impl OutboundDialer for DirectDialer {
     fn dial_tcp<'a>(&'a self, target: &'a TargetAddr) -> BoxFuture<'a, io::Result<BoxedStream>> {
         Box::pin(async move {
             let stream = match target {
-                TargetAddr::Ip(addr) => TcpStream::connect(addr).await?,
+                TargetAddr::Ip(addr) => connect_addresses(std::iter::once(*addr)).await?,
                 TargetAddr::Domain(host, port) => {
-                    TcpStream::connect((host.as_str(), *port)).await?
+                    connect_addresses(tokio::net::lookup_host((host.as_str(), *port)).await?)
+                        .await?
                 }
             };
-            let _ = stream.set_nodelay(true);
+            stream.set_nodelay(true)?;
             Ok(Box::new(stream) as BoxedStream)
         })
     }

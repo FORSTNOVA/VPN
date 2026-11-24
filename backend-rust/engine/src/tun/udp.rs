@@ -131,6 +131,8 @@ pub(super) async fn run(
                 "[::]:0"
             })
             .await?;
+            #[cfg(unix)]
+            crate::dialer::protect_socket_fd(std::os::fd::AsRawFd::as_raw_fd(&socket))?;
             socket.connect(addr).await?;
             Session::Direct(socket)
         }

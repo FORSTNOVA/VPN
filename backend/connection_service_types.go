@@ -121,6 +121,7 @@ func (e *appConnectionEffects) Call(q connectionEffect) (r connectionReply) {
 			}
 		}
 		r.Err = e.a.startMihomoLocked()
+		_, r.Bool = e.a.kernel.(interface{ standaloneTUN() })
 	case "stop-kernel":
 		if e.a.rememberingNode && e.a.kernelRunningLocked() {
 			e.a.activeNodeLocked()

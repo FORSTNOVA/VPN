@@ -133,7 +133,7 @@ async fn yaml_dns_socks_chain_roundtrip() {
     .unwrap()
 }
 #[test]
-fn rejects_cycles_and_missing_members() {
+fn rejects_cycles_and_unknown_rule_targets() {
     let yaml = YAML
         .replace("ENTRY", "1")
         .replace("MIDDLE", "2")
@@ -141,7 +141,6 @@ fn rejects_cycles_and_missing_members() {
     for (from, to, error) in [
         ("dialer-proxy: entry", "dialer-proxy: exit", "cyclic"),
         ("exit, auto", "exit, SmartVPN", "cyclic"),
-        ("exit, auto", "exit, missing", "unknown outbound"),
         (
             "DOMAIN,localhost,SmartVPN",
             "DOMAIN,localhost,missing",
@@ -225,4 +224,67 @@ async fn tested_groups_route_through_a_healthy_member_and_cache_the_probe() {
         }
         probe_server.await.unwrap();
     }
+}
+
+#[test]
+fn tolerates_subscription_rows_without_weakening_supported_rules() {
+    use smartvpn_engine::rule::{RuleAction, RuleContext};
+    let yaml = r#"
+mixed-port: 7890
+proxies:
+ - {name: legacy, type: vmess}
+ - {name: incomplete, type: trojan, server: host, port: 443}
+ - {name: working, type: trojan, server: host, port: 443, password: test}
+proxy-groups:
+ - {name: empty, type: select, proxies: [legacy, incomplete]}
+ - {name: chain, type: relay, proxies: [working, legacy]}
+ - {name: usable, type: select, proxies: [chain, empty, missing, working]}
+ - {name: block, type: select, proxies: [legacy, REJECT, DIRECT]}
+rules:
+ - GEOSITE,cn,missing
+ - RULE-SET,regions,missing
+ - GEOIP,CN,missing
+ - PROCESS-NAME,test,block
+ - GEOIP,LAN,DIRECT,no-resolve
+ - MATCH,usable
+"#;
+    let set = build_router_from_clash_yaml(yaml, None).unwrap().router;
+    for addr in [
+        "10.2.3.4",
+        "172.31.255.255",
+        "192.168.7.8",
+        "127.7.0.1",
+        "169.254.3.2",
+        "::1",
+        "fdab::1",
+        "febf::1",
+    ] {
+        assert_eq!(
+            set.rules.evaluate(&RuleContext {
+                ip: Some(addr.parse().unwrap()),
+                ..Default::default()
+            }),
+            Some(&RuleAction::Direct)
+        );
+    }
+    assert_eq!(
+        set.rules.evaluate(&RuleContext {
+            process_name: Some("test"),
+            ..Default::default()
+        }),
+        Some(&RuleAction::Reject)
+    );
+    assert_eq!(
+        set.rules.evaluate(&RuleContext::default()),
+        Some(&RuleAction::Proxy("usable".into()))
+    );
+    assert!(
+        build_router_from_clash_yaml(&yaml.replace("MATCH,usable", "MATCH,empty"), None).is_err()
+    );
+    assert!(build_router_from_clash_yaml(
+        &yaml.replace("MATCH,usable", "IP-CIDR6,::1/129,usable"),
+        None
+    )
+    .is_err());
+    assert!(RuleSet::from_lines(&["GEOIP,LAN,DIRECT"]).is_err());
 }

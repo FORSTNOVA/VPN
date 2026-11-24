@@ -160,6 +160,8 @@ async fn forward(query: &[u8], q: &Question, upstream: SocketAddr) -> io::Result
         "[::]:0"
     })
     .await?;
+    #[cfg(unix)]
+    crate::dialer::protect_socket_fd(std::os::fd::AsRawFd::as_raw_fd(&socket))?;
     socket.connect(upstream).await?;
     socket.send(query).await?;
     let mut response = vec![0; 65535];

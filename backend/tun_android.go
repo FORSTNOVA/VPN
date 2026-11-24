@@ -52,6 +52,10 @@ func (t *vpnTunnel) grant(authorized bool, fd int, iface string, routes, dns []s
 func (t *vpnTunnel) handOver() uint64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+	return t.handOverLocked()
+}
+
+func (t *vpnTunnel) handOverLocked() uint64 {
 	_, rust := t.lease.apply(leaseHandOver, 0, false)
 	log.Printf("tunnel: descriptor %d handed to kernel (Rust lease=%t)", t.lease.fd, rust)
 	return t.lease.generation

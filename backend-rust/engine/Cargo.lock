@@ -1164,6 +1164,7 @@ dependencies = [
  "sha1",
  "sha2",
  "smoltcp",
+ "socket2",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
