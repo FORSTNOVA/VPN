@@ -1,0 +1,5 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" package="com.smartvpn.acceptance">
+<uses-sdk android:minSdkVersion="33" android:targetSdkVersion="36"/>
+<application android:label="SmartVPN acceptance"/>
+<instrumentation android:name=".Acceptance" android:targetPackage="com.smartvpn.client"/>
+</manifest>

@@ -941,7 +941,7 @@ func generatedConfigGo(options configOptions) string {
 			fmt.Fprintf(&config, "  - %s\n", strconv.Quote(rule))
 		}
 		if options.ChinaDirect {
-			fmt.Fprintf(&config, "  - %s\n", strconv.Quote(chinaDirectRule))
+			writeChinaDirectRules(&config)
 		}
 		fmt.Fprintf(&config, "  - %s\n", strconv.Quote(quicRejectRule))
 		config.WriteString("  - MATCH,SmartVPN\n")
@@ -954,7 +954,7 @@ func generatedConfigGo(options configOptions) string {
 		fmt.Fprintf(&config, "  - %s\n", strconv.Quote(rule))
 	}
 	if options.ChinaDirect {
-		fmt.Fprintf(&config, "  - %s\n", strconv.Quote(chinaDirectRule))
+		writeChinaDirectRules(&config)
 	}
 	fmt.Fprintf(&config, "  - %s\n", strconv.Quote(quicRejectRule))
 	for _, rule := range proxied {
@@ -1007,6 +1007,27 @@ func domesticDirectTCPRule(rule string) (string, bool) {
 // A game login or a corporate service can use TCP on a port other than 443.
 // Keep direct rules TCP-only. Known domestic services can be matched by name
 // before an overseas resolver or CDN address determines the route.
+var coreDirectDomesticDomains = []string{
+	"mihoyo.com", "biligame.com", "bilibili.com", "gov.cn", "cn",
+	"baidu.com", "qq.com", "weixin.com", "taobao.com", "tmall.com",
+	"alipay.com", "jd.com", "163.com", "126.com", "weibo.com",
+	"zhihu.com", "douyin.com", "bytedance.com", "zijieapi.com",
+	"toutiao.com", "pangolin-sdk-toutiao1.com", "volces.com",
+	"xiaohongshu.com", "pinduoduo.com", "meituan.com", "dianping.com",
+	"iqiyi.com", "youku.com", "mgtv.com", "netease.com", "tencent.com",
+	"amap.com", "autonavi.com", "dingtalk.com", "kuaishou.com",
+	"wps.com", "mi.com", "xiaomi.com", "huawei.com", "sogou.com",
+	"ipip.net", "ip138.com", "heytapimage.com", "heytapmobi.com",
+	"heytapdownload.com",
+}
+
+func writeChinaDirectRules(config *strings.Builder) {
+	for _, domain := range coreDirectDomesticDomains {
+		fmt.Fprintf(config, "  - %s\n", strconv.Quote("DOMAIN-SUFFIX,"+domain+",DIRECT"))
+	}
+	fmt.Fprintf(config, "  - %s\n", strconv.Quote(chinaDirectRule))
+}
+
 func writeDomesticTCPRulesGo(config *strings.Builder, options configOptions) {
 	add := func(rule string) { fmt.Fprintf(config, "  - %s\n", strconv.Quote(rule)) }
 	if options.DNSProtection {
@@ -1022,10 +1043,14 @@ func writeDomesticTCPRulesGo(config *strings.Builder, options configOptions) {
 	if options.WebRTCProtection {
 		add("AND,((NETWORK,tcp),(DST-PORT,3478/5349/19302)),SmartVPN")
 	}
-	// Bilibili's media hosts (e.g. i0.hdslb.com) can resolve to overseas
-	// edges. Let the domestic IP rule below select DIRECT only for local
-	// edges; overseas edges must reach the final proxy rule.
-	for _, domain := range []string{"mihoyo.com", "biligame.com", "bilibili.com", "gov.cn"} {
+	// Core domestic domains resolve via domestic DNS and stay DIRECT on TCP
+	// without leaking HTTP/3 UDP:443 through the proxy. Media CDNs that can
+	// resolve to overseas edges (e.g. hdslb.com, bilivideo.com) are left to
+	// the china-ip RULE-SET below.
+	for _, domain := range coreDirectDomesticDomains {
+		if options.WebRTCProtection && (findProcessMode == "always" || runtime.GOOS == "android") {
+			add("AND,((NETWORK,udp),(DST-PORT,443),(DOMAIN-SUFFIX," + domain + ")),REJECT")
+		}
 		add("AND,((NETWORK,tcp),(DOMAIN-SUFFIX," + domain + ")),DIRECT")
 	}
 	// Preserve subscription DIRECT rules as TCP-only so domestic/CDN rules still

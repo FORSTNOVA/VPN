@@ -1,0 +1,31 @@
+[package]
+name = "smartvpn-runtime"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+serde = { version = "1", features = ["derive"] }
+getrandom = "0.2"
+tiny_http = "0.12"
+ureq = {version = "2.12", default-features = false, features = ["json","tls"]}
+rusqlite = { version = "0.32", features = ["bundled"] }
+url = "2"
+percent-encoding = "2"
+base64 = "0.22"
+yaml_serde = "0.10.7"
+chrono = "0.4"
+ipnet = "2"
+regex = "1"
+http_uri = { package = "http", version = "1" }
+sha2 = "0.10"
+tempfile = "3"
+
+clash-lib = { path = "../../vendor/clash-rs/clash-lib", default-features = false, features = ["ring", "shadowsocks", "tuic", "wireguard", "ssh"] }
+[target.'cfg(target_os = "android")'.dependencies]
+hickory-proto = "0.26"
+
+[dev-dependencies]
+clash-lib = { path = "../../vendor/clash-rs/clash-lib", default-features = false, features = ["ring"] }
+hickory-proto = "0.26"

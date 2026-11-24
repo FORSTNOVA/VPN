@@ -68,3 +68,12 @@ wps.com
 mi.com
 xiaomi.com
 huawei.com
+ipip.net
+ip138.com
+sogou.com
+volces.com
+zijieapi.com
+pangolin-sdk-toutiao1.com
+heytapimage.com
+heytapmobi.com
+heytapdownload.com

@@ -1,0 +1,15 @@
+[package]
+name = "smartvpn-win-service"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+serde_json.workspace = true
+smartvpn-runtime.workspace = true
+clash-lib = { path = "../../vendor/clash-rs/clash-lib", default-features = false, features = ["ring"] }
+tokio-util = "0.7"
+
+[[bin]]
+name = "smartvpn-rust-service"
+path = "src/main.rs"
