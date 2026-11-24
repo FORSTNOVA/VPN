@@ -225,7 +225,11 @@ pub struct PersistedState {
 }
 
 fn default_connection_mode() -> String {
-    "tun".to_owned()
+    if cfg!(target_os = "android") {
+        "vpn".to_owned()
+    } else {
+        "tun".to_owned()
+    }
 }
 fn default_true() -> bool {
     true
@@ -311,6 +315,12 @@ impl RuntimeState {
         }
         if !path.exists() || persisted.subscriptions.is_empty() {
             migrate_legacy_go_state(home, &*bridge, &mut persisted);
+        }
+        if cfg!(target_os = "android")
+            && (persisted.connection_mode == "system-proxy"
+                || persisted.connection_mode.trim().is_empty())
+        {
+            persisted.connection_mode = "vpn".to_owned();
         }
         let next_event_id = persisted.events.iter().map(|e| e.id).max().unwrap_or(0) + 1;
         Self {

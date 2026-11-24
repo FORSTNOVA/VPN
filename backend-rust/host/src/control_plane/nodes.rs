@@ -7,6 +7,9 @@ async fn dial_and_measure_yaml(
     protect: Option<smartvpn_engine::dialer::SocketProtectHook>,
     timeout_ms: u64,
 ) -> Result<(i64, i64), String> {
+    if tokio::runtime::Handle::try_current().is_err() {
+        return Err("no tokio handle in nodes.rs".to_owned());
+    }
     smartvpn_engine::dialer::set_socket_protect_hook(protect);
     let bundle = build_router_from_clash_yaml(yaml, None)
         .map_err(|e| format!("proxy config error: {e}"))?;
@@ -107,5 +110,52 @@ pub fn infer_region_from_name(name: &str) -> &'static str {
         "KR"
     } else {
         ""
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn probe_protocol_configs_return_error_not_panic() {
+        let samples = vec![
+            json!({
+                "name": "hy2-sample",
+                "type": "hysteria2",
+                "server": "127.0.0.1",
+                "port": 1,
+                "password": "secret",
+                "sni": "example.com",
+                "skip-cert-verify": true
+            }),
+            json!({
+                "name": "vless-sample",
+                "type": "vless",
+                "server": "127.0.0.1",
+                "port": 1,
+                "uuid": "11111111-1111-1111-1111-111111111111",
+                "network": "tcp",
+                "tls": true,
+                "servername": "example.com",
+                "reality-opts": {
+                    "public-key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+                    "short-id": "01234567"
+                }
+            }),
+            json!({
+                "name": "anytls-sample",
+                "type": "anytls",
+                "server": "127.0.0.1",
+                "port": 1,
+                "password": "secret",
+                "sni": "example.com",
+                "skip-cert-verify": true
+            }),
+        ];
+        for p in samples {
+            let res = probe_proxy_latency(&p, None, 1500).await;
+            assert!(res.is_err(), "closed local port should fail cleanly: {:?}", res);
+        }
     }
 }

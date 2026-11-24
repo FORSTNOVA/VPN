@@ -29,6 +29,33 @@ use tokio::{
     sync::{oneshot, Mutex},
 };
 
+static LAST_PANIC: std::sync::OnceLock<std::sync::Mutex<String>> = std::sync::OnceLock::new();
+
+fn install_panic_hook() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let prev = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let loc = info
+                .location()
+                .map(|l| format!("{}:{}:{}", l.file(), l.line(), l.column()))
+                .unwrap_or_else(|| "unknown".to_owned());
+            let msg = if let Some(s) = info.payload().downcast_ref::<&str>() {
+                (*s).to_owned()
+            } else if let Some(s) = info.payload().downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_owned()
+            };
+            let full = format!("{msg} at {loc}");
+            if let Ok(mut g) = LAST_PANIC.get_or_init(|| std::sync::Mutex::new(String::new())).lock() {
+                *g = full;
+            }
+            prev(info);
+        }));
+    });
+}
+
 pub struct ControlPlane {
     pub port: u16,
     pub token: String,
@@ -38,6 +65,7 @@ pub struct ControlPlane {
 
 impl ControlPlane {
     pub async fn start(home: PathBuf, bridge: Arc<dyn PlatformBridge>) -> Result<Arc<Self>, String> {
+        install_panic_hook();
         smartvpn_engine::transport::tls::ensure_crypto_provider();
         let mut token_bytes = [0u8; 24];
         rand::rng().fill_bytes(&mut token_bytes);
@@ -71,7 +99,29 @@ impl ControlPlane {
                         tokio::spawn(async move {
                             let svc = hyper::service::service_fn(move |req| {
                                 let cp_req = Arc::clone(&cp_conn);
-                                async move { Ok::<_, Infallible>(cp_req.handle(req).await) }
+                                async move {
+                                    let cp_err = Arc::clone(&cp_req);
+                                    let res = tokio::spawn(async move { cp_req.handle(req).await }).await;
+                                    match res {
+                                        Ok(resp) => Ok::<_, Infallible>(resp),
+                                        Err(join_err) => {
+                                            let detail = LAST_PANIC
+                                                .get()
+                                                .and_then(|m| m.lock().ok().map(|s| s.clone()))
+                                                .filter(|s| !s.is_empty())
+                                                .unwrap_or_else(|| join_err.to_string());
+                                            let msg = format!("control plane handler panic: {detail}");
+                                            eprintln!("{msg}");
+                                            let mut st = cp_err.state.lock().await;
+                                            st.push_event("error", "handler", &msg, false);
+                                            let _ = st.save();
+                                            Ok(json_resp(
+                                                StatusCode::INTERNAL_SERVER_ERROR,
+                                                json!({"error": msg}),
+                                            ))
+                                        }
+                                    }
+                                }
                             });
                             let _ = hyper::server::conn::http1::Builder::new()
                                 .serve_connection(TokioIo::new(stream), svc)
@@ -267,11 +317,39 @@ impl ControlPlane {
             }
             (Method::GET, "/api/events") => {
                 let st = self.state.lock().await;
+                let events: Vec<Value> = st
+                    .persisted
+                    .events
+                    .iter()
+                    .map(|e| {
+                        json!({
+                            "id": e.id,
+                            "kind": e.kind,
+                            "time": e.time,
+                            "title": e.title,
+                            "detail": e.detail,
+                            "ok": e.ok,
+                            "trigger": e.kind,
+                            "from": "",
+                            "to": e.title,
+                            "evidence": e.detail,
+                            "at": e.time,
+                        })
+                    })
+                    .collect();
+                let service_logs: Vec<String> = st
+                    .persisted
+                    .events
+                    .iter()
+                    .map(|e| format!("[{}] [{}] {}: {}", e.time, e.kind, e.title, e.detail))
+                    .collect();
                 json_resp(
                     StatusCode::OK,
                     json!({
-                        "events": st.persisted.events,
-                        "logs": st.persisted.events,
+                        "events": events,
+                        "logs": events,
+                        "kernelLogs": [],
+                        "serviceLogs": service_logs,
                     }),
                 )
             }
@@ -551,7 +629,8 @@ impl ControlPlane {
             )
         };
         let key = hops.join(" → ");
-        match nodes::probe_chain_latency(&persisted, &proxies, &hops, protect, 5000).await {
+        let measured = chrono::Utc::now().timestamp_millis();
+        match nodes::probe_chain_latency(&persisted, &proxies, &hops, protect, 6000).await {
             Ok((first_ms, steady_ms)) => {
                 let mut st = self.state.lock().await;
                 if hops.len() == 1 {
@@ -559,10 +638,12 @@ impl ControlPlane {
                     st.node_delays.insert(hops[0].clone(), steady_ms);
                 }
                 let probe_val = json!({
-                    "ok": true,
-                    "firstMs": first_ms,
-                    "steadyMs": steady_ms,
-                    "testedAt": chrono::Utc::now().timestamp()
+                    "hops": hops,
+                    "delay": first_ms,
+                    "warmDelay": steady_ms,
+                    "measured": measured,
+                    "entryIP": "",
+                    "entryFamily": ""
                 });
                 st.chain_probes.insert(key.clone(), probe_val.clone());
                 st.push_event(
@@ -575,9 +656,17 @@ impl ControlPlane {
                 json_resp(StatusCode::OK, probe_val)
             }
             Err(e) => {
+                let probe_val = json!({
+                    "hops": hops,
+                    "error": e,
+                    "failureStage": "建立代理连接",
+                    "measured": measured
+                });
                 let mut st = self.state.lock().await;
+                st.chain_probes.insert(key.clone(), probe_val.clone());
                 st.push_event("probe", "测速失败", &format!("{key}: {e}"), false);
-                text_resp(StatusCode::BAD_GATEWAY, &format!("{e}\n"))
+                let _ = st.save();
+                json_resp(StatusCode::OK, probe_val)
             }
         }
     }
@@ -1091,6 +1180,26 @@ mod tests {
         });
         let res2 = tx2.send_request(req2).await.unwrap();
         assert_eq!(res2.status(), 400);
+
+        // Probe unknown node returns 200 with error + failureStage (never panics or 502)
+        let probe_req = Request::post("/api/nodes/chain/probe")
+            .header(AUTHORIZATION, format!("Bearer {}", cp.token))
+            .body(Full::new(Bytes::from_static(br#"{"hops":["missing-node"]}"#)))
+            .unwrap();
+        let stream3 = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, cp.port))
+            .await
+            .unwrap();
+        let (mut tx3, conn3) = hyper::client::conn::http1::handshake(TokioIo::new(stream3))
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            let _ = conn3.await;
+        });
+        let res3 = tx3.send_request(probe_req).await.unwrap();
+        assert_eq!(res3.status(), 200);
+        let body3 = res3.into_body().collect().await.unwrap().to_bytes();
+        let json3: Value = serde_json::from_slice(&body3).unwrap();
+        assert_eq!(json3["failureStage"], "建立代理连接");
 
         cp.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);

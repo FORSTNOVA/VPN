@@ -77,6 +77,7 @@ class ProbeBook extends ChangeNotifier {
         _results[k] = await send(List.of(hops));
         _errors.remove(k);
       } catch (e) {
+        debugPrint('ProbeBook.run error ($k): $e');
         _errors[k] = e.toString().replaceFirst('Exception: ', '');
       } finally {
         _pending.remove(k);

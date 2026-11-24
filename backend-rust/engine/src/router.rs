@@ -129,6 +129,9 @@ impl Router {
         budget: std::time::Duration,
     ) -> io::Result<i64> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        if tokio::runtime::Handle::try_current().is_err() {
+            return Err(io::Error::other("no tokio handle in router.rs"));
+        }
         let t0 = std::time::Instant::now();
         let src = SocketAddr::from(([127, 0, 0, 1], 0));
         let target = TargetAddr::domain(host, port);
