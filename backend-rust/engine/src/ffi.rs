@@ -62,3 +62,24 @@ pub unsafe extern "C" fn smartvpn_engine_connect_v1(
         Err(_) => -2,
     }
 }
+
+/// Validate the Clash configuration used by TunStack. Returns 0 on success,
+/// -1 for null/invalid UTF-8 and -2 for a configuration error.
+/// # Safety
+/// yaml must be null or point to a readable NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn smartvpn_engine_tun_validate_yaml_v1(yaml: *const c_char) -> i32 {
+    if yaml.is_null() {
+        return -1;
+    }
+    let Ok(text) = CStr::from_ptr(yaml).to_str() else {
+        return -1;
+    };
+    match crate::config_bridge::build_router_from_clash_yaml(text, None) {
+        Ok(_) => 0,
+        Err(err) => {
+            eprintln!("TUN configuration: {err}");
+            -2
+        }
+    }
+}

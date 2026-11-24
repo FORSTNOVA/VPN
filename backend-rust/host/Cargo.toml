@@ -5,6 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
+smartvpn-engine = { path = "../engine" }
 smartvpn-core = { path = ".." }
 bytes = "1"
 http-body-util = "0.1"

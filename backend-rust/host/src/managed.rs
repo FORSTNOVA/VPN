@@ -50,11 +50,37 @@ pub fn run(kernel: &str, home: &str, config: &str, port: &str) -> io::Result<()>
         .ok()
         .filter(|p| *p != 0)
         .ok_or_else(|| io::Error::other("invalid controller port"))?;
-    if [kernel, home, config]
-        .iter()
-        .any(|p| !Path::new(p).is_absolute())
+    let kernel_path = Path::new(kernel);
+    let name = kernel_path.file_name().and_then(|n| n.to_str());
+    let embedded = name.is_some_and(|n| {
+        n.eq_ignore_ascii_case("smartvpn-engine") || n.eq_ignore_ascii_case("smartvpn-engine.exe")
+    });
+    if (!embedded && !kernel_path.is_absolute())
+        || !Path::new(home).is_absolute()
+        || !Path::new(config).is_absolute()
     {
         return Err(io::Error::other("managed kernel paths must be absolute"));
+    }
+    if embedded {
+        return smartvpn_host::engine_runtime::run_with_ready(Path::new(config), None, || {
+            println!("{}", process::id());
+            thread::spawn(|| {
+                let result = io::stdin().read(&mut [0u8]);
+                process::exit(if result.is_ok() { 0 } else { 1 });
+            });
+            thread::spawn(move || {
+                if let Err(e) = smartvpn_host::monitor::serve_managed(
+                    port,
+                    std::env::var("SMARTVPN_MANAGED_RELOAD_TOKEN")
+                        .ok()
+                        .filter(|s| !s.is_empty()),
+                ) {
+                    eprintln!("managed monitor: {e}");
+                    process::exit(1);
+                }
+            });
+            Ok(())
+        });
     }
     // The OS closes the job only at process exit, including early errors.
     static JOB: OnceLock<OwnedHandle> = OnceLock::new();
