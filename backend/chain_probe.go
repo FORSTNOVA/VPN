@@ -119,7 +119,17 @@ func (d *observedEntry) DialContext(ctx context.Context, network, address string
 func (d *observedEntry) ListenPacket(ctx context.Context, network, address string, remote netip.AddrPort) (net.PacketConn, error) {
 	d.obs.address(remote.String(), false)
 	d.obs.setStage("入口 UDP 建连（尝试地址）")
-	return d.Dialer.ListenPacket(ctx, network, address, remote)
+	conn, err := d.Dialer.ListenPacket(ctx, network, address, remote)
+	if err != nil {
+		return nil, err
+	}
+	d.obs.address(remote.String(), true)
+	stage := d.stage
+	if stage == "" {
+		stage = "代理协议握手或链路转发"
+	}
+	d.obs.setStage(stage)
+	return conn, nil
 }
 
 type observedHop struct {

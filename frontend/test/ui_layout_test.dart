@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smartvpn_windows/main.dart';
+import 'package:smartvpn_windows/models.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -82,4 +83,25 @@ void main() {
       }
     });
   }
+
+  test('isUdpSerializedNode identifies QUIC and UDP nodes for serial probing', () {
+    ProxyNode node(String type, {String network = 'tcp'}) => ProxyNode(
+          name: 'n-$type',
+          type: type,
+          alive: true,
+          selected: false,
+          network: network,
+          tls: true,
+          wsHostConfigured: false,
+          wsPathConfigured: false,
+        );
+
+    expect(isUdpSerializedNode(node('hysteria2')), isTrue);
+    expect(isUdpSerializedNode(node('Hysteria2')), isTrue);
+    expect(isUdpSerializedNode(node('tuic')), isTrue);
+    expect(isUdpSerializedNode(node('wireguard')), isTrue);
+    expect(isUdpSerializedNode(node('vless', network: 'udp')), isTrue);
+    expect(isUdpSerializedNode(node('anytls')), isFalse);
+    expect(isUdpSerializedNode(node('vless', network: 'ws')), isFalse);
+  });
 }

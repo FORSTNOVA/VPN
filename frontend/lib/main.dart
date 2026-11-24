@@ -1260,23 +1260,42 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _measureAllNodes() async {
     if (_measuringNodes) return;
-    final names = _nodes.map((n) => n.name).toSet().toList();
+    final seen = <String>{};
+    final concurrentNames = <String>[];
+    final serialUdpNames = <String>[];
+    for (final node in _nodes) {
+      if (!seen.add(node.name)) continue;
+      if (isUdpSerializedNode(node)) {
+        serialUdpNames.add(node.name);
+      } else {
+        concurrentNames.add(node.name);
+      }
+    }
     int next = 0;
     setState(() {
       _measuringNodes = true;
       _probeDone = 0;
-      _probeTotal = names.length;
+      _probeTotal = concurrentNames.length + serialUdpNames.length;
     });
     Future<void> worker() async {
-      while (mounted && next < names.length) {
-        final name = names[next++];
+      while (mounted && next < concurrentNames.length) {
+        final name = concurrentNames[next++];
         await _probes.run([name]);
         if (mounted) setState(() => _probeDone++);
       }
     }
 
     try {
-      await Future.wait(List.generate(4, (_) => worker()));
+      if (concurrentNames.isNotEmpty) {
+        await Future.wait(List.generate(4, (_) => worker()));
+      }
+      // Run UDP/QUIC nodes (hysteria2/tuic/wireguard) one at a time after the
+      // concurrent pool so NAT/slirp UDP contention does not cause false fails.
+      for (final name in serialUdpNames) {
+        if (!mounted) break;
+        await _probes.run([name]);
+        if (mounted) setState(() => _probeDone++);
+      }
     } finally {
       if (mounted) setState(() => _measuringNodes = false);
     }
@@ -3345,4 +3364,17 @@ class _AkHoverNavItemState extends State<_AkHoverNavItem> {
       ),
     );
   }
+}
+
+/// Returns true for UDP/QUIC-based proxy protocols whose handshakes contend
+/// when probed concurrently on mobile/NAT environments.
+bool isUdpSerializedNode(ProxyNode node) {
+  final kind = node.type.trim().toLowerCase();
+  if (kind == 'hysteria2' ||
+      kind == 'hysteria' ||
+      kind == 'tuic' ||
+      kind == 'wireguard') {
+    return true;
+  }
+  return node.network.trim().toLowerCase() == 'udp';
 }
