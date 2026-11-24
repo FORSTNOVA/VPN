@@ -581,6 +581,12 @@ fn route<P: TunnelDataPlane>(
                 }
             }
             if plane.status()?.connected {
+                if store.chain()?["enabled"] == true {
+                    return json_reply(
+                        409,
+                        json!({"error":"disconnect before switching away from active proxy chain"}),
+                    );
+                }
                 let (code, bytes) =
                     plane
                         .controller()?
@@ -593,6 +599,11 @@ fn route<P: TunnelDataPlane>(
                     store.configs()?.iter().any(|n| n["name"] == name),
                     "unknown node"
                 );
+                let mut chain = store.chain()?;
+                if chain["enabled"] == true {
+                    chain["enabled"] = json!(false);
+                    store.set_chain(&chain)?;
+                }
             }
             if let Some(previous) = store.selected()? {
                 if previous != name {
@@ -1047,6 +1058,7 @@ fn route<P: TunnelDataPlane>(
                             &serde_json::to_vec(&json!({"name":best}))?,
                         )?;
                         ensure!(code == 202, "controller selection HTTP {code}");
+                        store.select(best)?;
                         store.record_switch(&from, best, "unhealthy")?;
                         Ok(true)
                     })();

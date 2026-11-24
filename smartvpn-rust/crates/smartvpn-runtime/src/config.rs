@@ -280,7 +280,7 @@ impl Profile {
         if self.web_rtc_protection {
             rules.push("AND,((NETWORK,UDP),(DST-PORT,3478/5349/19302-19309)),REJECT".into());
         }
-        if android && (!self.web_rtc_protection || self.domestic_direct) {
+        if android {
             rules.push("AND,((NETWORK,UDP),(DST-PORT,443)),REJECT".into());
         }
         let mut group = json!({"name":"SmartVPN","type":"select","proxies":self.choices});
