@@ -162,12 +162,31 @@ impl Hysteria2Dialer {
         let host = cfg.server.host();
         let peer = match &cfg.server {
             TargetAddr::Ip(addr) => *addr,
-            TargetAddr::Domain(host, port) => tokio::net::lookup_host((host.as_str(), *port))
-                .await?
-                .next()
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::NotFound, "Hysteria server has no addresses")
-                })?,
+            TargetAddr::Domain(host, port) => {
+                let addrs: Vec<SocketAddr> =
+                    tokio::net::lookup_host((host.as_str(), *port)).await?.collect();
+                if addrs.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "Hysteria server has no addresses",
+                    ));
+                }
+                // Prefer route-reachable addresses (skipping IPv6 when the host has no IPv6 route).
+                addrs
+                    .iter()
+                    .copied()
+                    .find(|addr| {
+                        let bind_addr = if addr.is_ipv4() {
+                            "0.0.0.0:0"
+                        } else {
+                            "[::]:0"
+                        };
+                        std::net::UdpSocket::bind(bind_addr)
+                            .and_then(|s| s.connect(addr))
+                            .is_ok()
+                    })
+                    .unwrap_or(addrs[0])
+            }
         };
         let bind: SocketAddr = if peer.is_ipv4() {
             ([0; 4], 0).into()

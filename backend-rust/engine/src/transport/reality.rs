@@ -18,7 +18,7 @@ use hkdf::{
     Hkdf,
 };
 use rand::RngCore;
-use sha2::{Digest, Sha256};
+use sha2::{Digest, Sha256, Sha384};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -91,7 +91,7 @@ pub fn seal_reality_session_id(
     let mut plain = [0u8; 16];
     plain[0] = 1;
     plain[1] = 8;
-    plain[2] = 4;
+    plain[2] = 2;
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -146,6 +146,8 @@ fn build_client_hello(
     // key_share (0x0033): X25519
     exts.extend_from_slice(&[0x00, 0x33, 0x00, 0x26, 0x00, 0x24, 0x00, 0x1d, 0x00, 0x20]);
     exts.extend_from_slice(eph_pub);
+    // psk_key_exchange_modes (0x002d): psk_dhe_ke (1)
+    exts.extend_from_slice(&[0x00, 0x2d, 0x00, 0x02, 0x01, 0x01]);
     // ALPN (0x0010)
     if !cfg.alpn.is_empty() {
         let mut alpn_list = Vec::new();
@@ -213,9 +215,29 @@ impl Tls13Cipher {
             Self::Aes256Gcm | Self::ChaCha20Poly1305 => 32,
         }
     }
+
+    fn hash_len(self) -> usize {
+        match self {
+            Self::Aes256Gcm => 48,
+            Self::Aes128Gcm | Self::ChaCha20Poly1305 => 32,
+        }
+    }
 }
 
-fn hkdf_expand_label(secret: &[u8], label: &[u8], context: &[u8], len: usize) -> Vec<u8> {
+fn hkdf_extract_for(cipher: Tls13Cipher, salt: &[u8], ikm: &[u8]) -> Vec<u8> {
+    match cipher {
+        Tls13Cipher::Aes256Gcm => Hkdf::<Sha384>::extract(Some(salt), ikm).0.to_vec(),
+        _ => Hkdf::<Sha256>::extract(Some(salt), ikm).0.to_vec(),
+    }
+}
+
+fn hkdf_expand_label_for(
+    cipher: Tls13Cipher,
+    secret: &[u8],
+    label: &[u8],
+    context: &[u8],
+    len: usize,
+) -> Vec<u8> {
     let mut hkdf_label = Vec::with_capacity(2 + 1 + 6 + label.len() + 1 + context.len());
     hkdf_label.extend_from_slice(&(len as u16).to_be_bytes());
     let full_label_len = 6 + label.len();
@@ -224,14 +246,91 @@ fn hkdf_expand_label(secret: &[u8], label: &[u8], context: &[u8], len: usize) ->
     hkdf_label.extend_from_slice(label);
     hkdf_label.push(context.len() as u8);
     hkdf_label.extend_from_slice(context);
-    let hk = Hkdf::<Sha256>::from_prk(secret).expect("valid prk");
     let mut out = vec![0u8; len];
-    let _ = hk.expand(&hkdf_label, &mut out);
+    match cipher {
+        Tls13Cipher::Aes256Gcm => {
+            let hk = Hkdf::<Sha384>::from_prk(secret).expect("valid prk384");
+            let _ = hk.expand(&hkdf_label, &mut out);
+        }
+        _ => {
+            let hk = Hkdf::<Sha256>::from_prk(secret).expect("valid prk256");
+            let _ = hk.expand(&hkdf_label, &mut out);
+        }
+    }
     out
 }
 
-fn derive_secret(secret: &[u8], label: &[u8], transcript_hash: &[u8]) -> Vec<u8> {
-    hkdf_expand_label(secret, label, transcript_hash, 32)
+fn derive_secret_for(
+    cipher: Tls13Cipher,
+    secret: &[u8],
+    label: &[u8],
+    transcript_hash: &[u8],
+) -> Vec<u8> {
+    hkdf_expand_label_for(cipher, secret, label, transcript_hash, cipher.hash_len())
+}
+
+fn empty_hash_for(cipher: Tls13Cipher) -> Vec<u8> {
+    match cipher {
+        Tls13Cipher::Aes256Gcm => Sha384::digest([]).to_vec(),
+        _ => Sha256::digest([]).to_vec(),
+    }
+}
+
+fn hmac_verify_for(cipher: Tls13Cipher, key: &[u8], msg: &[u8], tag: &[u8]) -> bool {
+    match cipher {
+        Tls13Cipher::Aes256Gcm => {
+            let mut mac = <Hmac<Sha384> as Mac>::new_from_slice(key).expect("hmac384");
+            mac.update(msg);
+            mac.verify_slice(tag).is_ok()
+        }
+        _ => {
+            let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("hmac256");
+            mac.update(msg);
+            mac.verify_slice(tag).is_ok()
+        }
+    }
+}
+
+fn hmac_sign_for(cipher: Tls13Cipher, key: &[u8], msg: &[u8]) -> Vec<u8> {
+    match cipher {
+        Tls13Cipher::Aes256Gcm => {
+            let mut mac = <Hmac<Sha384> as Mac>::new_from_slice(key).expect("hmac384");
+            mac.update(msg);
+            mac.finalize().into_bytes().to_vec()
+        }
+        _ => {
+            let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("hmac256");
+            mac.update(msg);
+            mac.finalize().into_bytes().to_vec()
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Transcript {
+    s256: Sha256,
+    s384: Sha384,
+}
+
+impl Transcript {
+    fn new() -> Self {
+        Self {
+            s256: Sha256::new(),
+            s384: Sha384::new(),
+        }
+    }
+
+    fn update(&mut self, data: &[u8]) {
+        self.s256.update(data);
+        self.s384.update(data);
+    }
+
+    fn current_hash(&self, cipher: Tls13Cipher) -> Vec<u8> {
+        match cipher {
+            Tls13Cipher::Aes256Gcm => self.s384.clone().finalize().to_vec(),
+            _ => self.s256.clone().finalize().to_vec(),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -244,8 +343,8 @@ struct TrafficKeys {
 
 impl TrafficKeys {
     fn from_secret(cipher: Tls13Cipher, secret: &[u8]) -> Self {
-        let key = hkdf_expand_label(secret, b"key", &[], cipher.key_len());
-        let iv_vec = hkdf_expand_label(secret, b"iv", &[], 12);
+        let key = hkdf_expand_label_for(cipher, secret, b"key", &[], cipher.key_len());
+        let iv_vec = hkdf_expand_label_for(cipher, secret, b"iv", &[], 12);
         let mut iv = [0u8; 12];
         iv.copy_from_slice(&iv_vec);
         Self {
@@ -406,7 +505,7 @@ pub async fn connect_reality(
     stream.write_all(&ch_record).await?;
     stream.flush().await?;
 
-    let mut transcript = Sha256::new();
+    let mut transcript = Transcript::new();
     transcript.update(&ch_hs);
 
     // Read ServerHello (skip optional ChangeCipherSpec if present)
@@ -419,15 +518,15 @@ pub async fn connect_reality(
     };
     let (cipher, server_pub_bytes) = parse_server_hello(&sh_rec)?;
     transcript.update(&sh_rec);
-    let hello_hash: [u8; 32] = transcript.clone().finalize().into();
+    let hello_hash = transcript.current_hash(cipher);
 
     let tls_shared = eph_priv.diffie_hellman(&PublicKey::from(server_pub_bytes));
-    let zeros = [0u8; 32];
-    let (early_secret, _) = Hkdf::<Sha256>::extract(Some(&zeros), &zeros);
-    let derived = derive_secret(&early_secret, b"derived", &Sha256::digest([]));
-    let (handshake_secret, _) = Hkdf::<Sha256>::extract(Some(&derived), tls_shared.as_bytes());
-    let c_hs_secret = derive_secret(&handshake_secret, b"c hs traffic", &hello_hash);
-    let s_hs_secret = derive_secret(&handshake_secret, b"s hs traffic", &hello_hash);
+    let zeros = vec![0u8; cipher.hash_len()];
+    let early_secret = hkdf_extract_for(cipher, &zeros, &zeros);
+    let derived = derive_secret_for(cipher, &early_secret, b"derived", &empty_hash_for(cipher));
+    let handshake_secret = hkdf_extract_for(cipher, &derived, tls_shared.as_bytes());
+    let c_hs_secret = derive_secret_for(cipher, &handshake_secret, b"c hs traffic", &hello_hash);
+    let s_hs_secret = derive_secret_for(cipher, &handshake_secret, b"s hs traffic", &hello_hash);
 
     let mut c_hs_keys = TrafficKeys::from_secret(cipher, &c_hs_secret);
     let mut s_hs_keys = TrafficKeys::from_secret(cipher, &s_hs_secret);
@@ -460,12 +559,10 @@ pub async fn connect_reality(
             let msg: Vec<u8> = hs_buf.drain(..4 + msg_len).collect();
             if msg[0] == 0x14 {
                 // Verify Server Finished
-                let pre_hash: [u8; 32] = transcript.clone().finalize().into();
-                let finished_key = hkdf_expand_label(&s_hs_secret, b"finished", &[], 32);
-                let mut mac =
-                    <Hmac<Sha256> as Mac>::new_from_slice(&finished_key).expect("hmac key");
-                mac.update(&pre_hash);
-                if mac.verify_slice(&msg[4..]).is_err() {
+                let pre_hash = transcript.current_hash(cipher);
+                let finished_key =
+                    hkdf_expand_label_for(cipher, &s_hs_secret, b"finished", &[], cipher.hash_len());
+                if !hmac_verify_for(cipher, &finished_key, &pre_hash, &msg[4..]) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
                         "Reality Server Finished MAC mismatch",
@@ -480,19 +577,18 @@ pub async fn connect_reality(
         }
     }
 
-    let server_fin_hash: [u8; 32] = transcript.finalize().into();
-    let derived2 = derive_secret(&handshake_secret, b"derived", &Sha256::digest([]));
-    let (master_secret, _) = Hkdf::<Sha256>::extract(Some(&derived2), &zeros);
-    let c_app_secret = derive_secret(&master_secret, b"c ap traffic", &server_fin_hash);
-    let s_app_secret = derive_secret(&master_secret, b"s ap traffic", &server_fin_hash);
+    let server_fin_hash = transcript.current_hash(cipher);
+    let derived2 = derive_secret_for(cipher, &handshake_secret, b"derived", &empty_hash_for(cipher));
+    let master_secret = hkdf_extract_for(cipher, &derived2, &zeros);
+    let c_app_secret = derive_secret_for(cipher, &master_secret, b"c ap traffic", &server_fin_hash);
+    let s_app_secret = derive_secret_for(cipher, &master_secret, b"s ap traffic", &server_fin_hash);
 
     // Send client ChangeCipherSpec + Finished
-    let c_fin_key = hkdf_expand_label(&c_hs_secret, b"finished", &[], 32);
-    let mut c_mac = <Hmac<Sha256> as Mac>::new_from_slice(&c_fin_key).expect("hmac key");
-    c_mac.update(&server_fin_hash);
-    let verify_data = c_mac.finalize().into_bytes();
-    let mut fin_msg = Vec::with_capacity(4 + 32);
-    fin_msg.extend_from_slice(&[0x14, 0x00, 0x00, 0x20]);
+    let c_fin_key =
+        hkdf_expand_label_for(cipher, &c_hs_secret, b"finished", &[], cipher.hash_len());
+    let verify_data = hmac_sign_for(cipher, &c_fin_key, &server_fin_hash);
+    let mut fin_msg = Vec::with_capacity(4 + verify_data.len());
+    fin_msg.extend_from_slice(&[0x14, 0x00, 0x00, verify_data.len() as u8]);
     fin_msg.extend_from_slice(&verify_data);
     let fin_rec = c_hs_keys.seal_record(0x16, &fin_msg)?;
 
