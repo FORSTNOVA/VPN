@@ -24,6 +24,7 @@ static jmethodID g_open = NULL;
 static jmethodID g_protect = NULL;
 static jmethodID g_drop_tunnel = NULL;
 static jmethodID g_describe_tunnel = NULL;
+static jmethodID g_resolve_owner_package = NULL;
 
 JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
     (void)reserved;
@@ -63,7 +64,7 @@ static void clear_exception(JNIEnv *env) {
 }
 
 /*
- * smartvpn_bridge_init caches the class the callbacks live on and the three
+ * smartvpn_bridge_init caches the class the callbacks live on and the
  * methods Go calls. It runs on a Java thread, which is the only place FindClass
  * is reliable: on a thread the runtime created itself, the application class
  * loader is not the one in effect.
@@ -79,21 +80,27 @@ int smartvpn_bridge_init(const char *className) {
         clear_exception(env);
         return -1;
     }
+    if (g_bridge != NULL) {
+        int same = (*env)->IsSameObject(env, g_bridge, local);
+        (*env)->DeleteLocalRef(env, local);
+        return same ? 0 : -1;
+    }
+    // Stop on the first failed lookup: a pending exception precludes looking
+    // up another method. Publish the class only after all callbacks exist.
+    if (!(g_seal = (*env)->GetStaticMethodID(env, local, "seal", "(Ljava/lang/String;)Ljava/lang/String;")) ||
+        !(g_open = (*env)->GetStaticMethodID(env, local, "open", "(Ljava/lang/String;)Ljava/lang/String;")) ||
+        !(g_protect = (*env)->GetStaticMethodID(env, local, "protect", "(I)Z")) ||
+        !(g_drop_tunnel = (*env)->GetStaticMethodID(env, local, "dropTunnel", "()V")) ||
+        !(g_describe_tunnel = (*env)->GetStaticMethodID(env, local, "describeTunnelNow", "()Ljava/lang/String;")) ||
+        !(g_resolve_owner_package = (*env)->GetStaticMethodID(env, local, "resolveOwnerPackage",
+            "(ILjava/lang/String;ILjava/lang/String;I)Ljava/lang/String;"))) {
+        clear_exception(env);
+        (*env)->DeleteLocalRef(env, local);
+        return -1;
+    }
     g_bridge = (jclass)(*env)->NewGlobalRef(env, local);
     (*env)->DeleteLocalRef(env, local);
     if (g_bridge == NULL) {
-        return -1;
-    }
-    g_seal = (*env)->GetStaticMethodID(env, g_bridge, "seal",
-                                       "(Ljava/lang/String;)Ljava/lang/String;");
-    g_open = (*env)->GetStaticMethodID(env, g_bridge, "open",
-                                       "(Ljava/lang/String;)Ljava/lang/String;");
-    g_protect = (*env)->GetStaticMethodID(env, g_bridge, "protect", "(I)Z");
-    g_drop_tunnel = (*env)->GetStaticMethodID(env, g_bridge, "dropTunnel", "()V");
-    g_describe_tunnel = (*env)->GetStaticMethodID(env, g_bridge, "describeTunnelNow",
-                                                  "()Ljava/lang/String;");
-    if (g_seal == NULL || g_open == NULL || g_protect == NULL || g_drop_tunnel == NULL ||
-        g_describe_tunnel == NULL) {
         clear_exception(env);
         return -1;
     }
@@ -129,6 +136,33 @@ int smartvpn_protect(int fd) {
         return -1;
     }
     return protected == JNI_TRUE ? 0 : -1;
+}
+
+char *smartvpn_resolve_owner_package(int protocol, const char *src_ip, int src_port,
+                                     const char *dst_ip, int dst_port) {
+    int attached = 0;
+    JNIEnv *env = attach(&attached);
+    if (env == NULL || g_bridge == NULL) {
+        return NULL;
+    }
+    if ((*env)->PushLocalFrame(env, 3) < 0) {
+        clear_exception(env);
+        return NULL;
+    }
+    char *package = NULL;
+    jstring src = (*env)->NewStringUTF(env, src_ip);
+    if (src == NULL) goto done;
+    jstring dst = (*env)->NewStringUTF(env, dst_ip);
+    if (dst == NULL) goto done;
+    jstring result = (jstring)(*env)->CallStaticObjectMethod(env, g_bridge, g_resolve_owner_package,
+        (jint)protocol, src, (jint)src_port, dst, (jint)dst_port);
+    if (!(*env)->ExceptionCheck(env)) {
+        package = copy_string(env, result);
+    }
+done:
+    clear_exception(env);
+    (*env)->PopLocalFrame(env, NULL);
+    return package;
 }
 
 static char *call_string_method(jmethodID method, const char *value) {

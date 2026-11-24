@@ -11,6 +11,8 @@ package main
 // so the kernel's own connections do not re-enter the tunnel they carry.
 int smartvpn_bridge_init(const char *className);
 int smartvpn_protect(int fd);
+char *smartvpn_resolve_owner_package(int protocol, const char *src_ip, int src_port,
+                                     const char *dst_ip, int dst_port);
 char *smartvpn_seal(const char *plain);
 char *smartvpn_open(const char *sealed);
 void smartvpn_drop_tunnel(void);
@@ -21,7 +23,9 @@ import "C"
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
+	"net/netip"
 	"path/filepath"
 	"syscall"
 	"unsafe"
@@ -141,6 +145,23 @@ func jniSeal(plain string) (string, error) {
 
 func jniOpen(sealed string) (string, error) {
 	return jniStringCall(sealed, func(value *C.char) *C.char { return C.smartvpn_open(value) })
+}
+
+func jniResolveOwnerPackage(protocol int, src, dst netip.AddrPort) (string, error) {
+	srcIP := C.CString(src.Addr().String())
+	defer C.free(unsafe.Pointer(srcIP))
+	dstIP := C.CString(dst.Addr().String())
+	defer C.free(unsafe.Pointer(dstIP))
+	result := C.smartvpn_resolve_owner_package(C.int(protocol), srcIP, C.int(src.Port()), dstIP, C.int(dst.Port()))
+	if result == nil {
+		return "", fmt.Errorf("resolveOwnerPackage JNI call failed for protocol %d %s -> %s", protocol, src, dst)
+	}
+	defer C.free(unsafe.Pointer(result))
+	pkg := C.GoString(result)
+	if pkg == "" {
+		return "", fmt.Errorf("no Android owner package for protocol %d %s -> %s", protocol, src, dst)
+	}
+	return pkg, nil
 }
 
 func jniStringCall(input string, call func(*C.char) *C.char) (string, error) {

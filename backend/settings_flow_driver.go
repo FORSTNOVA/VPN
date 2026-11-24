@@ -47,6 +47,9 @@ func settingsFlowEnsure(s settingsServiceState) bool {
 func prepareSettingsFlow(s settingsServiceState, r settingsServiceRequest) settingsFlowPlan {
 	p := r.Patch
 	f := settingsFlowPlan{next: s.Settings}
+	if p.AppGroups != nil {
+		f.next.AppGroups = p.AppGroups
+	}
 	mark := func(bit uint) { f.presence |= 1 << bit }
 	invalid := func(bit uint) { f.invalid |= 1 << bit }
 	value := func(p *bool) bool { return p != nil && *p }

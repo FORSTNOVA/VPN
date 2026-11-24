@@ -7,6 +7,7 @@ import (
 
 // Control values only. Chain and named-profile resource graphs remain in Go.
 type serviceControlState struct {
+	AppGroups           appGroups `json:"appGroups"`
 	ImportPolicy        bool
 	GameBypass          []string
 	DomesticWeb         bool
@@ -124,11 +125,12 @@ func applyServiceControl(s *serviceControlState, c serviceControlCommand) error 
 }
 
 func controlFromSettings(v settings) serviceControlState {
-	return serviceControlState{ImportPolicy: v.ImportPolicy, GameBypass: v.GameBypass, DomesticWeb: v.DomesticWeb, WebRTCProtection: v.WebRTCProtection, DNSProtection: v.DNSProtection, SubscriptionURL: v.SubscriptionURL, MihomoPath: v.MihomoPath, SelectedNode: v.SelectedNode, SelectionMode: v.SelectionMode, LockedRegion: v.LockedRegion, LockedNode: v.LockedNode, ConnectionMode: v.ConnectionMode, StrictPrivacy: v.StrictPrivacy, WintunPath: v.WintunPath, AutoMergeHours: v.AutoMergeHours, SocksPort: v.SocksPort}
+	return serviceControlState{AppGroups: v.AppGroups, ImportPolicy: v.ImportPolicy, GameBypass: v.GameBypass, DomesticWeb: v.DomesticWeb, WebRTCProtection: v.WebRTCProtection, DNSProtection: v.DNSProtection, SubscriptionURL: v.SubscriptionURL, MihomoPath: v.MihomoPath, SelectedNode: v.SelectedNode, SelectionMode: v.SelectionMode, LockedRegion: v.LockedRegion, LockedNode: v.LockedNode, ConnectionMode: v.ConnectionMode, StrictPrivacy: v.StrictPrivacy, WintunPath: v.WintunPath, AutoMergeHours: v.AutoMergeHours, SocksPort: v.SocksPort}
 }
 func settingsFromControl(v serviceControlState) settings {
 	var out settings
 	out.ImportPolicy = v.ImportPolicy
+	out.AppGroups = v.AppGroups
 	out.GameBypass = v.GameBypass
 	out.DomesticWeb = v.DomesticWeb
 	out.WebRTCProtection = v.WebRTCProtection
@@ -159,6 +161,7 @@ func (a *app) controlLocked() serviceControlState {
 	if e != nil {
 		panic(e)
 	}
+	v.AppGroups = a.appGroups.clone()
 	return v
 }
 func (a *app) settingsLocked() settings {
@@ -191,6 +194,7 @@ func (a *app) restoreDecodedControlLocked(v settings) {
 	if e = a.serviceStateLocked().mutate(serviceStateCommand{Kind: 5, ControlPayload: p}); e != nil {
 		panic(e)
 	}
+	a.appGroups = v.AppGroups.clone()
 }
 func (a *app) applySettingsControlDiffLocked(before, after settings) {
 	a.applySettingsControlPatchLocked(before, after, 0, "", "")
@@ -248,6 +252,9 @@ func (a *app) applySettingsControlPatchLocked(before, after settings, mask uint6
 	v.RuntimeLockedRegion = runtimeRegion
 	v.RuntimeLockedNode = runtimeNode
 	a.patchControlLocked(mask, v)
+	if !reflect.DeepEqual(before.AppGroups, after.AppGroups) {
+		a.appGroups = after.AppGroups.clone()
+	}
 }
 func (a *app) applyRuntimePinsDiffLocked(br, bn, ar, an string) {
 	var mask uint64

@@ -25,10 +25,11 @@ import (
 )
 
 type trafficPolicy struct {
-	GameBypass       []string `json:"gameBypass,omitempty"`
-	DomesticWeb      bool     `json:"domesticWeb"`
-	WebRTCProtection bool     `json:"webRTCProtection"`
-	DNSProtection    bool     `json:"dnsProtection"`
+	AppGroups        appGroups `json:"appGroups"`
+	GameBypass       []string  `json:"gameBypass,omitempty"`
+	DomesticWeb      bool      `json:"domesticWeb"`
+	WebRTCProtection bool      `json:"webRTCProtection"`
+	DNSProtection    bool      `json:"dnsProtection"`
 }
 
 func (p trafficPolicy) active() bool {
@@ -90,6 +91,8 @@ const (
 )
 
 type app struct {
+	// Variable-length application rules are Go-owned alongside the chain graph.
+	appGroups       appGroups
 	policyPreview   policyPreviewCache
 	mu              sync.Mutex
 	home            string
@@ -338,6 +341,7 @@ func (a *app) reapplyProxy(w http.ResponseWriter, _ *http.Request) {
 // page shows are accepted here; the selection, the region lock and the path
 // monitor are owned by their own routes and cannot be changed through this one.
 type settingsPatch struct {
+	AppGroups        appGroups `json:"appGroups"`
 	ImportPolicy     *bool     `json:"importPolicy"`
 	SocksPort        *int      `json:"socksPort"`
 	GameBypass       *[]string `json:"gameBypass"`
@@ -747,6 +751,7 @@ func clashRSFilename(path string) bool {
 }
 
 type configOptions struct {
+	appRoutes        appRouting
 	ClashRS          bool
 	dnsRelayAddr     string
 	SourceRuleOrder  bool
@@ -847,7 +852,11 @@ func generatedConfigGo(options configOptions) string {
 	} else if len(options.EntryDNS) > 0 {
 		config.WriteString("dns:\n  enable: true\n" + dnsUpstreamsGo(false, false, "") + entryDNSSection(options.EntryDNS))
 	}
-	config.Write(options.ChainProxies)
+	if len(options.appRoutes.inlineProxies) > 0 {
+		config.Write(options.appRoutes.inlineProxies)
+	} else {
+		config.Write(options.ChainProxies)
+	}
 	config.WriteString("proxy-providers:\n")
 	providers := make([]string, 0, 2)
 	if options.SubscriptionProvider {
@@ -876,6 +885,7 @@ func generatedConfigGo(options configOptions) string {
 		fmt.Fprintf(&config, "  - name: SmartVPNFallback\n    type: fallback\n    use:%s\n    url: https://www.youtube.com/generate_204\n    interval: %d\n", uses.String(), testIntervalSec)
 		fmt.Fprintf(&config, "  - name: SmartVPN\n    type: select\n    use:%s\n    proxies:\n      - SmartVPNAuto\n      - SmartVPNFallback\n      - REJECT\n", uses.String())
 	}
+	config.WriteString(options.appRoutes.groups)
 	privateTUN := options.TUN && options.active()
 	if options.ChinaDirect && (!privateTUN || options.DomesticWeb) {
 		config.WriteString("rule-providers:\n")
@@ -895,13 +905,29 @@ func generatedConfigGo(options configOptions) string {
 	if options.ClashRS && options.TUN && options.WebRTCProtection {
 		config.WriteString("  - NETWORK,udp,REJECT\n")
 	}
-	if options.TUN && findProcessMode == "always" {
+	if len(options.appRoutes.rules) > 0 && options.TUN {
+		if options.DNSProtection {
+			config.WriteString("  - DST-PORT,53,REJECT\n")
+			writeAppDNSGuards(&config)
+		}
+		if options.WebRTCProtection {
+			config.WriteString("  - AND,((NETWORK,tcp),(DST-PORT,3478/5349/19302)),SmartVPN\n")
+			if options.DomesticWeb && options.ChinaDirect {
+				for _, domain := range coreDirectDomesticDomains {
+					fmt.Fprintf(&config, "  - %s\n", strconv.Quote("AND,((NETWORK,udp),(DST-PORT,443),(DOMAIN-SUFFIX,"+domain+")),REJECT"))
+				}
+				writeDomesticQUICGuard(&config)
+			}
+		}
+	}
+	if options.TUN && runtime.GOOS == "windows" {
 		for _, name := range options.GameBypass {
 			if rule := windowsGameRule(name); rule != "" {
 				fmt.Fprintf(&config, "  - %s\n", strconv.Quote(rule))
 			}
 		}
 	}
+	config.WriteString(options.appRoutes.rules)
 	decided, proxied := splitRulesByTarget(options.Rules)
 	if privateTUN {
 		// Retain explicit blocks. Even if the selected node skips UDP rules,
@@ -1028,19 +1054,38 @@ func writeChinaDirectRules(config *strings.Builder) {
 	fmt.Fprintf(config, "  - %s\n", strconv.Quote(chinaDirectRule))
 }
 
+func writeAppDNSGuards(config *strings.Builder) {
+	add := func(rule string) { fmt.Fprintf(config, "  - %s\n", strconv.Quote(rule)) }
+	add("AND,((NETWORK,tcp),(DST-PORT,53/853)),SmartVPN")
+	// Common domestic encrypted resolvers also accept HTTPS on port 443.
+	for _, domain := range []string{"dns.alidns.com", "doh.pub"} {
+		add("DOMAIN-SUFFIX," + domain + ",SmartVPN")
+	}
+	for _, address := range []string{"223.5.5.5", "223.6.6.6", "120.53.53.53", "1.12.12.12"} {
+		add("IP-CIDR," + address + "/32,SmartVPN,no-resolve")
+	}
+}
+
+func writeDomesticQUICGuard(config *strings.Builder) {
+	add := func(rule string) { fmt.Fprintf(config, "  - %s\n", strconv.Quote(rule)) }
+	// Only browsers should retry domestic HTTP/3 over TCP on Windows. A game can
+	// also use UDP:443 and must still be able to reach its UDP-capable node.
+	// On Android, bypassed games are already excluded at VpnService UID level.
+
+	if runtime.GOOS == "windows" {
+		add("AND,((NETWORK,udp),(DST-PORT,443),(OR,((PROCESS-NAME,chrome.exe),(PROCESS-NAME,msedge.exe),(PROCESS-NAME,firefox.exe),(PROCESS-NAME,brave.exe),(PROCESS-NAME,opera.exe),(PROCESS-NAME,vivaldi.exe),(PROCESS-NAME,arc.exe))),(RULE-SET," + chinaProviderName + ")),REJECT")
+	} else if runtime.GOOS == "android" {
+		add("AND,((NETWORK,udp),(DST-PORT,443),(RULE-SET," + chinaProviderName + ")),REJECT")
+	}
+
+}
+
 func writeDomesticTCPRulesGo(config *strings.Builder, options configOptions) {
 	add := func(rule string) { fmt.Fprintf(config, "  - %s\n", strconv.Quote(rule)) }
-	if options.DNSProtection {
-		add("AND,((NETWORK,tcp),(DST-PORT,53/853)),SmartVPN")
-		// Common domestic encrypted resolvers also accept HTTPS on port 443.
-		for _, domain := range []string{"dns.alidns.com", "doh.pub"} {
-			add("DOMAIN-SUFFIX," + domain + ",SmartVPN")
-		}
-		for _, address := range []string{"223.5.5.5", "223.6.6.6", "120.53.53.53", "1.12.12.12"} {
-			add("IP-CIDR," + address + "/32,SmartVPN,no-resolve")
-		}
+	if options.DNSProtection && len(options.appRoutes.rules) == 0 {
+		writeAppDNSGuards(config)
 	}
-	if options.WebRTCProtection {
+	if options.WebRTCProtection && len(options.appRoutes.rules) == 0 {
 		add("AND,((NETWORK,tcp),(DST-PORT,3478/5349/19302)),SmartVPN")
 	}
 	// Core domestic domains resolve via domestic DNS and stay DIRECT on TCP
@@ -1048,7 +1093,7 @@ func writeDomesticTCPRulesGo(config *strings.Builder, options configOptions) {
 	// resolve to overseas edges (e.g. hdslb.com, bilivideo.com) are left to
 	// the china-ip RULE-SET below.
 	for _, domain := range coreDirectDomesticDomains {
-		if options.WebRTCProtection && (findProcessMode == "always" || runtime.GOOS == "android") {
+		if options.WebRTCProtection && options.appRoutes.rules == "" {
 			add("AND,((NETWORK,udp),(DST-PORT,443),(DOMAIN-SUFFIX," + domain + ")),REJECT")
 		}
 		add("AND,((NETWORK,tcp),(DOMAIN-SUFFIX," + domain + ")),DIRECT")
@@ -1060,15 +1105,8 @@ func writeDomesticTCPRulesGo(config *strings.Builder, options configOptions) {
 			add(tcpRule)
 		}
 	}
-	// Only browsers should retry domestic HTTP/3 over TCP on Windows. A game can
-	// also use UDP:443 and must still be able to reach its UDP-capable node.
-	// On Android, bypassed games are already excluded at VpnService UID level.
-	if options.WebRTCProtection {
-		if findProcessMode == "always" {
-			add("AND,((NETWORK,udp),(DST-PORT,443),(OR,((PROCESS-NAME,chrome.exe),(PROCESS-NAME,msedge.exe),(PROCESS-NAME,firefox.exe),(PROCESS-NAME,brave.exe),(PROCESS-NAME,opera.exe),(PROCESS-NAME,vivaldi.exe),(PROCESS-NAME,arc.exe))),(RULE-SET," + chinaProviderName + ")),REJECT")
-		} else if runtime.GOOS == "android" {
-			add("AND,((NETWORK,udp),(DST-PORT,443),(RULE-SET," + chinaProviderName + ")),REJECT")
-		}
+	if options.WebRTCProtection && options.appRoutes.rules == "" {
+		writeDomesticQUICGuard(config)
 	}
 	add("AND,((NETWORK,tcp),(RULE-SET," + chinaProviderName + ")),DIRECT")
 }

@@ -10,6 +10,9 @@ import (
 func runGoSettingsService(state *settingsServiceState, request settingsServiceRequest, effects settingsServiceEffects) settingsServiceResult {
 	patch := request.Patch
 	next := state.Settings
+	if patch.AppGroups != nil {
+		next.AppGroups = patch.AppGroups
+	}
 	if patch.ImportPolicy != nil {
 		if effects.KernelRunning() {
 			return settingsServiceResult{Status: 409, Message: "请先断开连接再更改订阅分流"}

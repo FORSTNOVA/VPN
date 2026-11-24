@@ -7,8 +7,12 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/netip"
 	"sync"
 	"syscall"
+
+	"github.com/metacubex/mihomo/component/process"
+	"github.com/metacubex/mihomo/constant"
 )
 
 // The Android tunnel is not something this service creates. The system gives it
@@ -141,11 +145,35 @@ func tunConfigSectionGo(_ bool) string {
 // resolver directly, without a listening socket in between.
 const dnsListenLine = ""
 
-// findProcessMode is off, because the answer is not there to be had: since
-// Android 10 an app cannot read another app's command line, so every lookup
-// would fail and cost a table read per connection for nothing. The connection
-// list on this platform shows addresses and rules instead of process names.
-const findProcessMode = "off"
+const findProcessMode = "always"
+
+func init() {
+	process.DefaultPackageNameResolver = resolveAndroidPackage
+}
+
+func resolveAndroidPackage(metadata *constant.Metadata) (string, error) {
+	var protocol int
+	switch metadata.NetWork {
+	case constant.TCP:
+		protocol = syscall.IPPROTO_TCP
+	case constant.UDP:
+		protocol = syscall.IPPROTO_UDP
+	default:
+		return "", fmt.Errorf("unsupported Android owner lookup network %d", metadata.NetWork)
+	}
+	src, dst := metadata.SourceAddrPort(), metadata.AddrPort()
+	// The TUN listener retains the socket destination before DNS and sniffing
+	// can change the routing destination.
+	if metadata.Type == constant.TUN {
+		if raw, ok := metadata.RawDstAddr.(interface{ AddrPort() netip.AddrPort }); ok {
+			dst = raw.AddrPort()
+		}
+	}
+	if !src.IsValid() || !dst.IsValid() || src.Port() == 0 || dst.Port() == 0 {
+		return "", fmt.Errorf("incomplete Android owner lookup endpoints %s -> %s", src, dst)
+	}
+	return jniResolveOwnerPackage(protocol, src, dst)
+}
 
 func (a *app) tunStatus(w http.ResponseWriter, _ *http.Request) {
 	a.runTunReportHTTP(w, tunReportRequest{Op: "android-status"})

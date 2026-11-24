@@ -88,6 +88,7 @@ type settingsControlBaseline struct {
 }
 
 func detachedControlSettings(s settings) settings {
+	s.AppGroups = s.AppGroups.clone()
 	s.Chain = proxyChain{}
 	s.Chains = nil
 	if s.GameBypass != nil {

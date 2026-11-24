@@ -60,6 +60,7 @@ func subscriptionCloneValue(v reflect.Value) reflect.Value {
 }
 func subscriptionCloneState(s subscriptionServiceState) subscriptionServiceState {
 	o := subscriptionCloneValue(reflect.ValueOf(s)).Interface().(subscriptionServiceState)
+	o.Settings.AppGroups = s.Settings.AppGroups.clone()
 	if s.Settings.GameBypass != nil {
 		o.Settings.GameBypass = append([]string{}, s.Settings.GameBypass...)
 	}
@@ -124,6 +125,7 @@ func subscriptionCloneResourceValue(v reflect.Value) reflect.Value {
 }
 func subscriptionCloneResourceState(s subscriptionServiceState) subscriptionServiceState {
 	o := subscriptionCloneResourceValue(reflect.ValueOf(s)).Interface().(subscriptionServiceState)
+	o.Settings.AppGroups = s.Settings.AppGroups.clone()
 	if s.Settings.GameBypass != nil {
 		o.Settings.GameBypass = append([]string{}, s.Settings.GameBypass...)
 	}

@@ -105,6 +105,9 @@ func rustConfig(op uintptr, o configOptions, android bool, filters []string) (st
 	return "", false
 }
 func generatedConfig(o configOptions) string {
+	if o.appRoutes.rules != "" {
+		return generatedConfigGo(o)
+	}
 	if s, ok := rustConfig(0, o, runtime.GOOS == "android", o.ProxyServerDomains); ok {
 		return s
 	}
