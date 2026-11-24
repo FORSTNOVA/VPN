@@ -51,7 +51,10 @@ def verify(path, abi):
         else:
             required = {"smartvpn_windows.exe", "flutter_windows.dll", "data/app.so","data/icudtl.dat","portable.txt","LICENSES/Apache-2.0-clash-rs.txt","README-rust-pure.txt","smartvpn-service-current.exe"}
             assert required <= set(names), required - set(names)
-            assert set(native) == {"smartvpn_windows.exe", "flutter_windows.dll", "smartvpn-service-current.exe", "data/app.so"}
+            assert set(native) == {"smartvpn_windows.exe", "flutter_windows.dll", "smartvpn-service-current.exe", "wintun.dll", "data/app.so"}
+            wintun_hash = hashlib.sha256(z.read(members["wintun.dll"])).hexdigest()
+            assert wintun_hash == "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce", wintun_hash
+            print(f"wintun.dll (x64 0.14.1) SHA-256 {wintun_hash}")
             assert z.read(members["LICENSES/Apache-2.0-clash-rs.txt"]) == (ROOT / "vendor/clash-rs/LICENSE").read_bytes()
             exe = Path(work, "smartvpn-service-current.exe")
             exe.write_bytes(z.read(members[exe.name]))

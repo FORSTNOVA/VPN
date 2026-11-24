@@ -38,10 +38,11 @@ foreach ($name in 'smartvpn_windows.exe','flutter_windows.dll','data'){
     Copy-Item -LiteralPath "$release/$name" -Destination $stage -Recurse
 }
 Copy-Item "$PSScriptRoot/dist/windows-x64/smartvpn-rust-service.exe" "$stage/smartvpn-service-current.exe"
+Copy-Item -LiteralPath "$repo/.tools/gopath/pkg/mod/github.com/metacubex/sing-tun@v0.4.24/internal/wintun/amd64/wintun.dll" -Destination "$stage/wintun.dll"
 New-Item -ItemType Directory "$stage/LICENSES" | Out-Null
 Copy-Item "$PSScriptRoot/vendor/clash-rs/LICENSE" "$stage/LICENSES/Apache-2.0-clash-rs.txt"
 New-Item -ItemType File "$stage/portable.txt" | Out-Null
-Set-Content "$stage/README-rust-pure.txt" 'Extract the entire ZIP and run smartvpn_windows.exe. Local settings are stored in SmartVPN-data/smartvpn.db. The service listens on loopback and starts its embedded clash-rs kernel on connect. Windows system proxy and TUN configuration are managed externally.'
+Set-Content "$stage/README-rust-pure.txt" 'Extract the entire ZIP and run smartvpn_windows.exe. Local settings are stored in SmartVPN-data/smartvpn.db. The service listens on loopback and starts its embedded clash-rs kernel on connect. Run the client as administrator to use Windows TUN mode with the bundled x64 wintun.dll.'
 $version=(Get-Content "$PSScriptRoot/VERSION").Split('+')[0]
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip="$($stage.FullName).zip"

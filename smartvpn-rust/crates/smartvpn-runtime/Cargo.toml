@@ -23,6 +23,9 @@ sha2 = "0.10"
 tempfile = "3"
 
 clash-lib = { path = "../../vendor/clash-rs/clash-lib", default-features = false, features = ["ring", "shadowsocks", "tuic", "wireguard", "ssh"] }
+[target.'cfg(windows)'.dependencies]
+clash-lib = { path = "../../vendor/clash-rs/clash-lib", default-features = false, features = ["tun"] }
+
 [target.'cfg(target_os = "android")'.dependencies]
 hickory-proto = "0.26"
 

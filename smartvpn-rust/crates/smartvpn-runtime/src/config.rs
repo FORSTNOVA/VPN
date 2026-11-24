@@ -63,11 +63,15 @@ fn deserialize_groups<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<AppG
 pub struct Connect {
     pub directory: PathBuf,
     pub config: Profile,
+    #[cfg(windows)]
+    pub wintun_path: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Profile {
+    #[serde(default)]
+    pub tun: bool,
     #[serde(default, deserialize_with = "deserialize_groups")]
     pub app_groups: Vec<AppGroup>,
     // Names of the catalog nodes supplied separately to TunnelDataPlane::connect.
@@ -462,7 +466,7 @@ impl Profile {
             "default-nameserver":["223.5.5.5","119.29.29.29"],
             "proxy-server-nameserver":["223.5.5.5","119.29.29.29","https://223.5.5.5/dns-query"],
             "nameserver":["https://1.1.1.1/dns-query#SmartVPN","https://8.8.8.8/dns-query#SmartVPN"]});
-        if android {
+        if android || self.tun {
             cfg["dns"]["enhanced-mode"] = json!("fake-ip");
             cfg["dns"]["fake-ip-range"] = json!("198.18.0.1/16");
             cfg["dns"]["fake-ip-filter"] = json!([
@@ -528,9 +532,18 @@ mod tests {
                 {"id":"3","name":"Block","apps":["blocked.exe"],"targetType":"reject","enabled":true},
                 {"id":"4","name":"Disabled","apps":["off.exe"],"targetType":"node","targetNode":"obsolete","enabled":false},
                 {"id":"5","name":"Empty","apps":[],"targetType":"node","targetNode":"obsolete","enabled":true}]});
-        let profile: Profile = serde_json::from_value(input.clone()).unwrap();
-        for android in [true, false] {
+        for (android, tun) in [(true, false), (false, false), (false, true)] {
+            input["tun"] = json!(tun);
+            let profile: Profile = serde_json::from_value(input.clone()).unwrap();
             let mut cfg = profile.generate_for("secret", android).unwrap();
+            assert_eq!(
+                cfg["dns"]["enhanced-mode"],
+                if android || tun {
+                    "fake-ip"
+                } else {
+                    "redir-host"
+                }
+            );
             cfg["proxies"] = json!(profile
                 .stored_node_names
                 .iter()
@@ -614,7 +627,7 @@ mod tests {
             .unwrap()
             .generate("secret")
             .is_err());
-        input["tun"] = json!(true);
+        input["tun"] = json!("true");
         assert!(serde_json::from_value::<Profile>(input).is_err());
     }
 }

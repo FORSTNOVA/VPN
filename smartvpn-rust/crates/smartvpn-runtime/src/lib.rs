@@ -460,6 +460,96 @@ fn active_node_label(
     ))
 }
 
+#[cfg(windows)]
+fn wintun_status(custom: &str, bundled: &Path, data_dir: &Path) -> Result<Value> {
+    use sha2::{Digest, Sha256};
+    let data_path = data_dir.join("wintun.dll");
+    let candidates = if custom.is_empty() {
+        vec![bundled, data_path.as_path()]
+    } else {
+        vec![Path::new(custom)]
+    };
+    let missing = |path: &Path, detail: String| {
+        json!({
+            "installed":false, "path":path, "version":"", "sha256":"", "detail":detail
+        })
+    };
+    for path in &candidates {
+        let metadata = match std::fs::metadata(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            result => result.with_context(|| format!("检查 {}", path.display()))?,
+        };
+        if !metadata.is_file() {
+            return Ok(missing(path, format!("{} 不是文件", path.display())));
+        }
+        let bytes = std::fs::read(path).with_context(|| format!("读取 {}", path.display()))?;
+        let pe = bytes
+            .get(60..64)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize);
+        if !bytes.starts_with(b"MZ")
+            || !pe.is_some_and(|p| bytes.get(p..p + 6) == Some(b"PE\0\0\x64\x86"))
+            || !bytes
+                .windows(b"WintunCreateAdapter".len())
+                .any(|w| w == b"WintunCreateAdapter")
+            || !path
+                .file_name()
+                .is_some_and(|n| n.eq_ignore_ascii_case("wintun.dll"))
+        {
+            return Ok(missing(
+                path,
+                format!("{} 不是有效的 x64 wintun.dll", path.display()),
+            ));
+        }
+        let hash = format!("{:x}", Sha256::digest(&bytes));
+        let version = if hash == "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce"
+        {
+            "0.14.1".to_owned()
+        } else {
+            format!("sha256:{}", &hash[..12])
+        };
+        return Ok(
+            json!({"installed":true,"path":std::path::absolute(path)?,"sha256":hash,"version":version,"detail":"已找到 x64 wintun.dll"}),
+        );
+    }
+    Ok(missing(
+        candidates[0],
+        format!(
+            "未找到 wintun.dll（{}）",
+            candidates
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join("、")
+        ),
+    ))
+}
+
+#[cfg(windows)]
+fn windows_tun(settings: &Value, dir: &Path, connected: bool) -> Result<Value> {
+    #[link(name = "shell32")]
+    extern "system" {
+        fn IsUserAnAdmin() -> i32;
+    }
+    let elevated = unsafe { IsUserAnAdmin() != 0 };
+    let bundled = std::env::current_exe()?.with_file_name("wintun.dll");
+    let wintun = wintun_status(settings["wintunPath"].as_str().unwrap(), &bundled, dir)?;
+    let installed = wintun["installed"] == true;
+    let mut reasons = Vec::new();
+    if !elevated {
+        reasons.push("需要以管理员身份运行 SmartVPN");
+    }
+    if !installed {
+        reasons.push(wintun["detail"].as_str().unwrap());
+    }
+    Ok(
+        json!({"mode":settings["connectionMode"],"active":connected && settings["connectionMode"] == "tun",
+        "available":elevated && installed,"elevated":elevated,"reason":reasons.join("；"),
+        "interface":"SmartVPN","stack":"clash-rs","mtu":65535,"checks":[
+            {"name":"管理员权限","state":if elevated {"ok"} else {"warn"},"detail":if elevated {"已取得管理员权限"} else {"需要管理员权限"}},
+            {"name":"wintun.dll","state":if installed {"ok"} else {"warn"},"detail":wintun["detail"]}],"wintun":wintun}),
+    )
+}
+
 fn route<P: TunnelDataPlane>(
     req: &mut Request,
     auth: &str,
@@ -517,10 +607,20 @@ fn route<P: TunnelDataPlane>(
                 .extend(nodes.as_object().unwrap().clone());
             let status = plane.status()?;
             state["health"] = json!({"params":store.pref("health")?});
-            state["tunAvailable"] = json!(cfg!(target_os = "android"));
+            #[cfg(windows)]
+            {
+                let tun = windows_tun(&settings, &store.dir, status.connected)?;
+                state["elevated"] = tun["elevated"].clone();
+                state["tunAvailable"] = tun["available"].clone();
+                state["tunActive"] = tun["active"].clone();
+            }
+            #[cfg(not(windows))]
+            {
+                state["tunAvailable"] = json!(cfg!(target_os = "android"));
+                state["tunActive"] = json!(status.connected && status.tunnel_authorized);
+            }
             state["chinaDirect"] = store.direct.state(&store.dir, status.connected)?;
             state["lockedRegion"] = store.pref("lockedRegion")?;
-            state["tunActive"] = json!(status.connected && status.tunnel_authorized);
             if let Some(name) = active_node_label(&*plane, store, status.connected)? {
                 state["activeNode"] = json!(name);
             }
@@ -753,8 +853,35 @@ fn route<P: TunnelDataPlane>(
         #[cfg(windows)]
         ("GET", "/api/tun") | ("POST", "/api/tun/check") => json_reply(
             200,
-            json!({"mode":"external","available":false,"active":false,"checks":[{"name":"Windows TUN","state":"unknown","detail":"Managed externally"}]}),
+            windows_tun(&store.settings()?, &store.dir, plane.status()?.connected)?,
         ),
+        #[cfg(windows)]
+        ("POST", "/api/tun/wintun") => {
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Location {
+                #[serde(default)]
+                path: String,
+            }
+            let path = if body.is_empty() {
+                String::new()
+            } else {
+                serde_json::from_slice::<Location>(&body)?.path
+            };
+            let path = path.trim();
+            let bundled = std::env::current_exe()?.with_file_name("wintun.dll");
+            let wintun = wintun_status(path, &bundled, &store.dir)?;
+            if wintun["installed"] != true {
+                return json_reply(400, json!({"error":wintun["detail"]}));
+            }
+            let saved = if path.is_empty() {
+                ""
+            } else {
+                wintun["path"].as_str().unwrap()
+            };
+            store.update(&json!({"wintunPath":saved}))?;
+            json_reply(200, json!({"wintun":wintun}))
+        }
         #[cfg(target_os = "android")]
         ("GET", "/api/tun") | ("POST", "/api/tun/check") => {
             let s = plane.status()?;
@@ -965,6 +1092,21 @@ fn route<P: TunnelDataPlane>(
             json_reply(200, status)
         }
         ("POST", "/api/connect") => {
+            #[cfg(windows)]
+            let wintun = {
+                let settings = store.settings()?;
+                if settings["connectionMode"] == "tun" {
+                    let tun = windows_tun(&settings, &store.dir, false)?;
+                    ensure!(
+                        tun["available"] == true,
+                        "{}",
+                        tun["reason"].as_str().unwrap()
+                    );
+                    Some(tun["wintun"]["path"].clone())
+                } else {
+                    None
+                }
+            };
             let mut auto_switched = false;
             if body.is_empty() {
                 let mut nodes = store.configs()?;
@@ -1049,7 +1191,11 @@ fn route<P: TunnelDataPlane>(
                     "proxyProviders":{},"ruleProviders":providers,"webRtcProtection":settings["webRTCProtection"],"importPolicy":settings["importPolicy"],"subscriptionRuleProviders":catalog.rule_providers,"subscriptionRules":catalog.rules,"domesticDirect":settings["domesticWeb"],"preventDnsLeaks":settings["dnsProtection"]});
                 drop((mixed, ctrl));
                 #[cfg(target_os = "windows")]
-                let profile = json!({"directory":store.dir,"config":profile});
+                let profile = {
+                    let mut config = profile;
+                    config["tun"] = json!(wintun.is_some());
+                    json!({"directory":store.dir,"config":config,"wintunPath":wintun})
+                };
                 store.direct.mounted = if use_downloaded
                     && (settings["domesticWeb"] == true
                         || (settings["dnsProtection"] == false
@@ -1107,13 +1253,22 @@ fn route<P: TunnelDataPlane>(
                         json!({"error":"custom connect profile conflicts with active chain"}),
                     );
                 }
-                let custom: Value = serde_json::from_slice(&body)?;
+                let request: Value = data()?;
+                let custom = &request;
                 #[cfg(target_os = "windows")]
                 let custom = &custom["config"];
                 ensure!(
                     custom.get("storedNodeNames").is_none(),
                     "storedNodeNames is runtime-owned"
                 );
+                #[cfg(windows)]
+                let body = {
+                    let mut request = request;
+                    ensure!(request["config"].is_object(), "expected config object");
+                    request["config"]["tun"] = json!(wintun.is_some());
+                    request["wintunPath"] = json!(wintun);
+                    serde_json::to_vec(&request)?
+                };
                 plane.connect(&body, &[])?;
                 store.direct.mounted = None;
             }
@@ -1151,6 +1306,72 @@ impl TunnelDataPlane for TestPlane {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test]
+    fn windows_tun_api_resolves_persists_and_rejects_missing_driver() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let data_dll = dir.path().join("wintun.dll");
+        let source = Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../../.tools/gopath/pkg/mod/github.com/metacubex/sing-tun@v0.4.24/internal/wintun/amd64/wintun.dll");
+        std::fs::copy(&source, &data_dll)?;
+        let absent = dir.path().join("missing/wintun.dll");
+        assert_eq!(
+            wintun_status("", &absent, dir.path())?["path"],
+            json!(data_dll)
+        );
+        assert_eq!(
+            wintun_status("", &source, dir.path())?["path"],
+            json!(std::path::absolute(&source)?)
+        );
+        assert_eq!(
+            wintun_status(absent.to_str().unwrap(), &source, dir.path())?["installed"],
+            false
+        );
+        let runtime = Runtime::start(Arc::new(Mutex::new(TestPlane)), dir.path())?;
+        let api = |method, path| {
+            http::agent()
+                .request(
+                    method,
+                    &format!("http://{}/api/{path}", runtime.bootstrap.address),
+                )
+                .set(
+                    "Authorization",
+                    &format!("Bearer {}", runtime.bootstrap.token),
+                )
+        };
+        let installed: Value = api("POST", "tun/wintun")
+            .send_json(json!({"path":data_dll}))?
+            .into_json()?;
+        assert_eq!(installed["wintun"]["version"], "0.14.1");
+        assert_eq!(
+            installed["wintun"]["sha256"],
+            "e5da8447dc2c320edc0fc52fa01885c103de8c118481f683643cacc3220dafce"
+        );
+        assert!(matches!(
+            api("POST", "tun/wintun").send_json(json!({"path":absent})),
+            Err(ureq::Error::Status(400, _))
+        ));
+        let tun: Value = api("GET", "tun").call()?.into_json()?;
+        assert_eq!(tun["wintun"], installed["wintun"]);
+        assert_eq!(tun["available"], tun["elevated"]);
+        assert_eq!(tun["active"], false);
+        assert_eq!(tun, api("POST", "tun/check").call()?.into_json::<Value>()?);
+        let state: Value = api("GET", "state").call()?.into_json()?;
+        assert_eq!(state["tunAvailable"], tun["available"]);
+        assert_eq!(state["tunActive"], tun["active"]);
+        api("PUT", "settings").send_json(json!({"connectionMode":"tun","wintunPath":absent}))?;
+        let Err(ureq::Error::Status(400, response)) = api("POST", "connect").call() else {
+            panic!("expected missing driver to block connect");
+        };
+        assert!(response.into_json::<Value>()?["error"]
+            .as_str()
+            .unwrap()
+            .contains("未找到 wintun.dll"));
+        api("POST", "tun/wintun").call()?;
+        let state: Value = api("GET", "state").call()?.into_json()?;
+        assert_eq!(state["settings"]["wintunPath"], "");
+        runtime.stop()
+    }
     struct OnlinePlane(Controller);
     impl TunnelDataPlane for OnlinePlane {
         fn status(&mut self) -> Result<PlaneStatus> {
