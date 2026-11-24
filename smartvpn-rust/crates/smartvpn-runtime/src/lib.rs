@@ -541,6 +541,9 @@ fn route<P: TunnelDataPlane>(
             let patch = data()?;
             if plane.status()?.connected {
                 let settings = store.settings()?;
+                if patch.get("appGroups").is_some() {
+                    return json_reply(409, json!({"error":"请断开连接后再修改软件分流分组"}));
+                }
                 let changes_runtime = patch
                     .as_object()
                     .context("expected settings object")?
@@ -972,12 +975,33 @@ fn route<P: TunnelDataPlane>(
                 let settings = store.settings()?;
                 let selected = store.selected()?;
                 let chain = store.chain()?;
+                let mut group_nodes = Vec::new();
                 let mut choices: Vec<_> = nodes
                     .iter()
                     .map(|n| n["name"].as_str().unwrap().to_owned())
                     .collect();
                 if chain["enabled"] == true {
                     let hops: Vec<String> = serde_json::from_value(chain["hops"].clone())?;
+                    let targets: std::collections::HashSet<_> = settings["appGroups"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .filter(|g| {
+                            g["enabled"] == true
+                                && g["targetType"] == "node"
+                                && !g["apps"].as_array().unwrap().is_empty()
+                        })
+                        .map(|g| g["targetNode"].as_str().unwrap())
+                        .collect();
+                    group_nodes.extend(
+                        nodes
+                            .iter()
+                            .filter(|n| {
+                                let name = n["name"].as_str().unwrap();
+                                targets.contains(name) && !hops.iter().any(|h| h == name)
+                            })
+                            .cloned(),
+                    );
                     nodes = config::chain_nodes(nodes, &hops)?;
                     choices = vec![hops.last().unwrap().clone()];
                 } else if let Some(name) = selected.as_deref() {
@@ -1019,7 +1043,9 @@ fn route<P: TunnelDataPlane>(
                     providers["SmartVPNChina"] = json!(path);
                 }
                 let catalog = store.active_catalog()?;
-                let profile = json!({"mixedPort":mixed.local_addr()?.port(),"controllerPort":ctrl.local_addr()?.port(),"proxies":[],"choices":choices,
+                nodes.extend(group_nodes);
+                let stored_names: Vec<_> = nodes.iter().map(|n| &n["name"]).collect();
+                let profile = json!({"storedNodeNames":stored_names,"appGroups":settings["appGroups"],"mixedPort":mixed.local_addr()?.port(),"controllerPort":ctrl.local_addr()?.port(),"proxies":[],"choices":choices,
                     "proxyProviders":{},"ruleProviders":providers,"webRtcProtection":settings["webRTCProtection"],"importPolicy":settings["importPolicy"],"subscriptionRuleProviders":catalog.rule_providers,"subscriptionRules":catalog.rules,"domesticDirect":settings["domesticWeb"],"preventDnsLeaks":settings["dnsProtection"]});
                 drop((mixed, ctrl));
                 #[cfg(target_os = "windows")]
@@ -1081,6 +1107,13 @@ fn route<P: TunnelDataPlane>(
                         json!({"error":"custom connect profile conflicts with active chain"}),
                     );
                 }
+                let custom: Value = serde_json::from_slice(&body)?;
+                #[cfg(target_os = "windows")]
+                let custom = &custom["config"];
+                ensure!(
+                    custom.get("storedNodeNames").is_none(),
+                    "storedNodeNames is runtime-owned"
+                );
                 plane.connect(&body, &[])?;
                 store.direct.mounted = None;
             }
@@ -1141,6 +1174,30 @@ mod tests {
         fn probe_job(&self, _: Vec<Value>, _: String) -> Result<ProbeJob> {
             Ok(Box::new(|| Ok((5, 2))))
         }
+    }
+
+    #[test]
+    fn connected_app_group_updates_conflict_even_when_unchanged() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let plane = OnlinePlane(Controller {
+            port: 0,
+            secret: String::new(),
+        });
+        let runtime = Runtime::start(Arc::new(Mutex::new(plane)), dir.path())?;
+        for method in ["POST", "PUT"] {
+            let response = http::agent()
+                .request(
+                    method,
+                    &format!("http://{}/api/settings", runtime.bootstrap.address),
+                )
+                .set(
+                    "Authorization",
+                    &format!("Bearer {}", runtime.bootstrap.token),
+                )
+                .send_json(json!({"appGroups":[]}));
+            assert!(matches!(response, Err(ureq::Error::Status(409, _))));
+        }
+        runtime.stop()
     }
 
     #[test]

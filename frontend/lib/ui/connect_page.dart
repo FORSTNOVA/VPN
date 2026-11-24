@@ -332,6 +332,23 @@ extension _ConnectPage on _HomePageState {
                   },
                 ),
               ],
+              if (_appGroups ?? const [] case final groups)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('软件分组分流'),
+                  subtitle: Text(groups.isEmpty
+                      ? '未配置分组'
+                      : '已启用 ${groups.where((g) => g['enabled'] == true).length}/${groups.length} 个分组（共 ${groups.fold<int>(0, (sum, g) => sum + (g['apps'] as List).length)} 项应用）'),
+                  trailing: const Icon(Icons.edit_outlined),
+                  enabled: !_busy && !_connected,
+                  onTap: () async {
+                    final result = await editAppGroups(context, groups,
+                        _nodes.map((n) => n.name).toList(), Platform.isAndroid);
+                    if (result != null && mounted) {
+                      await _updateTunnelSettings({'appGroups': result});
+                    }
+                  },
+                ),
               if (_domesticWeb ||
                   !(_webRTCProtection || _dnsProtection) ||
                   !(tunMode || Platform.isAndroid))

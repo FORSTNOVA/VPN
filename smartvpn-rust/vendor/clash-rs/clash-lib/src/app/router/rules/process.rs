@@ -37,7 +37,31 @@ impl RuleMatcher for Process {
                 }
             })
         }
+        #[cfg(target_os = "android")]
+        {
+            use crate::{android_tun::OWNER_RESOLVER, session::Network};
+            let protocol = match sess.network {
+                Network::Tcp => 6,
+                Network::Udp => 17,
+            };
+            sess.tun_destination_ip
+                .and_then(|ip| {
+                    OWNER_RESOLVER.get()?(
+                        protocol,
+                        sess.source,
+                        (ip, sess.destination.port()).into(),
+                    )
+                })
+                .is_some_and(|package| {
+                    if self.name_only {
+                        package == self.name
+                    } else {
+                        package.contains(&self.name)
+                    }
+                })
+        }
         #[cfg(not(any(
+            target_os = "android",
             target_os = "linux",
             target_os = "macos",
             target_os = "windows"

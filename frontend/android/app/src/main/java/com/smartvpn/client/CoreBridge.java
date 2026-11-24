@@ -1,10 +1,15 @@
 package com.smartvpn.client;
 
 import android.content.Context;
+import android.net.ConnectivityManager;
+import android.os.Build;
+import android.os.Process;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 import android.util.Base64;
 
+import java.net.InetSocketAddress;
+import java.util.concurrent.ConcurrentHashMap;
 import java.security.KeyStore;
 import java.util.Arrays;
 
@@ -107,6 +112,29 @@ public final class CoreBridge {
         return current != null && current.protectSocket(fd);
     }
 
+    private static final ConcurrentHashMap<Integer, String> ownerPackages = new ConcurrentHashMap<>();
+
+    public static String resolveOwnerPackage(int protocol, String srcIp, int srcPort,
+                                             String dstIp, int dstPort) {
+        SmartVpnService current = service;
+        if (current == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return "";
+        try {
+            ConnectivityManager cm = current.getSystemService(ConnectivityManager.class);
+            int uid = cm.getConnectionOwnerUid(protocol, new InetSocketAddress(srcIp, srcPort),
+                    new InetSocketAddress(dstIp, dstPort));
+            if (uid == Process.INVALID_UID || uid <= 0) return "";
+            String cached = ownerPackages.get(uid);
+            if (cached != null) return cached;
+            String[] packages = current.getPackageManager().getPackagesForUid(uid);
+            if (packages == null || packages.length == 0) return "";
+            ownerPackages.put(uid, packages[0]);
+            return packages[0];
+        } catch (RuntimeException e) {
+            android.util.Log.w("CoreBridge", "Connection owner lookup failed", e);
+            return "";
+        }
+    }
+
     public static boolean systemOwnsVpn() {
         SmartVpnService current = service;
         return current != null && (current.systemStarted ||
@@ -195,6 +223,7 @@ public final class CoreBridge {
     // ------------------------------------------------------- service plumbing
 
     static void attachService(SmartVpnService running) {
+        ownerPackages.clear();
         service = running;
     }
 

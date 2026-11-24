@@ -123,6 +123,18 @@ impl TunnelDataPlane for Android {
         // Parse before spawning, including the Android-only TUN fields.
         let members = config["proxies"].as_array().unwrap().clone();
         let config = Config::Str(config.to_string()).try_parse_strict()?;
+        clash_lib::android_tun::OWNER_RESOLVER.get_or_init(|| {
+            Box::new(|protocol, src, dst| {
+                let bridge = PROTECT.lock().unwrap().clone()?;
+                match bridge.owner_package(protocol, src, dst) {
+                    Ok(package) => package,
+                    Err(error) => {
+                        eprintln!("resolveOwnerPackage JNI failed: {error:#}");
+                        None
+                    }
+                }
+            })
+        });
         *STATE.lock().unwrap() = State::Pending;
         *PROTECT.lock().unwrap() = Some(self.bridge.clone());
         let result = clash_lib::start_scaffold_instance(Options {

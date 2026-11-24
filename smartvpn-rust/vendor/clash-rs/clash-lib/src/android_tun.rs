@@ -1,6 +1,12 @@
 //! SmartVPN integration for the single VpnService tunnel in this process.
 //! Tracks the lifetime of the actual TUN task, independently of the controller.
-use std::sync::Mutex;
+use std::{
+    net::SocketAddr,
+    sync::{Mutex, OnceLock},
+};
+
+pub type OwnerResolver = dyn Fn(u8, SocketAddr, SocketAddr) -> Option<String> + Send + Sync;
+pub static OWNER_RESOLVER: OnceLock<Box<OwnerResolver>> = OnceLock::new();
 
 #[derive(Clone)]
 pub enum State {

@@ -1,7 +1,62 @@
 use anyhow::{ensure, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::BTreeMap, num::NonZeroU16, path::PathBuf};
+use std::{
+    collections::{BTreeMap, HashSet},
+    num::NonZeroU16,
+    path::PathBuf,
+};
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TargetType {
+    Node,
+    Direct,
+    Reject,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AppGroup {
+    id: String,
+    name: String,
+    apps: Vec<String>,
+    target_type: TargetType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_node: Option<String>,
+    enabled: bool,
+}
+
+pub(crate) fn parse_app_groups(value: Value) -> Result<Vec<AppGroup>> {
+    let mut groups: Vec<AppGroup> = serde_json::from_value(value).context("invalid appGroups")?;
+    for group in &mut groups {
+        ensure!(!group.id.trim().is_empty(), "empty app group id");
+        for text in std::iter::once(&mut group.name).chain(&mut group.apps) {
+            ensure!(
+                !text.trim().is_empty() && !text.contains([',', '\r', '\n', '*']),
+                "invalid app group name or application: {text:?}"
+            );
+            *text = text.trim().to_owned();
+        }
+        let mut seen = HashSet::new();
+        group.apps.retain(|app| seen.insert(app.to_lowercase()));
+        if matches!(group.target_type, TargetType::Node) {
+            ensure!(
+                group
+                    .target_node
+                    .as_ref()
+                    .is_some_and(|n| !n.trim().is_empty()),
+                "app group {} requires a target node",
+                group.name
+            );
+        }
+    }
+    Ok(groups)
+}
+
+fn deserialize_groups<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<AppGroup>, D::Error> {
+    parse_app_groups(Value::deserialize(d)?).map_err(serde::de::Error::custom)
+}
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -13,6 +68,11 @@ pub struct Connect {
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Profile {
+    #[serde(default, deserialize_with = "deserialize_groups")]
+    pub app_groups: Vec<AppGroup>,
+    // Names of the catalog nodes supplied separately to TunnelDataPlane::connect.
+    #[serde(default)]
+    stored_node_names: Vec<String>,
     pub mixed_port: NonZeroU16,
     pub controller_port: NonZeroU16,
     pub proxies: Vec<SocksNode>,
@@ -330,6 +390,49 @@ impl Profile {
                     .map(|cidr| format!("{kind},{cidr},DIRECT,no-resolve")),
             );
         }
+        let mut groups = vec![group];
+        let node_names: HashSet<_> = self
+            .proxies
+            .iter()
+            .map(|p| p.name.as_str())
+            .chain(self.stored_node_names.iter().map(String::as_str))
+            .collect();
+        let mut next_group = 1;
+        for app_group in self
+            .app_groups
+            .iter()
+            .filter(|g| g.enabled && !g.apps.is_empty())
+        {
+            let target = match app_group.target_type {
+                TargetType::Direct => "DIRECT".to_owned(),
+                TargetType::Reject => "REJECT".to_owned(),
+                TargetType::Node => {
+                    let node = app_group.target_node.as_deref().unwrap();
+                    ensure!(
+                        node_names.contains(node),
+                        "app group {}: unknown target node {node}",
+                        app_group.name
+                    );
+                    let name = loop {
+                        let candidate = format!("SmartVPN-Group-{next_group}");
+                        next_group += 1;
+                        if !node_names.contains(candidate.as_str())
+                            && !self.proxy_providers.contains_key(&candidate)
+                        {
+                            break candidate;
+                        }
+                    };
+                    groups.push(json!({"name":name,"type":"select","proxies":[node]}));
+                    name
+                }
+            };
+            rules.extend(
+                app_group
+                    .apps
+                    .iter()
+                    .map(|app| format!("PROCESS-NAME,{app},{target}")),
+            );
+        }
         let allow_direct =
             self.domestic_direct || !(self.prevent_dns_leaks || self.web_rtc_protection);
         if self.import_policy {
@@ -385,7 +488,7 @@ impl Profile {
             }
         }
         rules.push("MATCH,SmartVPN".into());
-        cfg["proxy-groups"] = json!([group]);
+        cfg["proxy-groups"] = json!(groups);
         cfg["rules"] = json!(rules);
         Ok(cfg)
     }
@@ -412,6 +515,55 @@ mod tests {
             ]
         );
         assert!(chain_nodes(catalog, &[names[0].clone(), names[0].clone()]).is_err());
+    }
+    #[test]
+    fn app_rules_preserve_local_protections_and_global_selection() {
+        let mut input = json!({"mixedPort":12345,"controllerPort":12346,
+            "choices":["exit"],"proxies":[],"storedNodeNames":["exit","Japan","SmartVPN-Group-1"],
+            "proxyProviders":{},"ruleProviders":{"china":"china.txt"},"domesticDirect":true,
+            "preventDnsLeaks":true,"importPolicy":true,"subscriptionRules":["DOMAIN,example.org,REJECT"],
+            "appGroups":[
+                {"id":"1","name":"Google","apps":["gemini.exe"],"targetType":"node","targetNode":"Japan","enabled":true},
+                {"id":"2","name":"Direct","apps":["com.example.app"],"targetType":"direct","enabled":true},
+                {"id":"3","name":"Block","apps":["blocked.exe"],"targetType":"reject","enabled":true},
+                {"id":"4","name":"Disabled","apps":["off.exe"],"targetType":"node","targetNode":"obsolete","enabled":false},
+                {"id":"5","name":"Empty","apps":[],"targetType":"node","targetNode":"obsolete","enabled":true}]});
+        let profile: Profile = serde_json::from_value(input.clone()).unwrap();
+        for android in [true, false] {
+            let mut cfg = profile.generate_for("secret", android).unwrap();
+            cfg["proxies"] = json!(profile
+                .stored_node_names
+                .iter()
+                .map(|name| json!({"type":"socks5","name":name,"server":"localhost","port":1080}))
+                .collect::<Vec<_>>());
+            clash_lib::Config::Str(cfg.to_string())
+                .try_parse_strict()
+                .unwrap();
+            assert_eq!(
+                cfg["proxy-groups"],
+                json!([
+                {"name":"SmartVPN","type":"select","proxies":["exit"]},
+                {"name":"SmartVPN-Group-2","type":"select","proxies":["Japan"]}])
+            );
+            let rules = cfg["rules"].as_array().unwrap();
+            let i = rules
+                .iter()
+                .position(|r| r == "PROCESS-NAME,gemini.exe,SmartVPN-Group-2")
+                .unwrap();
+            assert_eq!(rules[i - 1], "IP-CIDR6,ff00::/8,DIRECT,no-resolve");
+            assert_eq!(rules[i + 1], "PROCESS-NAME,com.example.app,DIRECT");
+            assert_eq!(rules[i + 2], "PROCESS-NAME,blocked.exe,REJECT");
+            assert_eq!(rules[i + 3], "DOMAIN,example.org,REJECT");
+            assert_eq!(rules.last().unwrap(), "MATCH,SmartVPN");
+            assert_eq!(cfg["profile"]["store-selected"], false);
+        }
+        input["appGroups"][0]["targetNode"] = json!("deleted node");
+        let profile: Profile = serde_json::from_value(input).unwrap();
+        assert!(profile
+            .generate("secret")
+            .unwrap_err()
+            .to_string()
+            .contains("deleted node"));
     }
     #[test]
     fn generates_clash_schema() {

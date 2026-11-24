@@ -18,6 +18,34 @@ struct Bridge {
     class: GlobalRef,
 }
 impl Bridge {
+    fn owner_package(
+        &self,
+        protocol: u8,
+        src: std::net::SocketAddr,
+        dst: std::net::SocketAddr,
+    ) -> Result<Option<String>> {
+        let mut env = self.vm.attach_current_thread()?;
+        env.with_local_frame(4, |env| {
+            let src_ip = env.new_string(src.ip().to_string())?;
+            let dst_ip = env.new_string(dst.ip().to_string())?;
+            let result = env
+                .call_static_method(
+                    <&JClass>::from(self.class.as_obj()),
+                    "resolveOwnerPackage",
+                    "(ILjava/lang/String;ILjava/lang/String;I)Ljava/lang/String;",
+                    &[
+                        JValue::Int(protocol.into()),
+                        JValue::Object(&src_ip),
+                        JValue::Int(src.port().into()),
+                        JValue::Object(&dst_ip),
+                        JValue::Int(dst.port().into()),
+                    ],
+                )?
+                .l()?;
+            let package: String = env.get_string(&JString::from(result))?.into();
+            Ok((!package.is_empty()).then_some(package))
+        })
+    }
     fn protect(&self, fd: i32) -> Result<()> {
         let mut env = self.vm.attach_current_thread()?;
         ensure!(

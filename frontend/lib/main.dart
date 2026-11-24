@@ -1,3 +1,4 @@
+import 'ui/app_groups_dialog.dart';
 import 'ui/game_bypass_dialog.dart';
 import 'ui/startup_tile.dart';
 import 'ui/chain_editor.dart';
@@ -141,6 +142,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Map<String, NodeHealth> _nodeHealth = const {};
   Map<String, RegionInfo> _regionByName = const {};
   String _connectionMode = 'system-proxy';
+  List<Map<String, dynamic>>? _appGroups;
   List<String> _gameBypass = [];
   bool _domesticWeb = false, _webRTCProtection = false, _dnsProtection = false;
   bool _elevated = false;
@@ -738,6 +740,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _applyTunState(Map<String, dynamic> value) {
     _connectionMode = value['connectionMode'] as String? ?? 'system-proxy';
+    if (value.containsKey('appGroups')) {
+      _appGroups = (value['appGroups'] as List?)
+              ?.whereType<Map>()
+              .map((e) => Map<String, dynamic>.from(e))
+              .toList() ??
+          [];
+    }
     _gameBypass =
         (value['gameBypass'] as List?)?.whereType<String>().toList() ?? [];
     _domesticWeb = value['domesticWeb'] as bool? ?? false;
@@ -2070,19 +2079,23 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         socksPort == null) {
       return;
     }
+    await _updateTunnelSettings({
+      'connectionMode': mode,
+      if (domesticWeb != null) 'domesticWeb': domesticWeb,
+      if (webRTCProtection != null) 'webRTCProtection': webRTCProtection,
+      if (dnsProtection != null) 'dnsProtection': dnsProtection,
+      if (gameBypass != null) 'gameBypass': gameBypass,
+      if (socksPort != null) 'socksPort': socksPort,
+    });
+  }
+
+  Future<void> _updateTunnelSettings(Map<String, dynamic> patch) async {
     setState(() {
       _busy = true;
       _error = null;
     });
     try {
-      await _request('PUT', '/api/settings', body: {
-        'connectionMode': mode,
-        if (domesticWeb != null) 'domesticWeb': domesticWeb,
-        if (webRTCProtection != null) 'webRTCProtection': webRTCProtection,
-        if (dnsProtection != null) 'dnsProtection': dnsProtection,
-        if (gameBypass != null) 'gameBypass': gameBypass,
-        if (socksPort != null) 'socksPort': socksPort,
-      });
+      await _request('PUT', '/api/settings', body: patch);
       await _loadState();
     } catch (e) {
       if (mounted) {

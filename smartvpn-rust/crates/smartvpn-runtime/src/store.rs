@@ -15,7 +15,7 @@ pub struct Store {
     pub sample: Option<(Instant, u64, u64)>,
 }
 fn defaults() -> Value {
-    json!({"subscriptionUrl":"","connectionMode":if cfg!(target_os="android"){"vpn"}else{"system-proxy"},"domesticWeb":false,"webRTCProtection":false,"dnsProtection":false,"importPolicy":false,"gameBypass":[],"socksPort":0,"mihomoPath":"","wintunPath":""})
+    json!({"subscriptionUrl":"","connectionMode":if cfg!(target_os="android"){"vpn"}else{"system-proxy"},"domesticWeb":false,"webRTCProtection":false,"dnsProtection":false,"importPolicy":false,"appGroups":[],"gameBypass":[],"socksPort":0,"mihomoPath":"","wintunPath":""})
 }
 pub(crate) fn existing_connection(dir: &Path, flags: rusqlite::OpenFlags) -> Result<Connection> {
     let db = Connection::open_with_flags(dir.join("smartvpn.db"), flags)?;
@@ -117,6 +117,13 @@ impl Store {
                     && std::mem::discriminant(&schema[k]) == std::mem::discriminant(v),
                 "invalid setting {k}"
             );
+            let normalized;
+            let v = if k == "appGroups" {
+                normalized = serde_json::to_value(crate::config::parse_app_groups(v.clone())?)?;
+                &normalized
+            } else {
+                v
+            };
             match k.as_str() {
                 "connectionMode" => ensure!(
                     if cfg!(target_os = "android") {
@@ -430,6 +437,41 @@ mod tests {
         assert_eq!(s.nodes().unwrap()["selectedNode"], "入口 [A]");
         assert_eq!(s.nodes().unwrap()["chains"], json!({}));
         assert!(s.delete_profile("测试").is_err());
+    }
+    #[test]
+    fn app_groups_normalize_and_reject_invalid_updates_atomically() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path()).unwrap();
+        assert_eq!(store.settings().unwrap()["appGroups"], json!([]));
+        let group = json!({"id":"1","name":" Google ","apps":[" Chrome.exe ","chrome.exe","com.google"],
+            "targetType":"node","targetNode":"Japan","enabled":true});
+        let saved = store.update(&json!({"appGroups":[group]})).unwrap();
+        assert_eq!(saved["appGroups"][0]["name"], "Google");
+        assert_eq!(
+            saved["appGroups"][0]["apps"],
+            json!(["Chrome.exe", "com.google"])
+        );
+        drop(store);
+        let mut store = Store::open(dir.path()).unwrap();
+        for (key, value) in [
+            ("id", json!(" ")),
+            ("name", json!("test,")),
+            ("name", json!("\ntest")),
+            ("apps", json!(["*"])),
+            ("apps", json!([" "])),
+            ("apps", json!(["hello\r"])),
+            ("targetType", json!("auto")),
+            ("targetNode", json!(" ")),
+            ("enabled", json!(1)),
+        ] {
+            let mut invalid = group.clone();
+            invalid[key] = value;
+            assert!(
+                store.update(&json!({"appGroups":[invalid]})).is_err(),
+                "{key}"
+            );
+        }
+        assert_eq!(store.settings().unwrap(), saved);
     }
     #[test]
     fn invalid_settings_patch_is_atomic() {
