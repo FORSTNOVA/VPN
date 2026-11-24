@@ -225,6 +225,9 @@ impl ControlPlane {
             (Method::DELETE, "/api/nodes/manual") => self.handle_delete_manual_node(&query).await,
             (Method::PUT, "/api/nodes/chain") => self.handle_set_chain(&body).await,
             (Method::PUT, "/api/nodes/chain/profile") => self.handle_save_chain_profile(&body).await,
+            (Method::DELETE, "/api/nodes/chain/profile") => {
+                self.handle_delete_chain_profile(&query, &body).await
+            }
             (Method::POST, "/api/nodes/chain/probe") => self.handle_probe_chain(&body).await,
             (Method::GET, "/api/nodes/probes") => {
                 let st = self.state.lock().await;
@@ -609,6 +612,7 @@ impl ControlPlane {
             return text_resp(StatusCode::BAD_REQUEST, "invalid JSON\n");
         };
         let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("Chain").trim().to_owned();
+        let original = val.get("original").and_then(|v| v.as_str()).unwrap_or("").trim().to_owned();
         let hops: Vec<String> = val
             .get("hops")
             .and_then(|v| v.as_array())
@@ -617,20 +621,66 @@ impl ControlPlane {
         if hops.is_empty() {
             return text_resp(StatusCode::BAD_REQUEST, "chain hops required\n");
         }
+        let mut st = self.state.lock().await;
+        let existing_id = if !original.is_empty() {
+            st.persisted
+                .chains
+                .iter()
+                .find(|c| c.name == original)
+                .map(|c| c.id.clone())
+        } else {
+            st.persisted
+                .chains
+                .iter()
+                .find(|c| c.name == name)
+                .map(|c| c.id.clone())
+        };
         let id = val
             .get("id")
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_owned)
+            .or(existing_id)
             .unwrap_or_else(|| format!("chain-{}", chrono::Utc::now().timestamp_millis()));
-        let mut st = self.state.lock().await;
-        st.persisted.chains.retain(|c| c.id != id);
+        st.persisted
+            .chains
+            .retain(|c| c.id != id && (original.is_empty() || c.name != original) && c.name != name);
         st.persisted.chains.push(ProxyChain {
             id: id.clone(),
             name,
             hops,
         });
         st.persisted.active_chain_id = id;
+        let _ = st.save();
+        json_resp(StatusCode::OK, json!({"ok": true}))
+    }
+
+    async fn handle_delete_chain_profile(&self, query: &str, body: &[u8]) -> Response<Full<Bytes>> {
+        let mut target_name = query_param(query, "name").unwrap_or_default();
+        if target_name.is_empty() {
+            if let Ok(val) = serde_json::from_slice::<Value>(body) {
+                if let Some(n) = val.get("name").and_then(|v| v.as_str()) {
+                    target_name = n.trim().to_owned();
+                }
+            }
+        }
+        if target_name.is_empty() {
+            return text_resp(StatusCode::BAD_REQUEST, "chain name required\n");
+        }
+        let mut st = self.state.lock().await;
+        let removed_ids: Vec<String> = st
+            .persisted
+            .chains
+            .iter()
+            .filter(|c| c.name == target_name || c.id == target_name)
+            .map(|c| c.id.clone())
+            .collect();
+        st.persisted
+            .chains
+            .retain(|c| c.name != target_name && c.id != target_name);
+        if removed_ids.iter().any(|id| id == &st.persisted.active_chain_id) {
+            st.persisted.active_chain_id.clear();
+        }
         let _ = st.save();
         json_resp(StatusCode::OK, json!({"ok": true}))
     }

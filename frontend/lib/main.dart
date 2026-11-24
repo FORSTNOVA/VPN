@@ -1177,6 +1177,35 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                 }
               }
 
+              Future<void> deleteProfile(String name) async {
+                final confirmed = await showDialog<bool>(
+                  context: context,
+                  builder: (ctx) => AlertDialog(
+                    title: Text('删除代理链「$name」？'),
+                    content: const Text('删除后将从本地配置移除。'),
+                    actions: [
+                      TextButton(
+                          onPressed: () => Navigator.of(ctx).pop(false),
+                          child: const Text('取消')),
+                      TextButton(
+                          onPressed: () => Navigator.of(ctx).pop(true),
+                          child: const Text('删除')),
+                    ],
+                  ),
+                );
+                if (confirmed != true) return;
+                try {
+                  await _request('DELETE',
+                      '/api/nodes/chain/profile?name=${Uri.encodeQueryComponent(name)}');
+                  await _loadState();
+                  if (context.mounted) refresh(() {});
+                } catch (e) {
+                  if (context.mounted)
+                    ScaffoldMessenger.of(context)
+                        .showSnackBar(SnackBar(content: Text(e.toString())));
+                }
+              }
+
               return Scaffold(
                   appBar: AppBar(title: const Text('代理链')),
                   body: ListView(padding: const EdgeInsets.all(16), children: [
@@ -1225,6 +1254,13 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                                   _chainName == entry.key
                                               ? '已选用'
                                               : '选用')),
+                                      TextButton(
+                                          onPressed: (_kernelRunning &&
+                                                  _chainEnabled &&
+                                                  _chainName == entry.key)
+                                              ? null
+                                              : () => deleteProfile(entry.key),
+                                          child: const Text('删除')),
                                     ]),
                                   ]))),
                   ]));

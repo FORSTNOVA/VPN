@@ -100,13 +100,18 @@ impl TunnelUdpSocket {
             }
         });
 
+        let local: SocketAddr = if synthetic_peer.is_ipv6() {
+            ([0u16; 8], 0).into()
+        } else {
+            ([127, 0, 0, 1], 0).into()
+        };
         Arc::new(Self {
             tx,
             rx_queue,
             rx_waker,
             closed,
             synthetic_peer,
-            local: ([127, 0, 0, 1], 0).into(),
+            local,
         })
     }
 }
