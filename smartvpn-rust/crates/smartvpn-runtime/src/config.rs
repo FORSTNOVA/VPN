@@ -298,7 +298,7 @@ impl Profile {
             .collect();
         let mut cfg = json!({"mixed-port":self.mixed_port,"bind-address":"127.0.0.1","allow-lan":false,
             "external-controller":format!("127.0.0.1:{}",self.controller_port),"secret":secret,
-            "mode":"rule","proxies":nodes});
+            "mode":"rule","profile":{"store-selected":false},"proxies":nodes});
         if !self.proxy_providers.is_empty() {
             group["use"] = json!(self.proxy_providers.keys().collect::<Vec<_>>());
             for (name, path) in &self.proxy_providers {
@@ -436,6 +436,7 @@ mod tests {
             .as_array()
             .unwrap()
             .contains(&json!("RULE-SET,china,DIRECT,no-resolve")));
+        assert_eq!(android["profile"]["store-selected"], false);
         assert_eq!(android["dns"]["ipv6"], false);
         assert!(android["rules"]
             .as_array()

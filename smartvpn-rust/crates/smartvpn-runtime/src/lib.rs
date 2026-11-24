@@ -1047,7 +1047,11 @@ fn route<P: TunnelDataPlane>(
                         let target = checks::target(&store.dir)?;
                         let Some(best) =
                             metrics::connect_choice(&from, &choices, store, |name, timeout| {
-                                Ok(metrics::probe_delay(c, name, &target, timeout)?.0)
+                                let ms = metrics::probe_delay(c, name, &target, timeout)?.0;
+                                if ms.is_none() && name == from {
+                                    return Ok(metrics::probe_delay(c, name, &target, timeout)?.0);
+                                }
+                                Ok(ms)
                             })?
                         else {
                             return Ok(false);

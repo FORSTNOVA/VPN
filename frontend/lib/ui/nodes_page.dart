@@ -399,7 +399,7 @@ extension _NodesPage on _HomePageState {
         : null;
 
     return _AkHoverRow(
-      onTap: _busy || _chainEnabled
+      onTap: _busy || (_chainEnabled && _kernelRunning)
           ? null
           : () => unawaited(_selectNode(node.name)),
       selected: selected || active,
