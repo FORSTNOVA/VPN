@@ -38,6 +38,7 @@ pub struct ControlPlane {
 
 impl ControlPlane {
     pub async fn start(home: PathBuf, bridge: Arc<dyn PlatformBridge>) -> Result<Arc<Self>, String> {
+        smartvpn_engine::transport::tls::ensure_crypto_provider();
         let mut token_bytes = [0u8; 24];
         rand::rng().fill_bytes(&mut token_bytes);
         let token: String = token_bytes.iter().map(|b| format!("{b:02x}")).collect();
@@ -177,7 +178,8 @@ impl ControlPlane {
             (Method::POST, "/api/nodes/chain/probe") => self.handle_probe_chain(&body).await,
             (Method::GET, "/api/nodes/probes") => {
                 let st = self.state.lock().await;
-                json_resp(StatusCode::OK, json!({"probes": st.chain_probes}))
+                let results: Vec<Value> = st.chain_probes.values().cloned().collect();
+                json_resp(StatusCode::OK, json!({"results": results}))
             }
             (Method::POST, "/api/speedtest") => self.handle_speedtest(&body).await,
             (Method::POST, "/api/diagnose") => self.handle_diagnose().await,
@@ -223,7 +225,14 @@ impl ControlPlane {
             (Method::PUT, "/api/health/params") => self.handle_health_params(&body).await,
             (Method::GET, "/api/path-checks") => {
                 let st = self.state.lock().await;
-                json_resp(StatusCode::OK, serde_json::to_value(&st.persisted.path_checks).unwrap_or_default())
+                json_resp(
+                    StatusCode::OK,
+                    json!({
+                        "settings": st.persisted.path_checks,
+                        "status": {"running": false},
+                        "limits": {"minIntervalSec": 10}
+                    }),
+                )
             }
             (Method::PUT, "/api/path-checks") => self.handle_put_path_checks(&body).await,
             (Method::POST, "/api/path-checks/run") => self.handle_run_path_checks().await,
@@ -361,18 +370,29 @@ impl ControlPlane {
                 }))
             })
             .collect();
+        let chains_map: BTreeMap<&str, &Vec<String>> = st
+            .persisted
+            .chains
+            .iter()
+            .map(|c| (c.name.as_str(), &c.hops))
+            .collect();
+        let active_chain = st.active_chain();
         json!({
             "nodes": list,
             "selectedNode": st.persisted.selected_node,
-            "chain": st.active_chain().map(|c| c.hops.clone()).unwrap_or_default(),
-            "chains": st.persisted.chains,
+            "chain": {
+                "enabled": active_chain.is_some_and(|c| !c.hops.is_empty()),
+                "name": active_chain.map(|c| c.name.as_str()).unwrap_or(""),
+                "hops": active_chain.map(|c| c.hops.clone()).unwrap_or_default(),
+            },
+            "chains": chains_map,
         })
     }
 
     async fn handle_nodes_fetch(&self) -> Response<Full<Bytes>> {
         let (url, protect) = {
             let st = self.state.lock().await;
-            (st.persisted.subscription_url.clone(), st.bridge.protect_hook())
+            (st.persisted.subscription_url.clone(), st.active_protect_hook())
         };
         if url.trim().is_empty() {
             return self.handle_sub_merge().await;
@@ -527,7 +547,7 @@ impl ControlPlane {
             (
                 st.persisted.clone(),
                 st.all_proxy_values(),
-                st.bridge.protect_hook(),
+                st.active_protect_hook(),
             )
         };
         let key = hops.join(" → ");
@@ -569,7 +589,7 @@ impl ControlPlane {
             (
                 st.persisted.clone(),
                 st.all_proxy_values(),
-                st.bridge.protect_hook(),
+                st.active_protect_hook(),
             )
         };
         let hops = if let Some(c) = persisted.chains.iter().find(|c| c.id == persisted.active_chain_id) {
@@ -615,13 +635,14 @@ impl ControlPlane {
         if url.is_empty() {
             return text_resp(StatusCode::BAD_REQUEST, "subscription url required\n");
         }
-        let name = val
-            .get("name")
+        let label = val
+            .get("label")
+            .or_else(|| val.get("name"))
             .and_then(|n| n.as_str())
             .filter(|s| !s.trim().is_empty())
             .map(|s| s.trim().to_owned())
             .unwrap_or_else(|| url.split("://").nth(1).unwrap_or(&url).split('/').next().unwrap_or("sub").to_owned());
-        let protect = self.state.lock().await.bridge.protect_hook();
+        let protect = self.state.lock().await.active_protect_hook();
         let (proxies, user_info) = match subs::fetch_subscription_text(&url, protect).await {
             Ok((text, uinfo)) => {
                 let proxies = subs::parse_proxies_from_payload(&text)
@@ -638,13 +659,15 @@ impl ControlPlane {
         let mut st = self.state.lock().await;
         st.persisted.subscriptions.push(SavedSubscription {
             id,
-            name,
+            label,
+            prefix: String::new(),
             url,
             sealed_url: String::new(),
             enabled: val.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false),
             active: false,
             node_count: proxies.len(),
             updated_at: now,
+            last_error: String::new(),
             quota_updated_at: now,
             quota_error: String::new(),
             user_info,
@@ -663,8 +686,8 @@ impl ControlPlane {
         let Some(sub) = st.persisted.subscriptions.iter_mut().find(|s| s.id == id) else {
             return text_resp(StatusCode::NOT_FOUND, "subscription not found\n");
         };
-        if let Some(name) = val.get("name").and_then(|v| v.as_str()) {
-            sub.name = name.trim().to_owned();
+        if let Some(label) = val.get("label").or_else(|| val.get("name")).and_then(|v| v.as_str()) {
+            sub.label = label.trim().to_owned();
         }
         if let Some(url) = val.get("url").and_then(|v| v.as_str()) {
             sub.url = url.trim().to_owned();
@@ -689,26 +712,108 @@ impl ControlPlane {
             return text_resp(StatusCode::BAD_REQUEST, "invalid JSON\n");
         };
         let id = val.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        let url = val.get("url").and_then(|v| v.as_str()).unwrap_or("");
         let mut st = self.state.lock().await;
+        if url == "__merged__" || id == "__merged__" || (id.is_empty() && url.is_empty()) {
+            for sub in &mut st.persisted.subscriptions {
+                sub.active = false;
+            }
+            st.persisted.subscription_url = "__merged__".to_owned();
+            st.persisted.merged_proxies =
+                subs::merge_enabled_subscriptions(&st.persisted.subscriptions);
+            let _ = st.save();
+            return json_resp(StatusCode::OK, json!({"ok": true}));
+        }
         let mut found_proxies = None;
+        let mut found_url = None;
         for sub in &mut st.persisted.subscriptions {
             sub.active = sub.id == id;
             if sub.active {
                 found_proxies = Some(sub.raw_proxies.clone());
+                found_url = Some(sub.url.clone());
             }
         }
         let Some(proxies) = found_proxies else {
             return text_resp(StatusCode::NOT_FOUND, "subscription not found\n");
         };
         st.persisted.merged_proxies = proxies;
+        if let Some(u) = found_url {
+            st.persisted.subscription_url = u;
+        }
         let _ = st.save();
         json_resp(StatusCode::OK, json!({"ok": true}))
     }
 
     async fn handle_sub_merge(&self) -> Response<Full<Bytes>> {
+        let (targets, protect) = {
+            let st = self.state.lock().await;
+            let targets: Vec<(String, String)> = st
+                .persisted
+                .subscriptions
+                .iter()
+                .filter(|s| s.enabled && !s.url.trim().is_empty())
+                .map(|s| (s.id.clone(), s.url.clone()))
+                .collect();
+            (targets, st.active_protect_hook())
+        };
+
+        let mut tasks = tokio::task::JoinSet::new();
+        for (id, url) in targets {
+            tasks.spawn(async move {
+                let res = match tokio::time::timeout(
+                    std::time::Duration::from_secs(25),
+                    subs::fetch_subscription_text(&url, protect),
+                )
+                .await
+                {
+                    Ok(r) => r,
+                    Err(_) => Err("subscription fetch timeout".to_owned()),
+                };
+                (id, res)
+            });
+        }
+
+        let mut fetched = Vec::new();
+        while let Some(joined) = tasks.join_next().await {
+            if let Ok(item) = joined {
+                fetched.push(item);
+            }
+        }
+
+        let now = chrono::Utc::now().timestamp();
         let mut st = self.state.lock().await;
+        for (id, res) in fetched {
+            if let Some(sub) = st.persisted.subscriptions.iter_mut().find(|s| s.id == id) {
+                match res {
+                    Ok((text, uinfo)) => match subs::parse_proxies_from_payload(&text) {
+                        Ok(proxies) => {
+                            sub.node_count = proxies.len();
+                            sub.raw_proxies = proxies;
+                            sub.updated_at = now;
+                            sub.last_error.clear();
+                            if uinfo.is_some() {
+                                sub.user_info = uinfo;
+                                sub.quota_updated_at = now;
+                                sub.quota_error.clear();
+                            }
+                        }
+                        Err(e) => {
+                            sub.last_error = e;
+                        }
+                    },
+                    Err(e) => {
+                        sub.last_error = e;
+                    }
+                }
+            }
+        }
+
         let merged = subs::merge_enabled_subscriptions(&st.persisted.subscriptions);
         st.persisted.merged_proxies = merged;
+        for sub in &mut st.persisted.subscriptions {
+            sub.active = false;
+        }
+        st.persisted.subscription_url = "__merged__".to_owned();
         if st.persisted.selected_node.is_empty() {
             if let Some(first) = st
                 .persisted
@@ -722,7 +827,11 @@ impl ControlPlane {
         let _ = st.save();
         json_resp(
             StatusCode::OK,
-            json!({"ok": true, "nodeCount": st.persisted.merged_proxies.len()}),
+            json!({
+                "ok": true,
+                "nodes": st.persisted.merged_proxies.len(),
+                "nodeCount": st.persisted.merged_proxies.len()
+            }),
         )
     }
 
@@ -747,29 +856,32 @@ impl ControlPlane {
             let Some(sub) = st.persisted.subscriptions.iter().find(|s| s.id == id) else {
                 return text_resp(StatusCode::NOT_FOUND, "subscription not found\n");
             };
-            (sub.url.clone(), st.bridge.protect_hook())
+            (sub.url.clone(), st.active_protect_hook())
         };
         match subs::fetch_subscription_text(&url, protect).await {
             Ok((text, uinfo)) => match subs::parse_proxies_from_payload(&text) {
                 Ok(proxies) => {
                     let now = chrono::Utc::now().timestamp();
                     let mut st = self.state.lock().await;
+                    let mut updated_sub = None;
                     if let Some(sub) = st.persisted.subscriptions.iter_mut().find(|s| s.id == id) {
                         sub.node_count = proxies.len();
                         sub.raw_proxies = proxies;
                         sub.updated_at = now;
+                        sub.last_error.clear();
                         if uinfo.is_some() {
                             sub.user_info = uinfo;
                             sub.quota_updated_at = now;
                             sub.quota_error.clear();
                         }
+                        updated_sub = Some(sub.clone());
                     }
                     let merged = subs::merge_enabled_subscriptions(&st.persisted.subscriptions);
                     if !merged.is_empty() {
                         st.persisted.merged_proxies = merged;
                     }
                     let _ = st.save();
-                    json_resp(StatusCode::OK, json!({"ok": true}))
+                    json_resp(StatusCode::OK, json!({"ok": true, "subscription": updated_sub}))
                 }
                 Err(e) => text_resp(StatusCode::BAD_REQUEST, &format!("{e}\n")),
             },
@@ -784,7 +896,7 @@ impl ControlPlane {
     async fn handle_sub_diagnostics(&self) -> Response<Full<Bytes>> {
         let (url, protect) = {
             let st = self.state.lock().await;
-            (st.persisted.subscription_url.clone(), st.bridge.protect_hook())
+            (st.persisted.subscription_url.clone(), st.active_protect_hook())
         };
         if url.trim().is_empty() {
             return text_resp(StatusCode::BAD_REQUEST, "invalid subscription URL\n");
@@ -865,7 +977,7 @@ impl ControlPlane {
             (
                 st.persisted.clone(),
                 st.all_proxy_values(),
-                st.bridge.protect_hook(),
+                st.active_protect_hook(),
             )
         };
         let hops = if let Some(c) = persisted.chains.iter().find(|c| c.id == persisted.active_chain_id) {

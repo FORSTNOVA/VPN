@@ -74,7 +74,10 @@ pub struct QuotaInfo {
 #[serde(rename_all = "camelCase")]
 pub struct SavedSubscription {
     pub id: String,
-    pub name: String,
+    #[serde(alias = "name")]
+    pub label: String,
+    #[serde(default)]
+    pub prefix: String,
     #[serde(default)]
     pub url: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -87,6 +90,8 @@ pub struct SavedSubscription {
     pub node_count: usize,
     #[serde(default)]
     pub updated_at: i64,
+    #[serde(default)]
+    pub last_error: String,
     #[serde(default)]
     pub quota_updated_at: i64,
     #[serde(default)]
@@ -283,17 +288,29 @@ impl RuntimeState {
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
-        if persisted.subscription_url.is_empty() && !persisted.sealed_subscription_url.is_empty() {
-            if let Ok(opened) = bridge.open(&persisted.sealed_subscription_url) {
+        if persisted.subscription_url.starts_with("enc:v1:") {
+            if let Some(opened) = open_maybe_sealed(&*bridge, &persisted.subscription_url) {
+                persisted.subscription_url = opened;
+            }
+        } else if persisted.subscription_url.is_empty() && !persisted.sealed_subscription_url.is_empty() {
+            if let Some(opened) = open_maybe_sealed(&*bridge, &persisted.sealed_subscription_url) {
                 persisted.subscription_url = opened;
             }
         }
         for sub in &mut persisted.subscriptions {
-            if sub.url.is_empty() && !sub.sealed_url.is_empty() {
-                if let Ok(opened) = bridge.open(&sub.sealed_url) {
+            if sub.url.starts_with("enc:v1:") {
+                if let Some(opened) = open_maybe_sealed(&*bridge, &sub.url) {
+                    sub.sealed_url = sub.url.clone();
+                    sub.url = opened;
+                }
+            } else if sub.url.is_empty() && !sub.sealed_url.is_empty() {
+                if let Some(opened) = open_maybe_sealed(&*bridge, &sub.sealed_url) {
                     sub.url = opened;
                 }
             }
+        }
+        if !path.exists() || persisted.subscriptions.is_empty() {
+            migrate_legacy_go_state(home, &*bridge, &mut persisted);
         }
         let next_event_id = persisted.events.iter().map(|e| e.id).max().unwrap_or(0) + 1;
         Self {
@@ -347,6 +364,14 @@ impl RuntimeState {
         Ok(())
     }
 
+    pub fn active_protect_hook(&self) -> Option<smartvpn_engine::dialer::SocketProtectHook> {
+        if self.connected && self.tun_handle.is_some() {
+            self.bridge.protect_hook()
+        } else {
+            None
+        }
+    }
+
     pub fn push_event(&mut self, kind: &str, title: &str, detail: &str, ok: bool) {
         let id = self.next_event_id;
         self.next_event_id += 1;
@@ -389,10 +414,17 @@ impl RuntimeState {
     }
 
     pub fn state_json(&self) -> Value {
-        let active_chain_hops: Vec<String> = self
-            .active_chain()
+        let active_chain = self.active_chain();
+        let active_chain_name = active_chain.map(|c| c.name.as_str()).unwrap_or("");
+        let active_chain_hops: Vec<String> = active_chain
             .map(|c| c.hops.clone())
             .unwrap_or_default();
+        let chains_map: BTreeMap<&str, &Vec<String>> = self
+            .persisted
+            .chains
+            .iter()
+            .map(|c| (c.name.as_str(), &c.hops))
+            .collect();
         let active_node = if !active_chain_hops.is_empty() {
             active_chain_hops.join(" → ")
         } else {
@@ -412,8 +444,12 @@ impl RuntimeState {
             "startedAt": self.started_at,
             "selectedNode": self.persisted.selected_node,
             "activeNode": active_node,
-            "chain": active_chain_hops,
-            "chains": self.persisted.chains,
+            "chain": {
+                "enabled": !active_chain_hops.is_empty(),
+                "name": active_chain_name,
+                "hops": active_chain_hops,
+            },
+            "chains": chains_map,
             "activeChainId": self.persisted.active_chain_id,
             "activeRegion": self.persisted.locked_region,
             "lockedRegion": self.persisted.locked_region,
@@ -439,7 +475,7 @@ impl RuntimeState {
             "tunAvailable": true,
             "tunReason": "",
             "tunActive": self.connected && self.tun_handle.is_some(),
-            "chinaDirect": self.persisted.domestic_web,
+            "chinaDirect": {"enabled": self.persisted.domestic_web},
             "rustCore": true,
             "rustEngineActive": self.tun_handle.is_some()
         })
@@ -484,4 +520,94 @@ pub fn validate_app_groups(groups: Vec<AppGroup>) -> Result<Vec<AppGroup>, Strin
         out.push(g);
     }
     Ok(out)
+}
+
+fn open_maybe_sealed(bridge: &dyn PlatformBridge, value: &str) -> Option<String> {
+    if let Some(raw) = value.strip_prefix("enc:v1:") {
+        bridge.open(raw).ok()
+    } else if !value.is_empty() && !value.contains("://") {
+        bridge.open(value).ok()
+    } else if !value.is_empty() {
+        Some(value.to_owned())
+    } else {
+        None
+    }
+}
+
+fn migrate_legacy_go_state(
+    home: &Path,
+    bridge: &dyn PlatformBridge,
+    persisted: &mut PersistedState,
+) {
+    // 1. Import settings.json if present.
+    if let Ok(bytes) = fs::read(home.join("settings.json")) {
+        if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
+            if persisted.subscription_url.is_empty() {
+                if let Some(u) = v.get("subscriptionUrl").and_then(|s| s.as_str()) {
+                    if let Some(opened) = open_maybe_sealed(bridge, u) {
+                        persisted.subscription_url = opened;
+                    }
+                } else if let Some(s) = v.get("sealedSubscriptionUrl").and_then(|s| s.as_str()) {
+                    if let Some(opened) = open_maybe_sealed(bridge, s) {
+                        persisted.subscription_url = opened;
+                    }
+                }
+            }
+            if persisted.selected_node.is_empty() {
+                if let Some(n) = v.get("selectedNode").and_then(|s| s.as_str()) {
+                    persisted.selected_node = n.to_owned();
+                }
+            }
+            if let Some(b) = v.get("domesticWeb").and_then(|x| x.as_bool()) {
+                persisted.domestic_web = b;
+            }
+            if let Some(b) = v.get("webRTCProtection").and_then(|x| x.as_bool()) {
+                persisted.webrtc_protection = b;
+            }
+            if let Some(b) = v.get("dnsProtection").and_then(|x| x.as_bool()) {
+                persisted.dns_protection = b;
+            }
+            if let Some(h) = v.get("autoMergeHours").and_then(|x| x.as_u64()) {
+                persisted.auto_merge_hours = h;
+            }
+            if persisted.app_groups.is_empty() {
+                if let Some(g) = v.get("appGroups") {
+                    if let Ok(groups) = serde_json::from_value::<Vec<AppGroup>>(g.clone()) {
+                        persisted.app_groups = groups;
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Import saved subscriptions from smartvpn.db (settings_kv["subscriptions"]).
+    let db_path = home.join("smartvpn.db");
+    if db_path.exists() && persisted.subscriptions.is_empty() {
+        if let Ok(store) = smartvpn_store::Store::open(&db_path) {
+            if let Ok(Some(raw)) = store.get_value("subscriptions") {
+                if let Ok(mut subs) = serde_json::from_str::<Vec<SavedSubscription>>(&raw) {
+                    for sub in &mut subs {
+                        if let Some(opened) = open_maybe_sealed(bridge, &sub.url) {
+                            if sub.url.starts_with("enc:v1:") {
+                                sub.sealed_url = sub.url.clone();
+                            }
+                            sub.url = opened;
+                        }
+                        let cache_path = home.join("subscriptions").join(format!("{}.yaml", sub.id));
+                        if let Ok(yaml) = fs::read_to_string(&cache_path) {
+                            if let Ok(proxies) = super::subs::parse_proxies_from_payload(&yaml) {
+                                sub.node_count = proxies.len();
+                                sub.raw_proxies = proxies;
+                            }
+                        }
+                    }
+                    if !subs.is_empty() {
+                        persisted.merged_proxies = super::subs::merge_enabled_subscriptions(&subs);
+                        persisted.subscriptions = subs;
+                    }
+                }
+            }
+            let _ = store.close();
+        }
+    }
 }

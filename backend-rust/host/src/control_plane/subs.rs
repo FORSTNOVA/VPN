@@ -50,6 +50,49 @@ pub async fn fetch_subscription_text(
     url: &str,
     protect: Option<smartvpn_engine::dialer::SocketProtectHook>,
 ) -> Result<(String, Option<QuotaInfo>), String> {
+    let mut current = url.trim().to_owned();
+    let mut last_user_info = None;
+    for _hop in 0..6 {
+        let (status, location, user_info, body_bytes) =
+            fetch_once(&current, protect).await?;
+        if user_info.is_some() {
+            last_user_info = user_info;
+        }
+        if matches!(status, 301 | 302 | 303 | 307 | 308) {
+            if let Some(loc) = location {
+                current = resolve_redirect(&current, &loc)?;
+                continue;
+            }
+        }
+        if !(200..300).contains(&status) {
+            return Err(format!("HTTP {status}"));
+        }
+        let text = String::from_utf8_lossy(&body_bytes).into_owned();
+        return Ok((text, last_user_info));
+    }
+    Err("too many redirects".to_owned())
+}
+
+fn resolve_redirect(base: &str, location: &str) -> Result<String, String> {
+    let loc = location.trim();
+    if loc.starts_with("http://") || loc.starts_with("https://") {
+        return Ok(loc.to_owned());
+    }
+    let (scheme, rest) = base
+        .split_once("://")
+        .ok_or_else(|| "invalid redirect base URL".to_owned())?;
+    let authority = rest.split('/').next().unwrap_or(rest);
+    if loc.starts_with('/') {
+        Ok(format!("{scheme}://{authority}{loc}"))
+    } else {
+        Ok(format!("{scheme}://{authority}/{loc}"))
+    }
+}
+
+async fn fetch_once(
+    url: &str,
+    protect: Option<smartvpn_engine::dialer::SocketProtectHook>,
+) -> Result<(u16, Option<String>, Option<QuotaInfo>, Bytes), String> {
     let trimmed = url.trim();
     let (scheme, rest) = trimmed
         .split_once("://")
@@ -75,29 +118,43 @@ pub async fn fetch_subscription_text(
         .await
         .map_err(|e| format!("DNS lookup failed: {e}"))?
         .collect();
-    let addr = *addrs.first().ok_or_else(|| "no address for host".to_owned())?;
+    if addrs.is_empty() {
+        return Err("no address for host".to_owned());
+    }
 
-    let std_stream = timeout(Duration::from_secs(12), async {
-        let sock = if addr.is_ipv4() {
-            tokio::net::TcpSocket::new_v4()
-        } else {
-            tokio::net::TcpSocket::new_v6()
-        }
-        .map_err(|e| e.to_string())?;
-        #[cfg(unix)]
-        if let Some(hook) = protect {
-            use std::os::fd::AsRawFd;
-            let rc = hook(sock.as_raw_fd());
-            if rc <= 0 {
-                return Err(format!("protect socket failed: {rc}"));
+    let mut last_err = String::from("connect failed");
+    let mut connected_stream = None;
+    for addr in addrs {
+        let attempt = timeout(Duration::from_secs(5), async {
+            let sock = if addr.is_ipv4() {
+                tokio::net::TcpSocket::new_v4()
+            } else {
+                tokio::net::TcpSocket::new_v6()
             }
+            .map_err(|e| e.to_string())?;
+            #[cfg(unix)]
+            if let Some(hook) = protect {
+                use std::os::fd::AsRawFd;
+                let rc = hook(sock.as_raw_fd());
+                if rc <= 0 {
+                    return Err(format!("protect socket failed: {rc}"));
+                }
+            }
+            #[cfg(not(unix))]
+            let _ = protect;
+            sock.connect(addr).await.map_err(|e| e.to_string())
+        })
+        .await;
+        match attempt {
+            Ok(Ok(s)) => {
+                connected_stream = Some(s);
+                break;
+            }
+            Ok(Err(e)) => last_err = e,
+            Err(_) => last_err = "connect timeout".to_owned(),
         }
-        #[cfg(not(unix))]
-        let _ = protect;
-        sock.connect(addr).await.map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|_| "connect timeout".to_owned())??;
+    }
+    let std_stream = connected_stream.ok_or(last_err)?;
 
     let req = Request::get(path_and_query)
         .header("Host", authority)
@@ -106,7 +163,8 @@ pub async fn fetch_subscription_text(
         .body(Empty::<Bytes>::new())
         .map_err(|e| e.to_string())?;
 
-    let (status, user_info, body_bytes) = if scheme == "https" {
+    if scheme == "https" {
+        smartvpn_engine::transport::tls::ensure_crypto_provider();
         let mut roots = RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         let cfg = ClientConfig::builder()
@@ -119,22 +177,16 @@ pub async fn fetch_subscription_text(
             .connect(server_name, std_stream)
             .await
             .map_err(|e| format!("TLS handshake failed: {e}"))?;
-        send_http1(tls, req).await?
+        send_http1(tls, req).await
     } else {
-        send_http1(std_stream, req).await?
-    };
-
-    if !(200..300).contains(&status) {
-        return Err(format!("HTTP {status}"));
+        send_http1(std_stream, req).await
     }
-    let text = String::from_utf8_lossy(&body_bytes).into_owned();
-    Ok((text, user_info))
 }
 
 async fn send_http1<S>(
     stream: S,
     req: Request<Empty<Bytes>>,
-) -> Result<(u16, Option<QuotaInfo>, Bytes), String>
+) -> Result<(u16, Option<String>, Option<QuotaInfo>, Bytes), String>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
 {
@@ -144,11 +196,16 @@ where
     tokio::spawn(async move {
         let _ = conn.await;
     });
-    let res = timeout(Duration::from_secs(20), tx.send_request(req))
+    let res = timeout(Duration::from_secs(12), tx.send_request(req))
         .await
         .map_err(|_| "HTTP response timeout".to_owned())?
         .map_err(|e| e.to_string())?;
     let status = res.status().as_u16();
+    let location = res
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
     let user_info = res
         .headers()
         .get("subscription-userinfo")
@@ -159,7 +216,7 @@ where
         .await
         .map_err(|e| e.to_string())?
         .to_bytes();
-    Ok((status, user_info, body))
+    Ok((status, location, user_info, body))
 }
 
 pub fn parse_proxies_from_payload(payload: &str) -> Result<Vec<Value>, String> {
@@ -380,7 +437,7 @@ pub fn merge_enabled_subscriptions(subs: &[SavedSubscription]) -> Vec<Value> {
             let unique = if seen.insert(name.to_owned()) {
                 name.to_owned()
             } else {
-                format!("{name} ({})", sub.name)
+                format!("{name} ({})", sub.label)
             };
             seen.insert(unique.clone());
             let mut item = p.clone();

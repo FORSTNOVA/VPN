@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 smartvpn-engine = { path = "../engine" }
 smartvpn-core = { path = ".." }
+smartvpn-store = { path = "../../backend-rust-store" }
 bytes = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "server", "http1"] }
