@@ -1,22 +1,172 @@
+use crate::dialer::{TargetAddr, UdpPacketSocket};
 use blake2::{digest::consts::U32, Blake2b, Digest};
 use quinn::{
     udp::{RecvMeta, Transmit},
     AsyncUdpSocket, UdpPoller,
 };
 use std::{
+    collections::VecDeque,
     fmt,
     future::Future,
     io::{self, IoSliceMut},
     net::SocketAddr,
     pin::Pin,
     sync::{
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
     },
-    task::{ready, Context, Poll},
+    task::{ready, Context, Poll, Waker},
     time::Duration,
 };
 use tokio::time::{Instant, Sleep};
+
+#[derive(Debug)]
+struct TunnelPoller;
+
+impl UdpPoller for TunnelPoller {
+    fn poll_writable(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+pub(super) struct TunnelUdpSocket {
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    rx_queue: Arc<Mutex<VecDeque<Vec<u8>>>>,
+    rx_waker: Arc<Mutex<Option<Waker>>>,
+    closed: Arc<AtomicBool>,
+    synthetic_peer: SocketAddr,
+    local: SocketAddr,
+}
+
+impl fmt::Debug for TunnelUdpSocket {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TunnelUdpSocket")
+            .field("synthetic_peer", &self.synthetic_peer)
+            .finish_non_exhaustive()
+    }
+}
+
+impl TunnelUdpSocket {
+    pub(super) fn new(
+        sock: Box<dyn UdpPacketSocket>,
+        remote: TargetAddr,
+        synthetic_peer: SocketAddr,
+    ) -> Arc<Self> {
+        let sock: Arc<dyn UdpPacketSocket> = Arc::from(sock);
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Vec<u8>>(256);
+        let rx_queue = Arc::new(Mutex::new(VecDeque::new()));
+        let rx_waker: Arc<Mutex<Option<Waker>>> = Arc::new(Mutex::new(None));
+        let closed = Arc::new(AtomicBool::new(false));
+
+        let sock_tx = Arc::clone(&sock);
+        let remote_tx = remote.clone();
+        let closed_tx = Arc::clone(&closed);
+        tokio::spawn(async move {
+            while let Some(pkt) = rx.recv().await {
+                if sock_tx.send_to(&pkt, &remote_tx).await.is_err() {
+                    closed_tx.store(true, Ordering::Relaxed);
+                    break;
+                }
+            }
+        });
+
+        let sock_rx = Arc::clone(&sock);
+        let q_rx = Arc::clone(&rx_queue);
+        let w_rx = Arc::clone(&rx_waker);
+        let closed_rx = Arc::clone(&closed);
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 65535];
+            loop {
+                match sock_rx.recv_from(&mut buf).await {
+                    Ok((n, _)) => {
+                        {
+                            let mut q = q_rx.lock().unwrap();
+                            if q.len() < 256 {
+                                q.push_back(buf[..n].to_vec());
+                            }
+                        }
+                        if let Some(w) = w_rx.lock().unwrap().take() {
+                            w.wake();
+                        }
+                    }
+                    Err(_) => {
+                        closed_rx.store(true, Ordering::Relaxed);
+                        if let Some(w) = w_rx.lock().unwrap().take() {
+                            w.wake();
+                        }
+                        break;
+                    }
+                }
+            }
+        });
+
+        Arc::new(Self {
+            tx,
+            rx_queue,
+            rx_waker,
+            closed,
+            synthetic_peer,
+            local: ([127, 0, 0, 1], 0).into(),
+        })
+    }
+}
+
+impl AsyncUdpSocket for TunnelUdpSocket {
+    fn create_io_poller(self: Arc<Self>) -> Pin<Box<dyn UdpPoller>> {
+        Box::pin(TunnelPoller)
+    }
+
+    fn try_send(&self, transmit: &Transmit<'_>) -> io::Result<()> {
+        if self.closed.load(Ordering::Relaxed) {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "underlay UDP tunnel closed",
+            ));
+        }
+        self.tx
+            .try_send(transmit.contents.to_vec())
+            .map_err(|e| match e {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                    io::ErrorKind::WouldBlock.into()
+                }
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "underlay UDP tunnel closed")
+                }
+            })
+    }
+
+    fn poll_recv(
+        &self,
+        cx: &mut Context<'_>,
+        bufs: &mut [IoSliceMut<'_>],
+        meta: &mut [RecvMeta],
+    ) -> Poll<io::Result<usize>> {
+        if let Some(pkt) = self.rx_queue.lock().unwrap().pop_front() {
+            let n = pkt.len().min(bufs[0].len());
+            bufs[0][..n].copy_from_slice(&pkt[..n]);
+            meta[0] = RecvMeta {
+                addr: self.synthetic_peer,
+                len: n,
+                stride: n.max(1),
+                ecn: None,
+                dst_ip: None,
+            };
+            return Poll::Ready(Ok(1));
+        }
+        if self.closed.load(Ordering::Relaxed) {
+            return Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "underlay UDP tunnel closed",
+            )));
+        }
+        *self.rx_waker.lock().unwrap() = Some(cx.waker().clone());
+        Poll::Pending
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        Ok(self.local)
+    }
+}
 
 pub(super) fn bind_protected(addr: SocketAddr) -> io::Result<std::net::UdpSocket> {
     let socket = std::net::UdpSocket::bind(addr)?;

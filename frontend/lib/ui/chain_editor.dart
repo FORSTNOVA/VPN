@@ -468,13 +468,10 @@ class _NodeSelectionSheetState extends State<_NodeSelectionSheet> {
   Widget _nodeTile(String node) {
     final current = node == widget.current;
     final transport = widget.nodeTransports[node] ?? '';
-    final hop1Only = widget.prefix.isNotEmpty && transport == 'QUIC/UDP';
     return ListTile(
       dense: true,
       title: Text(
-          transport.isEmpty
-              ? node
-              : '$node [$transport${hop1Only ? ' · 仅第1跳' : ''}]',
+          transport.isEmpty ? node : '$node [$transport]',
           style: TextStyle(
             fontWeight: current ? FontWeight.bold : FontWeight.normal,
             color: current ? Theme.of(context).colorScheme.primary : null,

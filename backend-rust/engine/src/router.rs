@@ -54,15 +54,18 @@ fn extend(spec: &NodeSpec, underlay: Option<Dialer>) -> io::Result<Option<Dialer
         NodeSpec::Trojan(c) => Arc::new(TrojanDialer::with_underlay(c.clone(), under_tcp())),
         NodeSpec::AnyTls(c) => Arc::new(AnyTlsDialer::with_underlay(c.clone(), under_tcp())),
         NodeSpec::Vless(c) => Arc::new(VlessDialer::with_underlay(c.clone(), under_tcp())),
-        NodeSpec::Hysteria2(c) => {
-            if underlay.is_some() {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "Hysteria2 requires a UDP underlay and must be the first proxy hop",
-                ));
+        NodeSpec::Hysteria2(c) => match underlay {
+            Some(u) => {
+                if u.udp().is_none() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "previous hop does not support UDP relay for Hysteria2",
+                    ));
+                }
+                Arc::new(Hysteria2Dialer::with_underlay(c.clone(), u))
             }
-            Arc::new(Hysteria2Dialer::new(c.clone()))
-        }
+            None => Arc::new(Hysteria2Dialer::new(c.clone())),
+        },
         NodeSpec::Chain(hops) => {
             if hops.is_empty() {
                 return Err(io::Error::new(

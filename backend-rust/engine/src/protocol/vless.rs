@@ -9,11 +9,14 @@ use std::{
 };
 
 use rand::Rng;
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, ReadHalf, WriteHalf};
 use uuid::Uuid;
 
 use crate::{
-    dialer::{BoxFuture, BoxedStream, DirectDialer, OutboundDialer, TargetAddr},
+    dialer::{
+        BoxFuture, BoxedStream, DirectDialer, OutboundDialer, OutboundUdpDialer, TargetAddr,
+        UdpPacketSocket,
+    },
     transport::{
         grpc::{connect_grpc, GrpcConfig},
         reality::{connect_reality, RealityConfig},
@@ -24,6 +27,7 @@ use crate::{
 
 const VLESS_VERSION: u8 = 0x00;
 const CMD_TCP: u8 = 0x01;
+const CMD_UDP: u8 = 0x02;
 
 const VISION_CONTINUE: u8 = 0x00;
 const VISION_END: u8 = 0x01;
@@ -101,58 +105,159 @@ fn write_vless_target(target: &TargetAddr, out: &mut Vec<u8>) -> io::Result<()> 
     Ok(())
 }
 
-impl OutboundDialer for VlessDialer {
-    fn dial_tcp<'a>(&'a self, target: &'a TargetAddr) -> BoxFuture<'a, io::Result<BoxedStream>> {
-        Box::pin(async move {
-            let raw = self.underlay.dial_tcp(&self.cfg.server).await?;
-            let host = self.cfg.server.host();
-            let sec_stream = match &self.cfg.security {
-                VlessSecurity::None => raw,
-                VlessSecurity::Tls(tls) => connect_tls(raw, &host, tls).await?,
-                VlessSecurity::Reality(reality) => connect_reality(raw, reality).await?,
-            };
-            let mut transport = match &self.cfg.network {
-                VlessNetwork::Tcp => sec_stream,
-                VlessNetwork::Ws(ws) => connect_ws(sec_stream, &host, ws).await?,
-                VlessNetwork::WsHeaders(ws, headers) => {
-                    crate::transport::ws::connect_ws_headers(sec_stream, &host, ws, headers).await?
-                }
-                VlessNetwork::Grpc(grpc) => connect_grpc(sec_stream, &host, grpc).await?,
-            };
+impl VlessDialer {
+    async fn open_cmd(
+        cfg: &VlessConfig,
+        underlay: &Arc<dyn OutboundDialer>,
+        cmd: u8,
+        target: &TargetAddr,
+        allow_vision: bool,
+    ) -> io::Result<BoxedStream> {
+        let raw = underlay.dial_tcp(&cfg.server).await?;
+        let host = cfg.server.host();
+        let sec_stream = match &cfg.security {
+            VlessSecurity::None => raw,
+            VlessSecurity::Tls(tls) => connect_tls(raw, &host, tls).await?,
+            VlessSecurity::Reality(reality) => connect_reality(raw, reality).await?,
+        };
+        let mut transport = match &cfg.network {
+            VlessNetwork::Tcp => sec_stream,
+            VlessNetwork::Ws(ws) => connect_ws(sec_stream, &host, ws).await?,
+            VlessNetwork::WsHeaders(ws, headers) => {
+                crate::transport::ws::connect_ws_headers(sec_stream, &host, ws, headers).await?
+            }
+            VlessNetwork::Grpc(grpc) => connect_grpc(sec_stream, &host, grpc).await?,
+        };
 
-            let is_vision = self
-                .cfg
+        let is_vision = allow_vision
+            && cfg
                 .flow
                 .as_deref()
                 .is_some_and(|f| f.eq_ignore_ascii_case("xtls-rprx-vision"));
 
-            let mut addons = Vec::new();
-            if is_vision {
-                let flow_bytes = b"xtls-rprx-vision";
-                addons.push(0x0a); // protobuf field 1 (Flow)
-                addons.push(flow_bytes.len() as u8);
-                addons.extend_from_slice(flow_bytes);
+        let mut addons = Vec::new();
+        if is_vision {
+            let flow_bytes = b"xtls-rprx-vision";
+            addons.push(0x0a); // protobuf field 1 (Flow)
+            addons.push(flow_bytes.len() as u8);
+            addons.extend_from_slice(flow_bytes);
+        }
+
+        let mut hdr = Vec::with_capacity(1 + 16 + 1 + addons.len() + 1 + 2 + 64);
+        hdr.push(VLESS_VERSION);
+        hdr.extend_from_slice(&cfg.uuid);
+        hdr.push(addons.len() as u8);
+        hdr.extend_from_slice(&addons);
+        hdr.push(cmd);
+        write_vless_target(target, &mut hdr)?;
+
+        transport.write_all(&hdr).await?;
+        transport.flush().await?;
+
+        let vless_stream = VlessStream::new(transport);
+        if is_vision {
+            Ok(Box::new(VisionStream::new(Box::new(vless_stream), cfg.uuid)) as BoxedStream)
+        } else {
+            Ok(Box::new(vless_stream) as BoxedStream)
+        }
+    }
+}
+
+impl OutboundDialer for VlessDialer {
+    fn udp(&self) -> Option<&dyn OutboundUdpDialer> {
+        Some(self)
+    }
+
+    fn dial_tcp<'a>(&'a self, target: &'a TargetAddr) -> BoxFuture<'a, io::Result<BoxedStream>> {
+        Box::pin(async move { Self::open_cmd(&self.cfg, &self.underlay, CMD_TCP, target, true).await })
+    }
+}
+
+impl OutboundUdpDialer for VlessDialer {
+    fn dial_udp(&self) -> BoxFuture<'_, io::Result<Box<dyn UdpPacketSocket>>> {
+        Box::pin(async move {
+            Ok(Box::new(VlessUdpSocket {
+                cfg: self.cfg.clone(),
+                underlay: self.underlay.clone(),
+                state: tokio::sync::Mutex::new(None),
+                reader: tokio::sync::Mutex::new(None),
+                writer: tokio::sync::Mutex::new(None),
+                ready: tokio::sync::Notify::new(),
+            }) as Box<dyn UdpPacketSocket>)
+        })
+    }
+}
+
+struct VlessUdpSocket {
+    cfg: VlessConfig,
+    underlay: Arc<dyn OutboundDialer>,
+    state: tokio::sync::Mutex<Option<TargetAddr>>,
+    reader: tokio::sync::Mutex<Option<ReadHalf<BoxedStream>>>,
+    writer: tokio::sync::Mutex<Option<WriteHalf<BoxedStream>>>,
+    ready: tokio::sync::Notify,
+}
+
+impl UdpPacketSocket for VlessUdpSocket {
+    fn send_to<'a>(
+        &'a self,
+        payload: &'a [u8],
+        target: &'a TargetAddr,
+    ) -> BoxFuture<'a, io::Result<usize>> {
+        Box::pin(async move {
+            let mut w_guard = self.writer.lock().await;
+            if w_guard.is_none() {
+                let stream =
+                    VlessDialer::open_cmd(&self.cfg, &self.underlay, CMD_UDP, target, false)
+                        .await?;
+                let (r, w) = tokio::io::split(stream);
+                *self.state.lock().await = Some(target.clone());
+                *self.reader.lock().await = Some(r);
+                *w_guard = Some(w);
+                self.ready.notify_waiters();
             }
+            let len = u16::try_from(payload.len())
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "UDP payload too large"))?;
+            let mut pkt = Vec::with_capacity(2 + payload.len());
+            pkt.extend_from_slice(&len.to_be_bytes());
+            pkt.extend_from_slice(payload);
+            let w = w_guard.as_mut().expect("writer initialized");
+            w.write_all(&pkt).await?;
+            w.flush().await?;
+            Ok(payload.len())
+        })
+    }
 
-            let mut hdr = Vec::with_capacity(1 + 16 + 1 + addons.len() + 1 + 2 + 64);
-            hdr.push(VLESS_VERSION);
-            hdr.extend_from_slice(&self.cfg.uuid);
-            hdr.push(addons.len() as u8);
-            hdr.extend_from_slice(&addons);
-            hdr.push(CMD_TCP);
-            write_vless_target(target, &mut hdr)?;
-
-            transport.write_all(&hdr).await?;
-            transport.flush().await?;
-
-            let vless_stream = VlessStream::new(transport);
-            if is_vision {
-                Ok(
-                    Box::new(VisionStream::new(Box::new(vless_stream), self.cfg.uuid))
-                        as BoxedStream,
-                )
-            } else {
-                Ok(Box::new(vless_stream) as BoxedStream)
+    fn recv_from<'a>(
+        &'a self,
+        buf: &'a mut [u8],
+    ) -> BoxFuture<'a, io::Result<(usize, TargetAddr)>> {
+        Box::pin(async move {
+            loop {
+                {
+                    let mut r_guard = self.reader.lock().await;
+                    if let Some(r) = r_guard.as_mut() {
+                        let mut len_buf = [0u8; 2];
+                        r.read_exact(&mut len_buf).await?;
+                        let len = u16::from_be_bytes(len_buf) as usize;
+                        if len > buf.len() {
+                            let mut discard = vec![0u8; len];
+                            r.read_exact(&mut discard).await?;
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "receive buffer too small for VLESS UDP packet",
+                            ));
+                        }
+                        r.read_exact(&mut buf[..len]).await?;
+                        let peer = self
+                            .state
+                            .lock()
+                            .await
+                            .clone()
+                            .unwrap_or_else(|| TargetAddr::Ip(([0, 0, 0, 0], 0).into()));
+                        return Ok((len, peer));
+                    }
+                }
+                self.ready.notified().await;
             }
         })
     }

@@ -41,6 +41,7 @@ pub struct Hysteria2Config {
 
 pub struct Hysteria2Dialer {
     cfg: Hysteria2Config,
+    underlay: Option<Arc<dyn OutboundDialer>>,
     active: Mutex<Option<Arc<Session>>>,
 }
 
@@ -127,6 +128,15 @@ impl Hysteria2Dialer {
     pub fn new(cfg: Hysteria2Config) -> Self {
         Self {
             cfg,
+            underlay: None,
+            active: Mutex::new(None),
+        }
+    }
+
+    pub fn with_underlay(cfg: Hysteria2Config, underlay: Arc<dyn OutboundDialer>) -> Self {
+        Self {
+            cfg,
+            underlay: Some(underlay),
             active: Mutex::new(None),
         }
     }
@@ -160,44 +170,70 @@ impl Hysteria2Dialer {
             .body(())
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         let host = cfg.server.host();
-        let peer = match &cfg.server {
-            TargetAddr::Ip(addr) => *addr,
-            TargetAddr::Domain(host, port) => {
-                let addrs: Vec<SocketAddr> =
-                    tokio::net::lookup_host((host.as_str(), *port)).await?.collect();
-                if addrs.is_empty() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        "Hysteria server has no addresses",
-                    ));
-                }
-                // Prefer route-reachable addresses (skipping IPv6 when the host has no IPv6 route).
-                addrs
-                    .iter()
-                    .copied()
-                    .find(|addr| {
-                        let bind_addr = if addr.is_ipv4() {
-                            "0.0.0.0:0"
-                        } else {
-                            "[::]:0"
-                        };
-                        std::net::UdpSocket::bind(bind_addr)
-                            .and_then(|s| s.connect(addr))
-                            .is_ok()
-                    })
-                    .unwrap_or(addrs[0])
-            }
-        };
-        let bind: SocketAddr = if peer.is_ipv4() {
-            ([0; 4], 0).into()
-        } else {
-            ([0; 16], 0).into()
-        };
         let runtime = Arc::new(quinn::TokioRuntime);
+        let (peer, raw_udp): (SocketAddr, Arc<dyn quinn::AsyncUdpSocket>) =
+            if let Some(underlay) = &self.underlay {
+                let udp_dialer = underlay.udp().ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        "previous hop does not support UDP relay for Hysteria2",
+                    )
+                })?;
+                let udp_sock = udp_dialer.dial_udp().await?;
+                let synthetic_peer: SocketAddr = match &cfg.server {
+                    TargetAddr::Ip(addr) => *addr,
+                    TargetAddr::Domain(_, port) => ([127, 0, 0, 1], *port).into(),
+                };
+                let tunnel_sock =
+                    socket::TunnelUdpSocket::new(udp_sock, cfg.server.clone(), synthetic_peer);
+                (synthetic_peer, tunnel_sock)
+            } else {
+                let peer = match &cfg.server {
+                    TargetAddr::Ip(addr) => *addr,
+                    TargetAddr::Domain(host, port) => {
+                        let addrs: Vec<SocketAddr> =
+                            tokio::net::lookup_host((host.as_str(), *port))
+                                .await?
+                                .collect();
+                        if addrs.is_empty() {
+                            return Err(io::Error::new(
+                                io::ErrorKind::NotFound,
+                                "Hysteria server has no addresses",
+                            ));
+                        }
+                        // Prefer route-reachable addresses (skipping IPv6 when the host has no IPv6 route).
+                        addrs
+                            .iter()
+                            .copied()
+                            .find(|addr| {
+                                let bind_addr = if addr.is_ipv4() {
+                                    "0.0.0.0:0"
+                                } else {
+                                    "[::]:0"
+                                };
+                                std::net::UdpSocket::bind(bind_addr)
+                                    .and_then(|s| s.connect(addr))
+                                    .is_ok()
+                            })
+                            .unwrap_or(addrs[0])
+                    }
+                };
+                let bind: SocketAddr = if peer.is_ipv4() {
+                    ([0; 4], 0).into()
+                } else {
+                    ([0; 16], 0).into()
+                };
+                let wrapped = runtime.wrap_udp_socket(socket::bind_protected(bind)?)?;
+                (peer, wrapped)
+            };
         let socket = Arc::new(PacketTransport::new(
-            runtime.wrap_udp_socket(socket::bind_protected(bind)?)?,
+            raw_udp,
             peer,
-            cfg.hop_ports.clone(),
+            if self.underlay.is_some() {
+                Vec::new()
+            } else {
+                cfg.hop_ports.clone()
+            },
             cfg.obfs_salamander.clone(),
         ));
         let endpoint =

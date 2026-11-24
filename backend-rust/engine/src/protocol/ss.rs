@@ -18,7 +18,10 @@ use rand::RngCore;
 use sha1::Sha1;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
 
-use crate::dialer::{BoxFuture, BoxedStream, DirectDialer, OutboundDialer, TargetAddr};
+use crate::dialer::{
+    protect_socket_fd, BoxFuture, BoxedStream, DirectDialer, OutboundDialer, OutboundUdpDialer,
+    TargetAddr, UdpPacketSocket,
+};
 
 const MAX_CHUNK_SIZE: usize = 0x3FFF;
 const TAG_LEN: usize = 16;
@@ -82,6 +85,10 @@ impl ShadowsocksDialer {
 }
 
 impl OutboundDialer for ShadowsocksDialer {
+    fn udp(&self) -> Option<&dyn OutboundUdpDialer> {
+        Some(self)
+    }
+
     fn dial_tcp<'a>(&'a self, target: &'a TargetAddr) -> BoxFuture<'a, io::Result<BoxedStream>> {
         Box::pin(async move {
             let mut raw = self.underlay.dial_tcp(&self.cfg.server).await?;
@@ -458,5 +465,142 @@ impl AsyncWrite for ShadowsocksStream {
             Poll::Ready(Ok(())) => Pin::new(&mut self.inner).poll_shutdown(cx),
             other => other,
         }
+    }
+}
+
+enum SsUdpCarrier {
+    Direct(tokio::net::UdpSocket),
+    Relay(Box<dyn UdpPacketSocket>),
+}
+
+struct ShadowsocksUdpSocket {
+    carrier: SsUdpCarrier,
+    server: TargetAddr,
+    cipher: ShadowsocksCipher,
+    master_key: Vec<u8>,
+}
+
+impl OutboundUdpDialer for ShadowsocksDialer {
+    fn dial_udp(&self) -> BoxFuture<'_, io::Result<Box<dyn UdpPacketSocket>>> {
+        Box::pin(async move {
+            let carrier = if let Some(u) = self.underlay.udp() {
+                SsUdpCarrier::Relay(u.dial_udp().await?)
+            } else {
+                let server_ip = match &self.cfg.server {
+                    TargetAddr::Ip(addr) => *addr,
+                    TargetAddr::Domain(host, port) => {
+                        tokio::net::lookup_host((host.as_str(), *port))
+                            .await?
+                            .next()
+                            .ok_or_else(|| {
+                                io::Error::new(
+                                    io::ErrorKind::NotFound,
+                                    "Shadowsocks server has no addresses",
+                                )
+                            })?
+                    }
+                };
+                let bind_addr: std::net::SocketAddr = if server_ip.is_ipv4() {
+                    ([0, 0, 0, 0], 0).into()
+                } else {
+                    ([0; 16], 0).into()
+                };
+                let sock = socket2::Socket::new(
+                    socket2::Domain::for_address(bind_addr),
+                    socket2::Type::DGRAM,
+                    Some(socket2::Protocol::UDP),
+                )?;
+                #[cfg(unix)]
+                protect_socket_fd(std::os::fd::AsRawFd::as_raw_fd(&sock))?;
+                sock.set_nonblocking(true)?;
+                sock.bind(&bind_addr.into())?;
+                let std_sock: std::net::UdpSocket = sock.into();
+                let tokio_sock = tokio::net::UdpSocket::from_std(std_sock)?;
+                tokio_sock.connect(server_ip).await?;
+                SsUdpCarrier::Direct(tokio_sock)
+            };
+            Ok(Box::new(ShadowsocksUdpSocket {
+                carrier,
+                server: self.cfg.server.clone(),
+                cipher: self.cfg.cipher,
+                master_key: self.master_key.clone(),
+            }) as Box<dyn UdpPacketSocket>)
+        })
+    }
+}
+
+impl UdpPacketSocket for ShadowsocksUdpSocket {
+    fn send_to<'a>(
+        &'a self,
+        payload: &'a [u8],
+        target: &'a TargetAddr,
+    ) -> BoxFuture<'a, io::Result<usize>> {
+        Box::pin(async move {
+            let key_len = self.cipher.key_len();
+            let mut salt = vec![0u8; key_len];
+            rand::thread_rng().fill_bytes(&mut salt);
+            let subkey = derive_subkey(&self.master_key, &salt, key_len)?;
+            let mut cipher = AeadCipher::new(self.cipher, &subkey);
+
+            let mut plain = Vec::with_capacity(64 + payload.len() + TAG_LEN);
+            target.write_socks_addr(&mut plain)?;
+            plain.extend_from_slice(payload);
+            cipher.encrypt_in_place(&mut plain)?;
+
+            let mut packet = Vec::with_capacity(salt.len() + plain.len());
+            packet.extend_from_slice(&salt);
+            packet.extend_from_slice(&plain);
+
+            match &self.carrier {
+                SsUdpCarrier::Direct(sock) => {
+                    sock.send(&packet).await?;
+                }
+                SsUdpCarrier::Relay(relay) => {
+                    relay.send_to(&packet, &self.server).await?;
+                }
+            }
+            Ok(payload.len())
+        })
+    }
+
+    fn recv_from<'a>(
+        &'a self,
+        buf: &'a mut [u8],
+    ) -> BoxFuture<'a, io::Result<(usize, TargetAddr)>> {
+        Box::pin(async move {
+            let mut pkt = vec![0u8; 65535];
+            let n = match &self.carrier {
+                SsUdpCarrier::Direct(sock) => sock.recv(&mut pkt).await?,
+                SsUdpCarrier::Relay(relay) => {
+                    let (n, _) = relay.recv_from(&mut pkt).await?;
+                    n
+                }
+            };
+            let key_len = self.cipher.key_len();
+            if n < key_len + TAG_LEN {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "truncated Shadowsocks UDP packet",
+                ));
+            }
+            let (salt, rest) = pkt[..n].split_at(key_len);
+            let subkey = derive_subkey(&self.master_key, salt, key_len)?;
+            let mut cipher = AeadCipher::new(self.cipher, &subkey);
+            let mut plain = rest.to_vec();
+            cipher.decrypt_in_place(&mut plain)?;
+
+            let mut cur = io::Cursor::new(plain.as_slice());
+            let addr = TargetAddr::read_socks_addr(&mut cur).await?;
+            let pos = cur.position() as usize;
+            let data = &plain[pos..];
+            if data.len() > buf.len() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "receive buffer too small for Shadowsocks UDP packet",
+                ));
+            }
+            buf[..data.len()].copy_from_slice(data);
+            Ok((data.len(), addr))
+        })
     }
 }
