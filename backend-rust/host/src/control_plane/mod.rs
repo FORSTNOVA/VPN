@@ -424,12 +424,33 @@ impl ControlPlane {
     }
 
     fn nodes_payload(&self, st: &RuntimeState) -> Value {
+        let mut source_by_name: std::collections::HashMap<&str, &str> =
+            std::collections::HashMap::new();
+        for sub in &st.persisted.subscriptions {
+            if !sub.enabled && !sub.active {
+                continue;
+            }
+            let label = if sub.label.trim().is_empty() {
+                sub.id.as_str()
+            } else {
+                sub.label.as_str()
+            };
+            for rp in &sub.raw_proxies {
+                if let Some(n) = rp.get("name").and_then(|v| v.as_str()) {
+                    source_by_name.entry(n).or_insert(label);
+                }
+            }
+        }
         let proxies = st.all_proxy_values();
         let list: Vec<Value> = proxies
             .iter()
             .filter_map(|p| {
                 let name = p.get("name")?.as_str()?;
                 let kind = p.get("type").and_then(|t| t.as_str()).unwrap_or("proxy");
+                let network = p.get("network").and_then(|v| v.as_str()).unwrap_or("");
+                let tls = p.get("tls").and_then(|v| v.as_bool()).unwrap_or(false)
+                    || p.get("reality-opts").is_some();
+                let source_label = source_by_name.get(name).copied().unwrap_or("");
                 let delay = st.node_delays.get(name).copied().unwrap_or(0);
                 let first_delay = st.node_first_delays.get(name).copied().unwrap_or(delay);
                 let region = st
@@ -440,11 +461,14 @@ impl ControlPlane {
                 Some(json!({
                     "name": name,
                     "type": kind,
+                    "network": network,
+                    "tls": tls,
                     "delay": delay,
                     "firstDelay": first_delay,
                     "region": region,
                     "manual": st.persisted.manual_nodes.iter().any(|m| m.name == name),
-                    "source": "merged"
+                    "sourceLabel": source_label,
+                    "source": if source_label.is_empty() { "merged" } else { source_label }
                 }))
             })
             .collect();

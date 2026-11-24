@@ -516,10 +516,14 @@ impl AsyncWrite for VisionStream {
             this.write_buf.extend_from_slice(&this.uuid);
             this.write_uuid_sent = true;
         }
-        // Transition to Direct mode once we've sent a Vision Continue or End frame;
-        // for simplicity and compatibility, emit Continue on first packet if TLS ClientHello, else End.
-        let cmd = if buf.starts_with(&[0x16, 0x03]) {
+        // Match XTLS-Vision framing: keep padding through Handshake (0x16 0x03) and
+        // ChangeCipherSpec (0x14 0x03), switch to DIRECT (0x02) on TLS 1.3 ApplicationData
+        // (0x17 0x03 0x03), and END (0x01) for non-TLS traffic.
+        let cmd = if buf.starts_with(&[0x16, 0x03]) || buf.starts_with(&[0x14, 0x03]) {
             VISION_CONTINUE
+        } else if buf.starts_with(&[0x17, 0x03, 0x03]) {
+            this.write_direct = true;
+            VISION_DIRECT
         } else {
             this.write_direct = true;
             VISION_END
