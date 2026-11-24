@@ -182,11 +182,14 @@ impl Router {
             }
         };
         let req = format!(
-            "HEAD /generate_204 HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+            "GET /generate_204 HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
         );
         tokio::time::timeout(budget, stream.write_all(req.as_bytes()))
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "write timeout"))??;
+        tokio::time::timeout(budget, stream.flush())
+            .await
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "flush timeout"))??;
         let mut buf = [0u8; 64];
         let n = tokio::time::timeout(budget, stream.read(&mut buf))
             .await

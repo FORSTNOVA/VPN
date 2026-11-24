@@ -16,7 +16,7 @@ async fn dial_and_measure_yaml(
     let budget = std::time::Duration::from_millis(timeout_ms.clamp(1000, 15000));
     let first_ms = bundle
         .router
-        .probe_http_204("www.google.com", 80, budget)
+        .probe_http_204("www.gstatic.com", 80, budget)
         .await
         .map_err(|e| format!("probe failed: {e}"))?;
     Ok((first_ms, (first_ms / 3).max(1)))
