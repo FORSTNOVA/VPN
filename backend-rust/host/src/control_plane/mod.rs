@@ -630,7 +630,8 @@ impl ControlPlane {
         };
         let key = hops.join(" → ");
         let measured = chrono::Utc::now().timestamp_millis();
-        match nodes::probe_chain_latency(&persisted, &proxies, &hops, protect, 6000).await {
+        let timeout_ms = if hops.len() > 1 { 12000 } else { 6000 };
+        match nodes::probe_chain_latency(&persisted, &proxies, &hops, protect, timeout_ms).await {
             Ok((first_ms, steady_ms)) => {
                 let mut st = self.state.lock().await;
                 if hops.len() == 1 {
@@ -688,7 +689,8 @@ impl ControlPlane {
         } else {
             return text_resp(StatusCode::BAD_REQUEST, "no node selected\n");
         };
-        match nodes::probe_chain_latency(&persisted, &proxies, &hops, protect, 6000).await {
+        let timeout_ms = if hops.len() > 1 { 12000 } else { 6000 };
+        match nodes::probe_chain_latency(&persisted, &proxies, &hops, protect, timeout_ms).await {
             Ok((first_ms, steady_ms)) => json_resp(
                 StatusCode::OK,
                 json!({
