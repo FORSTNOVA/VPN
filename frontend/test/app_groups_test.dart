@@ -101,4 +101,16 @@ void main() {
       'apps': ['com.example.app']
     });
   });
+
+  testWidgets('empty apps is rejected by group editor', (tester) async {
+    List<Map<String, dynamic>>? saved;
+    await open(tester, true, (v) => saved = v);
+    await tap(tester, '添加分组');
+    await tester.enterText(find.byType(TextFormField).first, 'Empty');
+    await tap(tester, '指定节点');
+    await tap(tester, '直连 (DIRECT)');
+    await tap(tester, '确定');
+    expect(find.text('请至少填写或选择一个应用'), findsOneWidget);
+    expect(saved, isNull);
+  });
 }

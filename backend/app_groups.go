@@ -48,6 +48,10 @@ func (g *appGroups) UnmarshalJSON(body []byte) error {
 	return err
 }
 
+type appGroupValidationError string
+
+func (e appGroupValidationError) Error() string { return string(e) }
+
 func decodeAppGroups(body []byte, android bool) (appGroups, error) {
 	// A missing enabled field must not silently disable the group.
 	var rows []struct {
@@ -60,13 +64,13 @@ func decodeAppGroups(body []byte, android bool) (appGroups, error) {
 		return nil, fmt.Errorf("appGroups: %w", err)
 	}
 	if rows == nil {
-		return nil, fmt.Errorf("appGroups must be an array")
+		return nil, appGroupValidationError("appGroups must be an array")
 	}
 	out := make(appGroups, 0, len(rows))
 	for i, row := range rows {
 		g := row.appGroup
 		if !validAppGroupText(g.ID) || !validAppGroupText(g.Name) || len(g.Apps) == 0 || row.Enabled == nil {
-			return nil, fmt.Errorf("appGroups[%d] requires valid id, name, apps and enabled", i)
+			return nil, appGroupValidationError(fmt.Sprintf("appGroups[%d] requires valid id, name, apps and enabled", i))
 		}
 		g.ID = strings.TrimSpace(g.ID)
 		g.Name = strings.TrimSpace(g.Name)
@@ -74,17 +78,17 @@ func decodeAppGroups(body []byte, android bool) (appGroups, error) {
 		switch g.TargetType {
 		case "node":
 			if strings.TrimSpace(g.TargetNode) == "" {
-				return nil, fmt.Errorf("appGroups[%d] requires a target node", i)
+				return nil, appGroupValidationError(fmt.Sprintf("appGroups[%d] requires a target node", i))
 			}
 		case "direct", "reject":
 		default:
-			return nil, fmt.Errorf("appGroups[%d] has invalid targetType %q", i, g.TargetType)
+			return nil, appGroupValidationError(fmt.Sprintf("appGroups[%d] has invalid targetType %q", i, g.TargetType))
 		}
 		seen := map[string]bool{}
 		apps := g.Apps[:0]
 		for _, app := range g.Apps {
 			if !validAppGroupText(app) {
-				return nil, fmt.Errorf("appGroups[%d] has invalid application %q", i, app)
+				return nil, appGroupValidationError(fmt.Sprintf("appGroups[%d] has invalid application %q", i, app))
 			}
 			app = strings.TrimSpace(app)
 			key := app

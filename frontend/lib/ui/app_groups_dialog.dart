@@ -111,9 +111,15 @@ class _GroupEditorState extends State<_GroupEditor> {
     super.dispose();
   }
 
-  List<String> get entries => apps.text.isEmpty ? [] : apps.text.split('\n');
+  List<String> get entries => apps.text.trim().isEmpty
+      ? []
+      : apps.text
+          .split(RegExp(r'\r?\n'))
+          .map((s) => s.trim())
+          .where((s) => s.isNotEmpty)
+          .toList();
   bool invalid(String value) =>
-      value.trim().isEmpty || value.contains(RegExp(r'[,\r\n*]'));
+      value.trim().isEmpty || value.contains(RegExp(r'[\x00-\x1f\x7f,*]'));
 
   Future<void> pick() async {
     setState(() => pickerError = null);
@@ -221,8 +227,13 @@ class _GroupEditorState extends State<_GroupEditor> {
                         decoration: InputDecoration(
                             labelText:
                                 widget.android ? '应用包名（每行一个）' : '进程名（每行一个）'),
-                        validator: (_) =>
-                            entries.any(invalid) ? '每行填写一个应用，不能包含逗号或 *' : null),
+                        validator: (_) {
+                          if (entries.isEmpty) return '请至少填写或选择一个应用';
+                          if (entries.any(invalid)) {
+                            return '每行填写一个应用，不能包含逗号或 *';
+                          }
+                          return null;
+                        }),
                     TextButton.icon(
                         onPressed: pick,
                         icon: const Icon(Icons.folder_open),

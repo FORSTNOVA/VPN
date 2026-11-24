@@ -411,6 +411,11 @@ func (a *app) updateSettings(w http.ResponseWriter, r *http.Request) {
 	defer tracked.recoverFailure()
 	var patch settingsPatch
 	if err := decodeJSON(r.Body, &patch); err != nil {
+		var validationErr appGroupValidationError
+		if errors.As(err, &validationErr) {
+			http.Error(w, validationErr.Error(), http.StatusBadRequest)
+			return
+		}
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
