@@ -380,22 +380,23 @@ extension _TrafficPage on _HomePageState {
 
   Widget _historyPeriodSegmentedButton() =>
       SegmentedButton<TrafficHistoryPeriod>(
+        showSelectedIcon: false,
         segments: const [
           ButtonSegment(
             value: TrafficHistoryPeriod.hour,
-            label: Text('小时'),
+            label: Text('小时', softWrap: false),
           ),
           ButtonSegment(
             value: TrafficHistoryPeriod.day,
-            label: Text('日'),
+            label: Text('日', softWrap: false),
           ),
           ButtonSegment(
             value: TrafficHistoryPeriod.month,
-            label: Text('月'),
+            label: Text('月', softWrap: false),
           ),
           ButtonSegment(
             value: TrafficHistoryPeriod.year,
-            label: Text('年'),
+            label: Text('年', softWrap: false),
           ),
         ],
         selected: {_historyPeriod},

@@ -62,25 +62,21 @@ extension _SubscriptionPage on _HomePageState {
         _Panel(
           child:
               Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(
+            Wrap(
+              spacing: 8,
+              runSpacing: 6,
+              crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                Expanded(
-                  child: Row(
-                    children: [
-                      const Text('已保存的订阅源',
-                          style: TextStyle(
-                              fontSize: 14, fontWeight: FontWeight.w700)),
-                      const SizedBox(width: 8),
-                      if (_isMergedSubscription)
-                        const _Badge(
-                          label: '当前运行：已合并主源',
-                          color: Tokens.ok,
-                          tint: Tokens.okTint,
-                          showDot: true,
-                        ),
-                    ],
+                const Text('已保存的订阅源',
+                    style: TextStyle(
+                        fontSize: 14, fontWeight: FontWeight.w700)),
+                if (_isMergedSubscription)
+                  const _Badge(
+                    label: '当前运行：已合并主源',
+                    color: Tokens.ok,
+                    tint: Tokens.okTint,
+                    showDot: true,
                   ),
-                ),
                 Text(
                   '共 ${_savedSubscriptions.length} 个源 · 已启用 $enabledCount 个用于合并',
                   style: Tokens.hint,
@@ -463,50 +459,62 @@ extension _SubscriptionPage on _HomePageState {
 
           if (narrow) ...[
             const SizedBox(height: 8),
-            Padding(
-              padding: const EdgeInsets.only(left: 36),
-              child: Wrap(
-                spacing: 4,
-                runSpacing: 4,
-                children: [
-                  TextButton.icon(
-                    onPressed: blocked
-                        ? null
-                        : () => unawaited(_refreshSingleSubscription(entry)),
-                    icon: const Icon(Icons.refresh_rounded, size: 14),
-                    label: const Text('拉取'),
-                  ),
-                  TextButton.icon(
-                    onPressed: (_busy || _quotaRefreshingId != null)
-                        ? null
-                        : () => unawaited(_refreshSubscriptionQuota(entry)),
-                    icon: const Icon(Icons.data_usage_rounded, size: 14),
-                    label: const Text('用量'),
-                  ),
-                  if (!active)
+            Builder(
+              builder: (context) {
+                final compactStyle = TextButton.styleFrom(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  minimumSize: Size.zero,
+                  tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                );
+                return Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
                     TextButton.icon(
+                      style: compactStyle,
                       onPressed: blocked
                           ? null
-                          : () => unawaited(_activateSubscription(entry)),
-                      icon: const Icon(Icons.play_arrow_rounded, size: 14),
-                      label: const Text('单用'),
+                          : () => unawaited(_refreshSingleSubscription(entry)),
+                      icon: const Icon(Icons.refresh_rounded, size: 14),
+                      label: const Text('拉取'),
                     ),
-                  TextButton.icon(
-                    onPressed: blocked
-                        ? null
-                        : () => unawaited(_editSubscription(entry)),
-                    icon: const Icon(Icons.edit_outlined, size: 14),
-                    label: const Text('编辑'),
-                  ),
-                  TextButton.icon(
-                    onPressed: blocked
-                        ? null
-                        : () => unawaited(_deleteSubscription(entry)),
-                    icon: const Icon(Icons.delete_outline_rounded, size: 14),
-                    label: const Text('删除'),
-                  ),
-                ],
-              ),
+                    TextButton.icon(
+                      style: compactStyle,
+                      onPressed: (_busy || _quotaRefreshingId != null)
+                          ? null
+                          : () => unawaited(_refreshSubscriptionQuota(entry)),
+                      icon: const Icon(Icons.data_usage_rounded, size: 14),
+                      label: const Text('用量'),
+                    ),
+                    if (!active)
+                      TextButton.icon(
+                        style: compactStyle,
+                        onPressed: blocked
+                            ? null
+                            : () => unawaited(_activateSubscription(entry)),
+                        icon: const Icon(Icons.play_arrow_rounded, size: 14),
+                        label: const Text('单用'),
+                      ),
+                    TextButton.icon(
+                      style: compactStyle,
+                      onPressed: blocked
+                          ? null
+                          : () => unawaited(_editSubscription(entry)),
+                      icon: const Icon(Icons.edit_outlined, size: 14),
+                      label: const Text('编辑'),
+                    ),
+                    TextButton.icon(
+                      style: compactStyle,
+                      onPressed: blocked
+                          ? null
+                          : () => unawaited(_deleteSubscription(entry)),
+                      icon: const Icon(Icons.delete_outline_rounded, size: 14),
+                      label: const Text('删除'),
+                    ),
+                  ],
+                );
+              },
             ),
           ],
         ],
