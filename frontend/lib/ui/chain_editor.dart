@@ -69,10 +69,7 @@ class _ChainEditorState extends State<ChainEditor> {
   }
 
   void _remove(int index) {
-    if (_hops.length <= 2) {
-      setState(() => _globalError = '节点链至少需要包含 2 个节点');
-      return;
-    }
+    if (index < 0 || index >= _hops.length) return;
     setState(() {
       _hops.removeAt(index);
       _onChainModified();
@@ -387,7 +384,7 @@ class _ChainEditorState extends State<ChainEditor> {
                   icon: Icons.delete_outline,
                   tooltip: '移除',
                   color: theme.colorScheme.error,
-                  onPressed: _hops.length > 2 ? () => _remove(index) : null,
+                  onPressed: () => _remove(index),
                 ),
               ],
             ),
