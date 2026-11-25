@@ -114,13 +114,14 @@ async fn fetch_once(
         (authority.to_owned(), if scheme == "https" { 443 } else { 80 })
     };
 
-    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
+    let mut addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
         .await
         .map_err(|e| format!("DNS lookup failed: {e}"))?
         .collect();
     if addrs.is_empty() {
         return Err("no address for host".to_owned());
     }
+    addrs.sort_by_key(|a| if a.is_ipv4() { 0 } else { 1 });
 
     let mut last_err = String::from("connect failed");
     let mut roots = RootCertStore::empty();
@@ -135,7 +136,7 @@ async fn fetch_once(
     }
 
     for addr in addrs.into_iter().take(8) {
-        let tcp_res = timeout(Duration::from_secs(5), async {
+        let tcp_res = timeout(Duration::from_secs(3), async {
             let sock = if addr.is_ipv4() {
                 tokio::net::TcpSocket::new_v4()
             } else {
