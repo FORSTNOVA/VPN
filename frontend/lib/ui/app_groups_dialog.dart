@@ -6,7 +6,8 @@ import 'installed_game_picker.dart';
 typedef _Group = Map<String, dynamic>;
 
 Future<List<_Group>?> editAppGroups(BuildContext context, List<_Group> current,
-    List<String> nodes, bool android) {
+    List<String> nodes, bool android,
+    {Map<String, String>? chains}) {
   final draft = [...current];
   return showDialog<List<_Group>>(
     context: context,
@@ -17,6 +18,7 @@ Future<List<_Group>?> editAppGroups(BuildContext context, List<_Group> current,
           builder: (_) => _GroupEditor(
             group: index == null ? null : draft[index],
             nodes: nodes,
+            chains: chains,
             android: android,
           ),
         );
@@ -47,6 +49,8 @@ Future<List<_Group>?> editAppGroups(BuildContext context, List<_Group> current,
                 title: Text(draft[i]['name'] as String),
                 subtitle: Text(switch (draft[i]['targetType']) {
                   'node' => draft[i]['targetNode'] as String,
+                  'chain' =>
+                    '代理链 · ${chains?[draft[i]['targetChainId']] ?? "链已不可用"}',
                   'direct' => '直连 (DIRECT)',
                   'reject' => '拦截 (REJECT)',
                   final type => throw FormatException('未知路由目标 $type'),
@@ -78,9 +82,13 @@ Future<List<_Group>?> editAppGroups(BuildContext context, List<_Group> current,
 class _GroupEditor extends StatefulWidget {
   final _Group? group;
   final List<String> nodes;
+  final Map<String, String>? chains;
   final bool android;
   const _GroupEditor(
-      {required this.group, required this.nodes, required this.android});
+      {required this.group,
+      required this.nodes,
+      required this.chains,
+      required this.android});
 
   @override
   State<_GroupEditor> createState() => _GroupEditorState();
@@ -91,6 +99,7 @@ class _GroupEditorState extends State<_GroupEditor> {
   late String name;
   late String type;
   String? node;
+  String? chainId;
   late final TextEditingController apps;
   String? pickerError;
 
@@ -101,6 +110,7 @@ class _GroupEditorState extends State<_GroupEditor> {
     name = group == null ? '' : group['name'] as String;
     type = group == null ? 'node' : group['targetType'] as String;
     node = group?['targetNode'] as String?;
+    chainId = group?['targetChainId'] as String?;
     apps = TextEditingController(
         text: group == null ? '' : (group['apps'] as List).join('\n'));
   }
@@ -165,6 +175,7 @@ class _GroupEditorState extends State<_GroupEditor> {
       'name': name.trim(),
       'targetType': type,
       if (type == 'node') 'targetNode': node,
+      if (type == 'chain') 'targetChainId': chainId,
       'apps': entries
           .map((s) => s.trim())
           .where((s) => seen.add(s.toLowerCase()))
@@ -194,11 +205,15 @@ class _GroupEditorState extends State<_GroupEditor> {
                     DropdownButtonFormField<String>(
                         value: type,
                         decoration: const InputDecoration(labelText: '路由目标'),
-                        items: const [
-                          DropdownMenuItem(value: 'node', child: Text('指定节点')),
-                          DropdownMenuItem(
+                        items: [
+                          const DropdownMenuItem(
+                              value: 'node', child: Text('指定节点')),
+                          if (widget.chains != null)
+                            const DropdownMenuItem(
+                                value: 'chain', child: Text('指定代理链')),
+                          const DropdownMenuItem(
                               value: 'direct', child: Text('直连 (DIRECT)')),
-                          DropdownMenuItem(
+                          const DropdownMenuItem(
                               value: 'reject', child: Text('拦截 (REJECT)')),
                         ],
                         onChanged: (v) => setState(() => type = v!)),
@@ -220,6 +235,28 @@ class _GroupEditorState extends State<_GroupEditor> {
                               .toList(),
                           onChanged: (v) => setState(() => node = v),
                           validator: (v) => v == null ? '请选择可用节点' : null),
+                    if (widget.chains case final chains? when type == 'chain')
+                      DropdownButtonFormField<String>(
+                          isExpanded: true,
+                          value: chains.containsKey(chainId) ? chainId : null,
+                          decoration: const InputDecoration(labelText: '目标代理链'),
+                          hint: Text(
+                              chainId != null && !chains.containsKey(chainId)
+                                  ? '原代理链已不可用，请重新选择'
+                                  : chains.isEmpty
+                                      ? '请先在线路页保存代理链'
+                                      : '请选择代理链'),
+                          items: [
+                            for (final chain in chains.entries)
+                              DropdownMenuItem(
+                                  value: chain.key,
+                                  child: Text(chain.value,
+                                      overflow: TextOverflow.ellipsis))
+                          ],
+                          onChanged: chains.isEmpty
+                              ? null
+                              : (v) => setState(() => chainId = v),
+                          validator: (v) => v == null ? '请选择可用代理链' : null),
                     TextFormField(
                         controller: apps,
                         minLines: 3,

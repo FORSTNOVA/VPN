@@ -15,12 +15,13 @@ import (
 )
 
 type appGroup struct {
-	ID         string   `json:"id"`
-	Name       string   `json:"name"`
-	Apps       []string `json:"apps"`
-	TargetType string   `json:"targetType"`
-	TargetNode string   `json:"targetNode"`
-	Enabled    bool     `json:"enabled"`
+	ID            string   `json:"id"`
+	Name          string   `json:"name"`
+	Apps          []string `json:"apps"`
+	TargetType    string   `json:"targetType"`
+	TargetNode    string   `json:"targetNode"`
+	TargetChainID string   `json:"targetChainId,omitempty"`
+	Enabled       bool     `json:"enabled"`
 }
 
 type appGroups []appGroup
@@ -80,6 +81,10 @@ func decodeAppGroups(body []byte, android bool) (appGroups, error) {
 			if strings.TrimSpace(g.TargetNode) == "" {
 				return nil, appGroupValidationError(fmt.Sprintf("appGroups[%d] requires a target node", i))
 			}
+		case "chain":
+			if strings.TrimSpace(g.TargetChainID) == "" {
+				return nil, appGroupValidationError(fmt.Sprintf("appGroups[%d] requires a target chain", i))
+			}
 		case "direct", "reject":
 		default:
 			return nil, appGroupValidationError(fmt.Sprintf("appGroups[%d] has invalid targetType %q", i, g.TargetType))
@@ -115,7 +120,7 @@ type appRouting struct {
 	groups, rules string
 }
 
-func buildAppRouting(o configOptions, profile []byte, manual []manualNode) (appRouting, error) {
+func buildAppRouting(o configOptions, profile []byte, manual []manualNode, chains map[string][]string) (appRouting, error) {
 	var groups, rules strings.Builder
 	var index map[string][]map[string]any
 	var inline []map[string]any
@@ -123,7 +128,8 @@ func buildAppRouting(o configOptions, profile []byte, manual []manualNode) (appR
 	// Materialize each selected provider node once, preserving chain copies in the same YAML list.
 	occupied := map[string]bool{"DIRECT": true, "REJECT": true, "REJECT-DROP": true, "COMPATIBLE": true, "GLOBAL": true, "PASS": true, "PASS-RULE": true, appName: true, autoGroup: true, fallbackGroup: true}
 	members := map[string]string{}
-	nextGroup, nextNode := 1, 1
+	chainExits := map[string]string{}
+	nextGroup, nextNode, nextHop := 1, 1, 1
 	nextName := func(prefix string, n *int) string {
 		for {
 			name := prefix + strconv.Itoa(*n)
@@ -139,7 +145,7 @@ func buildAppRouting(o configOptions, profile []byte, manual []manualNode) (appR
 			continue
 		}
 		target := strings.ToUpper(g.TargetType)
-		if g.TargetType == "node" {
+		if g.TargetType == "node" || g.TargetType == "chain" {
 			if index == nil {
 				var err error
 				index, err = proxyIndex(profile, manual)
@@ -154,6 +160,34 @@ func buildAppRouting(o configOptions, profile []byte, manual []manualNode) (appR
 					occupied[stringValue(p["name"])] = true
 				}
 			}
+		}
+		if g.TargetType == "chain" {
+			exit, exists := chainExits[g.TargetChainID]
+			if !exists {
+				hops, ok := chains[g.TargetChainID]
+				if !ok {
+					return appRouting{}, fmt.Errorf("app group %q: unknown chain %q", g.Name, g.TargetChainID)
+				}
+				if len(hops) < 2 {
+					return appRouting{}, fmt.Errorf("app group %q: chain %q needs at least two hops", g.Name, g.TargetChainID)
+				}
+				copies, err := compilePrefix(hops, index)
+				if err != nil {
+					return appRouting{}, fmt.Errorf("app group %q: chain %q: %w", g.Name, g.TargetChainID, err)
+				}
+				for i, p := range copies {
+					if i > 0 {
+						p["dialer-proxy"] = exit
+					}
+					exit = nextName("SmartVPN-AppHop-", &nextHop)
+					p["name"] = exit
+					inline = append(inline, p)
+				}
+				chainExits[g.TargetChainID] = exit
+			}
+			target = exit
+		}
+		if g.TargetType == "node" {
 			node := g.TargetNode
 			switch len(index[node]) {
 			case 0:
@@ -181,7 +215,7 @@ func buildAppRouting(o configOptions, profile []byte, manual []manualNode) (appR
 		}
 	}
 	result := appRouting{groups: groups.String(), rules: rules.String()}
-	if len(members) > 0 {
+	if len(members) > 0 || len(chainExits) > 0 {
 		var err error
 		result.inlineProxies, err = yaml.Marshal(map[string]any{"proxies": inline})
 		return result, err

@@ -143,6 +143,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Map<String, RegionInfo> _regionByName = const {};
   String _connectionMode = 'system-proxy';
   List<Map<String, dynamic>>? _appGroups;
+  Map<String, String>? _appGroupChains;
   List<String> _gameBypass = [];
   bool _domesticWeb = false, _webRTCProtection = false, _dnsProtection = false;
   bool _elevated = false;
@@ -740,6 +741,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   void _applyTunState(Map<String, dynamic> value) {
     _connectionMode = value['connectionMode'] as String? ?? 'system-proxy';
+    _appGroupChains = (value['appGroupChains'] as Map?)?.cast<String, String>();
     if (value.containsKey('appGroups')) {
       _appGroups = (value['appGroups'] as List?)
               ?.whereType<Map>()

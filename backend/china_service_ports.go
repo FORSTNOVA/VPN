@@ -208,9 +208,10 @@ func (e *appChinaEffects) Call(q chinaServiceEffect) (r chinaServiceReply) {
 		}
 		r.Options = e.options
 	case "options-chain":
-		e.options.ChainProxies, r.Err = a.buildChain(a.chainSnapshotLocked().Chain, e.q.Body)
+		graph := a.chainSnapshotLocked()
+		e.options.ChainProxies, r.Err = a.buildChain(graph.Chain, e.q.Body)
 		if r.Err == nil && len(e.options.AppGroups) > 0 {
-			e.options.appRoutes, r.Err = buildAppRouting(e.options, e.q.Body, a.manualSnapshotLocked())
+			e.options.appRoutes, r.Err = buildAppRouting(e.options, e.q.Body, a.manualSnapshotLocked(), graph.Chains)
 		}
 		r.Options = e.options
 	case "options-domains":

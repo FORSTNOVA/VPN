@@ -267,6 +267,10 @@ func appHealthProjection(h healthDomainProjection, p appServicePlan) map[string]
 }
 func (e *appControlEffects) stateProjection(p appServicePlan) map[string]any {
 	h, c := e.h, e.c
+	chainNames := make(map[string]string, len(e.chains))
+	for name := range e.chains {
+		chainNames[name] = name
+	}
 	job := h.Job
 	if p.ZeroJob {
 		job = &regionJob{}
@@ -276,7 +280,7 @@ func (e *appControlEffects) stateProjection(p appServicePlan) map[string]any {
 		"home": e.a.home, "portable": e.a.portable, "proxyEnabled": p.ProxyEnabled, "mixedPort": e.a.mixedPort, "socksPort": c.SocksPort, "startedAt": e.a.started,
 		"selectedNode": e.selected, "activeNode": p.ActiveNode, "chain": e.chain, "chains": e.chains, "activeRegion": p.ActiveRegion,
 		"lockedRegion": c.RuntimeLockedRegion, "blocked": h.Blocked, "blockReason": h.BlockReason, "health": appHealthProjection(h, p), "regionJob": job,
-		"connectionMode": e.mode, "strictPrivacy": p.StrictPrivacy, "domesticWeb": c.DomesticWeb, "appGroups": c.AppGroups, "gameBypass": c.GameBypass, "webRTCProtection": c.WebRTCProtection,
+		"connectionMode": e.mode, "strictPrivacy": p.StrictPrivacy, "domesticWeb": c.DomesticWeb, "appGroupChains": chainNames, "appGroups": c.AppGroups, "gameBypass": c.GameBypass, "webRTCProtection": c.WebRTCProtection,
 		"dnsProtection": c.DNSProtection, "wintunPath": c.WintunPath, "elevated": e.a.elevated, "tunAvailable": p.TunReason == "", "tunReason": p.TunReason, "tunActive": p.TunActive, "chinaDirect": e.china,
 	}
 }

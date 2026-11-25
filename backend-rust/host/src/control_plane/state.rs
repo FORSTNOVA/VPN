@@ -58,6 +58,8 @@ pub struct AppGroup {
     pub target_type: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub target_node: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub target_chain_id: String,
     pub enabled: bool,
 }
 
@@ -477,6 +479,7 @@ impl RuntimeState {
             "strictPrivacy": self.persisted.strict_privacy,
             "domesticWeb": self.persisted.domestic_web,
             "appGroups": self.persisted.app_groups,
+            "appGroupChains": self.persisted.chains.iter().map(|c| (&c.id, &c.name)).collect::<BTreeMap<_, _>>(),
             "gameBypass": self.persisted.game_bypass,
             "webRTCProtection": self.persisted.webrtc_protection,
             "dnsProtection": self.persisted.dns_protection,
@@ -496,7 +499,7 @@ pub fn valid_app_group_text(s: &str) -> bool {
     !s.trim().is_empty() && !s.contains([',', '*']) && !s.chars().any(char::is_control)
 }
 
-pub fn validate_app_groups(groups: Vec<AppGroup>) -> Result<Vec<AppGroup>, String> {
+pub fn validate_app_groups(groups: Vec<AppGroup>, chains: &[ProxyChain]) -> Result<Vec<AppGroup>, String> {
     let mut out = Vec::with_capacity(groups.len());
     for (i, mut g) in groups.into_iter().enumerate() {
         if !valid_app_group_text(&g.id) || !valid_app_group_text(&g.name) || g.apps.is_empty() {
@@ -510,6 +513,11 @@ pub fn validate_app_groups(groups: Vec<AppGroup>) -> Result<Vec<AppGroup>, Strin
             "node" => {
                 if g.target_node.trim().is_empty() {
                     return Err(format!("appGroups[{i}] requires a target node"));
+                }
+            }
+            "chain" => {
+                if g.target_chain_id.is_empty() || (g.enabled && !chains.iter().any(|c| c.id == g.target_chain_id)) {
+                    return Err(format!("分组「{}」请选择可用的代理链", g.name));
                 }
             }
             "direct" | "reject" => {}

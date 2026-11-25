@@ -343,7 +343,8 @@ extension _ConnectPage on _HomePageState {
                   enabled: !_busy && !_connected,
                   onTap: () async {
                     final result = await editAppGroups(context, groups,
-                        _nodes.map((n) => n.name).toList(), Platform.isAndroid);
+                        _nodes.map((n) => n.name).toList(), Platform.isAndroid,
+                        chains: _appGroupChains);
                     if (result != null && mounted) {
                       await _updateTunnelSettings({'appGroups': result});
                     }

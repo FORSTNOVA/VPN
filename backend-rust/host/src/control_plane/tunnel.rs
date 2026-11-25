@@ -6,39 +6,49 @@ pub fn build_engine_yaml(persisted: &PersistedState, proxies: &[Value]) -> Resul
     let mut active_proxies: Vec<Value> = proxies.to_vec();
     let mut main_target = persisted.selected_node.clone();
 
-    if let Some(chain) = persisted
-        .chains
-        .iter()
-        .find(|c| c.id == persisted.active_chain_id)
-    {
-        if !chain.hops.is_empty() {
-            let mut prev_name: Option<String> = None;
-            for (idx, hop_name) in chain.hops.iter().enumerate() {
-                if let Some(base) = proxies
-                    .iter()
-                    .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(hop_name.as_str()))
-                {
-                    let hop_alias = if idx == 0 {
-                        hop_name.clone()
-                    } else {
-                        let alias = format!("__chain_hop_{idx}_{hop_name}");
-                        let mut clone = base.clone();
-                        if let Some(obj) = clone.as_object_mut() {
-                            obj.insert("name".into(), json!(alias));
-                            if let Some(prev) = &prev_name {
-                                obj.insert("dialer-proxy".into(), json!(prev));
-                            }
-                        }
-                        active_proxies.push(clone);
-                        alias
-                    };
-                    prev_name = Some(hop_alias);
+    let mut chain_exits = std::collections::HashMap::new();
+    let mut chain_exit = |id: &str| -> Result<String, String> {
+        if let Some(exit) = chain_exits.get(id) {
+            return Ok(String::clone(exit));
+        }
+        let (index, chain) = persisted
+            .chains
+            .iter()
+            .enumerate()
+            .find(|(_, c)| c.id == id)
+            .ok_or_else(|| format!("找不到代理链 {id}"))?;
+        if !(2..=8).contains(&chain.hops.len()) {
+            return Err(format!("代理链「{}」需要 2 至 8 跳", chain.name));
+        }
+        let mut previous = chain.hops[0].clone();
+        for (hop, name) in chain.hops.iter().enumerate() {
+            let base = proxies
+                .iter()
+                .find(|p| p["name"].as_str() == Some(name))
+                .ok_or_else(|| {
+                    format!(
+                        "代理链「{}」缺少第 {} 跳节点「{name}」",
+                        chain.name,
+                        hop + 1
+                    )
+                })?;
+            if hop > 0 {
+                let alias = format!("__smartvpn_chain_{index}_hop_{hop}");
+                if active_proxies.iter().any(|p| p["name"] == alias) {
+                    return Err(format!("代理链内部节点名冲突：{alias}"));
                 }
-            }
-            if let Some(last) = prev_name {
-                main_target = last;
+                let mut copy = base.clone();
+                copy["name"] = json!(alias);
+                copy["dialer-proxy"] = json!(previous);
+                active_proxies.push(copy);
+                previous = alias;
             }
         }
+        chain_exits.insert(id.to_owned(), previous.clone());
+        Ok(previous)
+    };
+    if !persisted.active_chain_id.is_empty() {
+        main_target = chain_exit(&persisted.active_chain_id)?;
     }
 
     if main_target.is_empty() {
@@ -55,7 +65,8 @@ pub fn build_engine_yaml(persisted: &PersistedState, proxies: &[Value]) -> Resul
             "direct" => "DIRECT".to_owned(),
             "reject" => "REJECT".to_owned(),
             "node" if !g.target_node.trim().is_empty() => g.target_node.clone(),
-            _ => continue,
+            "chain" => chain_exit(&g.target_chain_id)?,
+            other => return Err(format!("分组「{}」的路由目标无效：{other}", g.name)),
         };
         for app in &g.apps {
             rules.push(format!("PROCESS-NAME,{app},{target}"));
@@ -127,7 +138,12 @@ pub fn start_tun(state: &mut RuntimeState) -> Result<(), String> {
     }
     state.tun_handle = Some(handle);
     state.connected = true;
-    state.push_event("tunnel", "纯 Rust TUN 已启动", "libsmartvpn_engine.so 已接管流量", true);
+    state.push_event(
+        "tunnel",
+        "纯 Rust TUN 已启动",
+        "libsmartvpn_engine.so 已接管流量",
+        true,
+    );
     Ok(())
 }
 
@@ -173,4 +189,73 @@ pub fn tun_status_json(state: &RuntimeState) -> Value {
         "routes": state.tunnel_report.as_ref().map(|r| &r.routes).cloned().unwrap_or_default(),
         "dns": state.tunnel_report.as_ref().map(|r| &r.dns).cloned().unwrap_or_default(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control_plane::state::ProxyChain;
+
+    #[test]
+    fn app_groups_share_chain_and_preserve_global_route() {
+        let chain = |id: &str, hops: &[&str]| ProxyChain {
+            id: id.into(),
+            name: id.into(),
+            hops: hops.iter().map(|s| s.to_string()).collect(),
+        };
+        let mut state = PersistedState::default();
+        state.active_chain_id = "global".into();
+        state.chains = vec![
+            chain("global", &["A", "C"]),
+            chain("apps", &["B", "A", "C"]),
+        ];
+        state.app_groups = ["app.a", "app.b"]
+            .iter()
+            .map(|app| {
+                serde_json::from_value(json!({
+                    "id": app, "name": app, "enabled": true, "apps": [app],
+                    "targetType": "chain", "targetChainId": "apps"
+                }))
+                .unwrap()
+            })
+            .collect();
+        let proxies: Vec<_> = ["A", "B", "C"].iter().map(|name| json!({
+            "name": name, "type": "trojan", "server": "localhost", "port": 443, "password": "fixture"
+        })).collect();
+        let yaml = build_engine_yaml(&state, &proxies).unwrap();
+        let engine =
+            smartvpn_engine::config_bridge::build_router_from_clash_yaml(&yaml, None).unwrap();
+        let doc: Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let nodes = doc["proxies"].as_array().unwrap();
+        assert_eq!(nodes.len(), 6);
+        assert_eq!(nodes[3]["dialer-proxy"], "A");
+        assert_eq!(nodes[4]["dialer-proxy"], "B");
+        assert_eq!(nodes[5]["dialer-proxy"], nodes[4]["name"]);
+        assert_eq!(doc["proxy-groups"][0]["proxies"][0], nodes[3]["name"]);
+        for (i, app) in ["app.a", "app.b"].iter().enumerate() {
+            assert_eq!(
+                doc["rules"][i],
+                format!("PROCESS-NAME,{app},{}", nodes[5]["name"].as_str().unwrap())
+            );
+        }
+        use smartvpn_engine::rule::{RuleAction, RuleContext};
+        for (process, target) in [
+            ("app.a", nodes[5]["name"].as_str().unwrap()),
+            ("app.b", nodes[5]["name"].as_str().unwrap()),
+            ("other.app", "SmartVPN"),
+        ] {
+            let context = RuleContext {
+                process_name: Some(process),
+                ..Default::default()
+            };
+            assert_eq!(
+                engine.router.rules.evaluate(&context),
+                Some(&RuleAction::Proxy(target.into()))
+            );
+        }
+        state.chains[1].hops[1] = "missing".into();
+        assert!(build_engine_yaml(&state, &proxies)
+            .unwrap_err()
+            .contains("missing"));
+    }
 }

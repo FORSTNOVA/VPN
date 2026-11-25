@@ -104,7 +104,7 @@ func TestAppGroupConfig(t *testing.T) {
 		{Apps: []string{"reject.exe"}, Enabled: true, TargetType: "reject"},
 		{Apps: []string{"disabled.exe"}, TargetType: "node", TargetNode: "gone"},
 	}}}
-	routes, err := buildAppRouting(o, profile, manual)
+	routes, err := buildAppRouting(o, profile, manual, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,10 +157,14 @@ func TestAppGroupPackagedConfig(t *testing.T) {
 		t.Skip("set SMARTVPN_TEST_MIHOMO to validate with the packaged kernel")
 	}
 	a := storeApp(t)
-	profile := []byte("proxies:\n  - {name: alpha, type: socks5, server: 127.0.0.1, port: 9999}\n")
+	profile := []byte("proxies:\n  - {name: alpha, type: socks5, server: 127.0.0.1, port: 9999}\n  - {name: exit, type: socks5, server: 127.0.0.1, port: 9998}\n")
 	testEditSettings(a, func(s *settings) {
 		s.ConnectionMode = modeSystemProxy
-		s.AppGroups = appGroups{{ID: "g", Name: "Fixture", Enabled: true, Apps: []string{"fixture.exe"}, TargetType: "node", TargetNode: "alpha"}}
+		s.Chains = map[string][]string{"fixture chain": {"alpha", "exit"}}
+		s.AppGroups = appGroups{
+			{ID: "g", Name: "Fixture", Enabled: true, Apps: []string{"fixture.exe"}, TargetType: "node", TargetNode: "alpha"},
+			{ID: "c", Name: "Chain", Enabled: true, Apps: []string{"chain.exe"}, TargetType: "chain", TargetChainID: "fixture chain"},
+		}
 	})
 	opts, err := a.kernelConfigOptions(profile, true)
 	if err != nil {
@@ -181,4 +185,31 @@ func TestAppGroupPackagedConfig(t *testing.T) {
 		t.Fatalf("mihomo -t: %v\n%s", err, out)
 	}
 	t.Log(strings.TrimSpace(string(out)))
+}
+
+func TestAppGroupsShareSavedChain(t *testing.T) {
+	profile := []byte("proxies:\n- {name: A, type: socks5, server: localhost, port: 9001}\n- {name: B, type: socks5, server: localhost, port: 9002}\n")
+	o := configOptions{trafficPolicy: trafficPolicy{AppGroups: appGroups{
+		{Name: "one", Apps: []string{"app.a"}, Enabled: true, TargetType: "chain", TargetChainID: "AB"},
+		{Name: "two", Apps: []string{"app.b"}, Enabled: true, TargetType: "chain", TargetChainID: "AB"},
+	}}}
+	routes, err := buildAppRouting(o, profile, nil, map[string][]string{"AB": {"A", "B"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct{ Proxies []map[string]any }
+	if err := yaml.Unmarshal(routes.inlineProxies, &doc); err != nil {
+		t.Fatal(err)
+	}
+	if len(doc.Proxies) != 2 || doc.Proxies[0]["port"] != 9001 || doc.Proxies[1]["port"] != 9002 || doc.Proxies[1]["dialer-proxy"] != doc.Proxies[0]["name"] {
+		t.Fatal(doc)
+	}
+	for _, app := range []string{"app.a", "app.b"} {
+		if !strings.Contains(routes.rules, "PROCESS-NAME,"+app+","+doc.Proxies[1]["name"].(string)) {
+			t.Fatal(routes.rules)
+		}
+	}
+	if _, err := buildAppRouting(o, profile, nil, nil); err == nil {
+		t.Fatal("expected missing chain error")
+	}
 }

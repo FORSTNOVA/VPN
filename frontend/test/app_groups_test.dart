@@ -21,7 +21,8 @@ void main() {
             builder: (context) => Scaffold(
                 body: TextButton(
                     onPressed: () async => done(await editAppGroups(
-                        context, initial, ['Japan'], android)),
+                        context, initial, ['Japan'], android,
+                        chains: {'chain-42': '日本 → VPS'})),
                     child: const Text('打开'))))));
     await tester.tap(find.text('打开'));
     await tester.pumpAndSettle();
@@ -99,6 +100,27 @@ void main() {
       ...initial.single,
       'targetType': 'reject',
       'apps': ['com.example.app']
+    });
+  });
+
+  testWidgets('choose a saved chain independently of the global route',
+      (tester) async {
+    List<Map<String, dynamic>>? saved;
+    await open(tester, true, (v) => saved = v);
+    await tap(tester, '浏览器');
+    await tap(tester, '直连 (DIRECT)');
+    await tap(tester, '指定代理链');
+    await tap(tester, '确定');
+    expect(find.text('请选择可用代理链'), findsOneWidget);
+    await tap(tester, '请选择代理链');
+    await tap(tester, '日本 → VPS');
+    await tap(tester, '确定');
+    expect(find.text('代理链 · 日本 → VPS'), findsOneWidget);
+    await tap(tester, '保存');
+    expect(saved!.single, {
+      ...initial.single,
+      'targetType': 'chain',
+      'targetChainId': 'chain-42'
     });
   });
 

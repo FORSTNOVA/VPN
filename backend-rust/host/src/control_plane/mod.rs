@@ -372,7 +372,7 @@ impl ControlPlane {
             let Ok(groups) = serde_json::from_value::<Vec<AppGroup>>(groups_val.clone()) else {
                 return text_resp(StatusCode::BAD_REQUEST, "invalid appGroups\n");
             };
-            match validate_app_groups(groups) {
+            match validate_app_groups(groups, &st.persisted.chains) {
                 Ok(valid) => {
                     if st.connected {
                         return text_resp(StatusCode::CONFLICT, "disconnect before updating appGroups\n");
