@@ -10,7 +10,7 @@ import tempfile
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRATCH = Path(r"C:\Users\21654\.gemini\antigravity\brain\6a453053-a315-41e2-b122-010410e5b9fd\scratch")
+SCRATCH = Path(tempfile.gettempdir())
 
 
 def verify(path, abi):

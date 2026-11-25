@@ -152,6 +152,19 @@ pub extern "C" fn smartvpn_engine_tun_stop_v1(handle: i64) -> i32 {
     }
 }
 
+pub fn tun_router(handle: i64) -> std::io::Result<std::sync::Arc<crate::router::Router>> {
+    #[cfg(unix)]
+    {
+        tun_runtime::router(handle)
+    }
+    #[cfg(not(unix))]
+    {
+        Err(std::io::Error::other(format!(
+            "no Unix TUN session {handle} on this platform"
+        )))
+    }
+}
+
 #[cfg(unix)]
 mod tun_runtime {
     use super::OwnerCallback;
@@ -173,6 +186,7 @@ mod tun_runtime {
     use tokio::sync::oneshot;
 
     struct Instance {
+        router: Arc<crate::router::Router>,
         stop: oneshot::Sender<()>,
         thread: thread::JoinHandle<io::Result<()>>,
     }
@@ -207,6 +221,7 @@ mod tun_runtime {
             .ok_or_else(|| io::Error::other("TUN handle overflow"))?;
         let (ready, initialized) = mpsc::sync_channel(0);
         let (stop, stopped) = oneshot::channel();
+        let router = bundle.router.clone();
         let thread = thread::Builder::new()
             .name(format!("tun-{id}"))
             .spawn(move || {
@@ -229,10 +244,28 @@ mod tun_runtime {
                 Ok(()) => io::Error::other("TUN exited before initialization"),
             });
         }
-        registry.instances.insert(id, Instance { stop, thread });
+        registry.instances.insert(
+            id,
+            Instance {
+                stop,
+                thread,
+                router,
+            },
+        );
         registry.last_id = id;
         registry.protect = protect;
         Ok(id)
+    }
+
+    pub(super) fn router(id: i64) -> io::Result<Arc<crate::router::Router>> {
+        REGISTRY
+            .lock()
+            .unwrap()
+            .instances
+            .get(&id)
+            .filter(|i| !i.thread.is_finished())
+            .map(|i| i.router.clone())
+            .ok_or_else(|| io::Error::other("TUN session is no longer active"))
     }
 
     fn join(thread: thread::JoinHandle<io::Result<()>>) -> io::Result<()> {

@@ -19,7 +19,12 @@ async fn dial_and_measure_yaml(
         .probe_http_204("www.gstatic.com", 80, budget)
         .await
         .map_err(|e| format!("probe failed: {e}"))?;
-    Ok((first_ms, (first_ms / 3).max(1)))
+    let steady_ms = bundle
+        .router
+        .probe_http_204("www.gstatic.com", 80, budget)
+        .await
+        .map_err(|e| format!("repeat probe failed: {e}"))?;
+    Ok((first_ms, steady_ms))
 }
 
 pub async fn probe_proxy_latency(

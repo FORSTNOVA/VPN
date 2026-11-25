@@ -57,7 +57,7 @@ with tempfile.TemporaryDirectory(prefix='smartvpn-traffic-oracle-') as tmp:
  tmp=pathlib.Path(tmp);h=tmp/'go';h.mkdir()
  for name in ['go.mod','go.sum']:shutil.copyfile(backend/name,h/name)
  (h/'main.go').write_text(header+'\nconst schema=`'+schema+'`\n'+between('func counterDeltaGo(', counter_end)+methods+main,encoding='utf-8')
- env=os.environ.copy();env.update(GOPROXY='off',GOSUMDB='off',GOTOOLCHAIN='local',GOWORK='off',GOFLAGS='-mod=readonly -buildvcs=false',GOPATH=r'D:\codebuddythink\vpn\.tools\gopath',CARGO_HOME=cargo_home,CARGO_INCREMENTAL='0')
+ env=os.environ.copy();env.update(GOPROXY='off',GOSUMDB='off',GOTOOLCHAIN='local',GOWORK='off',GOFLAGS='-mod=readonly -buildvcs=false',GOPATH=str(root.parent/'.tools'/'gopath'),CARGO_HOME=cargo_home,CARGO_INCREMENTAL='0')
  subprocess.run([go,'build','-o',str(tmp/'oracle.exe'),'.'],cwd=h,env=env,check=True)
  subprocess.run(['cargo','build','--offline','--locked','--manifest-path',str(root/'Cargo.toml'),'--example','traffic_fixture'],cwd='C:\\',env=env,check=True)
  rust=root/'target'/'debug'/'examples'/'traffic_fixture.exe'

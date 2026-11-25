@@ -125,6 +125,8 @@ pub trait ProcessResolver: Send + Sync {
     }
 }
 pub struct Router {
+    pub traffic: Arc<crate::traffic::Traffic>,
+    pub(crate) block_stun: bool,
     pub(crate) classification_proxy: Option<Dialer>,
     classification_cache: Arc<std::sync::Mutex<HashMap<String, (IpAddr, std::time::Instant)>>>,
     pub rules: RuleSet,
@@ -143,6 +145,8 @@ pub enum RouteResult {
 impl Router {
     pub fn new(rules: RuleSet, outbounds: HashMap<String, Dialer>) -> Self {
         Self {
+            traffic: Default::default(),
+            block_stun: false,
             classification_proxy: None,
             classification_cache: Default::default(),
             rules,
@@ -189,6 +193,8 @@ impl Router {
 
     fn clone_for_probe(&self) -> Self {
         Self {
+            traffic: self.traffic.clone(),
+            block_stun: self.block_stun,
             classification_proxy: self.classification_proxy.clone(),
             classification_cache: self.classification_cache.clone(),
             rules: self.rules.clone(),
@@ -228,14 +234,20 @@ impl Router {
         tokio::time::timeout(budget, stream.flush())
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "flush timeout"))??;
-        let mut buf = [0u8; 64];
-        let n = tokio::time::timeout(budget, stream.read(&mut buf))
+        use tokio::io::AsyncBufReadExt;
+        let mut line = String::new();
+        let mut response = tokio::io::BufReader::new(stream.take(1024));
+        tokio::time::timeout(budget, response.read_line(&mut line))
             .await
-            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "read timeout"))??;
-        if n == 0 {
+            .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "response timeout"))??;
+        let mut fields = line.split_ascii_whitespace();
+        if !line.ends_with("\r\n")
+            || !matches!(fields.next(), Some("HTTP/1.0" | "HTTP/1.1"))
+            || fields.next() != Some("204")
+        {
             return Err(io::Error::new(
-                io::ErrorKind::UnexpectedEof,
-                "empty HTTP response",
+                io::ErrorKind::InvalidData,
+                "expected HTTP 204 from latency target",
             ));
         }
         Ok(t0.elapsed().as_millis() as i64)
@@ -312,6 +324,9 @@ impl Router {
         listener: Option<SocketAddr>,
         is_udp: bool,
     ) -> io::Result<(&RuleAction, TargetAddr)> {
+        if self.block_stun && is_udp && matches!(target.port(), 3478 | 5349 | 19302..=19309) {
+            return Ok((&RuleAction::Reject, target.clone()));
+        }
         let ip = match target {
             TargetAddr::Ip(a) => Some(a.ip()),
             _ => None,

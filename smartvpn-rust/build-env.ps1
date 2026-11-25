@@ -1,6 +1,5 @@
 $ErrorActionPreference='Stop'
-$env:CARGO_HOME='C:\Users\21654\.gemini\antigravity\brain\6a453053-a315-41e2-b122-010410e5b9fd\scratch\cargo-home'
-$env:TEMP=$env:TMP=if ($env:SMARTVPN_TEST_TMP) { $env:SMARTVPN_TEST_TMP } else { 'C:\Users\21654\.gemini\antigravity\brain\6a453053-a315-41e2-b122-010410e5b9fd\scratch' }
+if ($env:SMARTVPN_TEST_TMP) { $env:TEMP=$env:TMP=$env:SMARTVPN_TEST_TMP }
 $env:CARGO_TARGET_DIR="$PSScriptRoot/.build"
 Set-StrictMode -Version Latest
 function Check-Exit([string]$step) {
@@ -9,4 +8,6 @@ function Check-Exit([string]$step) {
 $env:RUSTC_BOOTSTRAP = "1"
 
 $env:AWS_LC_SYS_PREBUILT_NASM="1"
-$env:CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS="--cfg tokio_unstable"
+$repoRoot = Split-Path $PSScriptRoot
+$cargoCache = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+$env:CARGO_ENCODED_RUSTFLAGS = @('--cfg', 'tokio_unstable', "--remap-path-prefix=$repoRoot=/src", "--remap-path-prefix=$env:USERPROFILE=/home/builder", "--remap-path-prefix=$cargoCache=/cargo") -join [char]31

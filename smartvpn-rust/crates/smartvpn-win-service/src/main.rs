@@ -95,10 +95,7 @@ impl TunnelDataPlane for Windows {
         let secret = token()?;
         req.config.prepare_runtime(&dir)?;
         let mut config = req.config.generate(&secret)?;
-        config["proxies"]
-            .as_array_mut()
-            .unwrap()
-            .extend_from_slice(stored);
+        smartvpn_runtime::install_chain_members(&mut config, stored);
         let wintun = if req.config.tun {
             let dll =
                 WintunModule::load(req.wintun_path.as_deref().context("缺少 wintun.dll 路径")?)?;

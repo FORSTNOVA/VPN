@@ -117,6 +117,12 @@ fn engine_yaml(
             rules.push(format!("PROCESS-NAME,{g},DIRECT"));
         }
     }
+    if persisted.import_policy == "enabled" {
+        rules.extend(
+            super::subs::active_rules(persisted)
+                .filter_map(|r| super::subs::applied_rule(persisted, r)),
+        );
+    }
     if persisted.domestic_web && !ranges.is_empty() {
         rules.push("GEOIP,CN,DIRECT".to_owned());
     }
@@ -148,6 +154,7 @@ fn engine_yaml(
     );
     let doc = json!({
         "smartvpn-china-ranges": ranges,
+        "smartvpn-block-stun": persisted.webrtc_protection,
         "mixed-port": 0,
         "dns": {
             "enable": persisted.dns_protection,
@@ -177,7 +184,23 @@ pub fn start_tun(state: &mut RuntimeState) -> Result<(), String> {
     } else {
         &[]
     };
-    let yaml = engine_yaml(&state.persisted, &proxies, ranges)?;
+    let mut profile = state.persisted.clone();
+    if !profile.locked_region.is_empty() {
+        let pool = super::regions::pool(state, &profile.locked_region);
+        if let Some(chain) = state.active_chain() {
+            let exit = chain.hops.last().ok_or("代理链缺少出口")?;
+            if std::iter::once(exit)
+                .chain(chain.backups.get(exit).into_iter().flatten())
+                .any(|n| !pool.contains(n))
+            {
+                return Err("代理链出口或其备用节点未通过锁定地区验证".into());
+            }
+        } else if !pool.contains(&profile.selected_node) {
+            profile.selected_node = pool.into_iter().next().ok_or("锁定地区没有已验证节点")?;
+            state.persisted.selected_node = profile.selected_node.clone();
+        }
+    }
+    let yaml = engine_yaml(&profile, &proxies, ranges)?;
     let c_yaml = CString::new(yaml).map_err(|_| "invalid YAML NUL byte".to_owned())?;
     let protect = state.bridge.protect_hook();
     let resolve = state.bridge.resolve_hook();
@@ -188,6 +211,8 @@ pub fn start_tun(state: &mut RuntimeState) -> Result<(), String> {
         return Err(format!("pure-Rust TUN engine start failed (code {handle})"));
     }
     state.tun_handle = Some(handle);
+    let router = smartvpn_engine::ffi::tun_router(handle).map_err(|e| e.to_string())?;
+    state.traffic.attach(router.traffic.clone());
     state.china.active = !ranges.is_empty();
     state.connected = true;
     state.push_event(
@@ -199,15 +224,21 @@ pub fn start_tun(state: &mut RuntimeState) -> Result<(), String> {
     Ok(())
 }
 
-pub fn stop_tun(state: &mut RuntimeState) {
+pub fn stop_tun(state: &mut RuntimeState) -> Result<(), String> {
     state.china.active = false;
     if let Some(handle) = state.tun_handle.take() {
-        smartvpn_engine::ffi::smartvpn_engine_tun_stop_v1(handle);
+        let rc = smartvpn_engine::ffi::smartvpn_engine_tun_stop_v1(handle);
+        if rc != 0 {
+            return Err(format!("failed to stop TUN: {rc}"));
+        }
     }
     if state.connected {
         state.connected = false;
         state.push_event("tunnel", "代理已断开", "纯 Rust TUN 已停止", true);
     }
+    state.traffic.finish()?;
+    state.traffic_snapshot = json!({"available":false,"reason":"未连接"});
+    Ok(())
 }
 
 pub fn apply_tunnel_report(
@@ -219,8 +250,7 @@ pub fn apply_tunnel_report(
     if !authorized || fd < 0 {
         state.tun_fd = None;
         state.tunnel_report = None;
-        stop_tun(state);
-        return Ok(());
+        return stop_tun(state);
     }
     let report: TunnelReport = serde_json::from_str(info_json).unwrap_or_default();
     state.tun_fd = Some(fd);

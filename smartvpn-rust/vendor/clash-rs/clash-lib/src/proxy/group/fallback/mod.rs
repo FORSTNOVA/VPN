@@ -22,6 +22,7 @@ use crate::{
 
 #[derive(Default, Clone)]
 pub struct HandlerOptions {
+    pub hop_attempt_seconds: Option<u64>,
     pub common_opts: HandlerCommonOptions,
     pub name: String,
     pub udp: bool,
@@ -102,6 +103,29 @@ impl OutboundHandler for Handler {
         sess: &Session,
         resolver: ThreadSafeDNSResolver,
     ) -> io::Result<BoxedInstrumentedStream> {
+        if let Some(seconds) = self.opts.hop_attempt_seconds {
+            let mut errors = Vec::new();
+            for candidate in self.get_proxies(false).await {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(seconds),
+                    candidate.connect_stream(sess, resolver.clone()),
+                )
+                .await
+                {
+                    Ok(Ok(connection)) => {
+                        connection.append_to_chain(self.name()).await;
+                        return Ok(connection);
+                    }
+                    Ok(Err(error)) => errors.push(format!("{}: {error}", candidate.name())),
+                    Err(_) => errors.push(format!("{}: timed out", candidate.name())),
+                }
+            }
+            return Err(io::Error::other(format!(
+                "{}: all configured hop candidates failed: {}",
+                self.name(),
+                errors.join(", ")
+            )));
+        }
         let proxy = self.find_alive_proxy(true).await.ok_or_else(|| {
             io::Error::other(format!("no proxy found for {}", self.name()))
         })?;
@@ -118,6 +142,29 @@ impl OutboundHandler for Handler {
         sess: &Session,
         resolver: ThreadSafeDNSResolver,
     ) -> io::Result<BoxedInstrumentedDatagram> {
+        if let Some(seconds) = self.opts.hop_attempt_seconds {
+            let mut errors = Vec::new();
+            for candidate in self.get_proxies(false).await {
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(seconds),
+                    candidate.connect_datagram(sess, resolver.clone()),
+                )
+                .await
+                {
+                    Ok(Ok(connection)) => {
+                        connection.append_to_chain(self.name()).await;
+                        return Ok(connection);
+                    }
+                    Ok(Err(error)) => errors.push(format!("{}: {error}", candidate.name())),
+                    Err(_) => errors.push(format!("{}: timed out", candidate.name())),
+                }
+            }
+            return Err(io::Error::other(format!(
+                "{}: all configured hop candidates failed: {}",
+                self.name(),
+                errors.join(", ")
+            )));
+        }
         let proxy = self.find_alive_proxy(true).await.ok_or_else(|| {
             io::Error::other(format!("no proxy found for {}", self.name()))
         })?;
@@ -129,7 +176,11 @@ impl OutboundHandler for Handler {
     }
 
     async fn support_connector(&self) -> ConnectorType {
-        ConnectorType::Tcp
+        if self.opts.hop_attempt_seconds.is_some() {
+            ConnectorType::All
+        } else {
+            ConnectorType::Tcp
+        }
     }
 
     async fn connect_stream_with_connector(
@@ -138,12 +189,32 @@ impl OutboundHandler for Handler {
         resolver: ThreadSafeDNSResolver,
         connector: &dyn RemoteConnector,
     ) -> io::Result<BoxedInstrumentedStream> {
-        let proxy = self.find_alive_proxy(true).await.ok_or_else(|| {
-            io::Error::other(format!("no proxy found for {}", self.name()))
-        })?;
+        // Each generated candidate already owns the connector for all preceding hops.
+        if self.opts.hop_attempt_seconds.is_some() {
+            return self.connect_stream(sess, resolver).await;
+        }
+        let proxy = self
+            .find_alive_proxy(true)
+            .await
+            .ok_or_else(|| io::Error::other(format!("no proxy found for {}", self.name())))?;
         proxy
             .connect_stream_with_connector(sess, resolver, connector)
             .await
+    }
+
+    async fn connect_datagram_with_connector(
+        &self,
+        sess: &Session,
+        resolver: ThreadSafeDNSResolver,
+        _connector: &dyn RemoteConnector,
+    ) -> io::Result<BoxedInstrumentedDatagram> {
+        if self.opts.hop_attempt_seconds.is_some() {
+            return self.connect_datagram(sess, resolver).await;
+        }
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "fallback group UDP relay is not configured",
+        ))
     }
 
     fn try_as_group_handler(&self) -> Option<&dyn GroupProxyAPIResponse> {

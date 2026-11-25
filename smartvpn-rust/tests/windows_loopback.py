@@ -1,4 +1,5 @@
 """Run on Windows after build-windows.ps1. Only uses loopback and fixture PIDs."""
+from collections import deque
 import argparse
 import base64
 import select
@@ -22,7 +23,7 @@ from zipfile import ZipFile
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION = (ROOT / "VERSION").read_text().strip().split("+")[0]
-SCRATCH = Path(r"C:\Users\21654\.gemini\antigravity\brain\6a453053-a315-41e2-b122-010410e5b9fd\scratch")
+SCRATCH = Path(tempfile.gettempdir())
 
 
 def pids(path):
@@ -86,6 +87,7 @@ def main(archive):
             proc.stdout.close()
         stack.callback(cleanup)
         bootstrap = json.loads(proc.stdout.readline())
+        threading.Thread(target=deque, args=(proc.stdout, 0), daemon=True).start()
         port = bootstrap["port"]
         assert bootstrap["address"] == f"127.0.0.1:{port}"
 
@@ -155,6 +157,7 @@ def main(archive):
         proc.stdout.close()
         proc = launch()
         bootstrap = json.loads(proc.stdout.readline())
+        threading.Thread(target=deque, args=(proc.stdout, 0), daemon=True).start()
         port = bootstrap["port"]
         state = api("GET","state",200)
         assert state["socksPort"] == 18481 and state["selectedNode"] == name
@@ -193,6 +196,9 @@ def main(archive):
                         self.wfile.write(bytes([5,0,0,1,127,0,0,1,0,0]))
                         assert self.rfile.readline() == b"geo fixture\n"
                         self.wfile.write(b"CN rule selected\n")
+                        return
+                    if (host, port) == ("127.0.0.1", 1):
+                        self.wfile.write(bytes([5, 5, 0, 1, 127, 0, 0, 1, 0, 0]))
                         return
                     is_probe = expected_port == origin_port and (host,port) == ("127.0.0.1",probe.server_port)
                     assert is_probe or (host, port) == (("origin.example" if expected_port == origin_port else "127.0.0.1"), expected_port)
@@ -316,8 +322,27 @@ def main(archive):
         assert report["delay"] >= 0 and report["warmDelay"] >= 0
         assert len(observed) == 3
         observed.clear()
+        for dead in ("dead-entry", "dead-middle"):
+            api("POST","nodes/manual",200,{"name":dead,"uri":"socks5://127.0.0.1:1"})
+        policy_hops = ["dead-entry","dead-middle",hops[-1]]
+        backups = {"dead-entry":[hops[0]],"dead-middle":["middle"]}
+        api("PUT","nodes/chain/profile",200,{"name":"with-backups","original":"","hops":policy_hops,"backups":backups})
+        app_group={"id":"group1","name":"Fixture","enabled":True,"apps":["fixture.exe"],"targetType":"chain","targetChainId":"with-backups"}
+        api("PUT","settings",200,{"appGroups":[app_group]})
+        state=api("GET","state",200)
+        assert state["chainBackups"]["with-backups"]==backups and state["appGroupChains"]["with-backups"]=="with-backups"
+        api("POST","connect",200)
+        api("POST","disconnect",200)
+        report=api("POST","nodes/chain/probe",200,{"hops":policy_hops,"backups":backups})
+        assert report.get("error") is None,report
+        assert observed[-3:]==[(entry_port,middle_port),(middle_port,exit_port),(exit_port,probe.server_port)],observed
+        api("PUT","settings",200,{"appGroups":[]})
+        api("DELETE","nodes/chain/profile?name=with-backups",200)
+        for dead in ("dead-entry","dead-middle"):
+            api("DELETE","nodes/manual?"+urlencode({"name":dead}),200)
+        observed.clear()
         assert api("GET","regions",200)["job"]["total"] == 3
-        assert api("POST","tun/check",200)["mode"] == "external"
+        assert api("POST","tun/check",200)["mode"] == "system-proxy"
         # Keep domestic refresh local throughout the policy matrix.
         Path(temp,"providers/china-ip.txt").write_text("192.0.2.0/24\n")
         for domestic,dns,rtc in [(False,False,False),(True,False,False),(True,True,True),(False,True,False)]:
@@ -407,6 +432,7 @@ def main(archive):
         proc.stdout.close()
         proc = launch()
         bootstrap = json.loads(proc.stdout.readline())
+        threading.Thread(target=deque, args=(proc.stdout, 0), daemon=True).start()
         port = bootstrap["port"]
         for gran,fmt in [("hour","%Y-%m-%dT%H"),("day","%Y-%m-%d"),("month","%Y-%m"),("year","%Y")]:
             date = time.strftime(fmt,time.strptime(history["date"],"%Y-%m-%dT%H"))
@@ -421,7 +447,7 @@ def main(archive):
             "mixedPort":mixed,"controllerPort":ctrl,"proxies":[],"choices":["REJECT","DIRECT"],
             "proxyProviders":{},"ruleProviders":{},"domesticDirect":False,"preventDnsLeaks":False}}
         api("PUT","nodes/chain",200,{"enabled":False,"hops":[]})
-        bad = {**options, "config":{**options["config"], "tun":True}}
+        bad = {**options, "config":{**options["config"], "unknownOption":True}}
         assert "unknown field" in api("POST","connect",400,bad)["error"] and not pids(kernel)
         api("POST", "connect", 200, options)
         assert not pids(kernel)
@@ -480,6 +506,7 @@ def main(archive):
         alias = bundle / "smartvpn-service-current.exe"
         proc = subprocess.Popen([alias], cwd=temp, env=portable_env, stdout=subprocess.PIPE, stderr=log)
         bootstrap = json.loads(proc.stdout.readline())
+        threading.Thread(target=deque, args=(proc.stdout, 0), daemon=True).start()
         port = bootstrap["port"]
         portable_dir = bundle / "SmartVPN-data"
         assert api("GET","state",200)["dataDir"] == str(portable_dir)
@@ -489,6 +516,7 @@ def main(archive):
         proc.stdout.close()
         proc = launch()
         bootstrap = json.loads(proc.stdout.readline())
+        threading.Thread(target=deque, args=(proc.stdout, 0), daemon=True).start()
         port = bootstrap["port"]
         api("POST","connect",200,options)
         proc.kill()

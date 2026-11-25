@@ -7,7 +7,7 @@ $ErrorActionPreference='Stop'
 $root=Split-Path $PSScriptRoot -Parent
 $targetDir=Join-Path $root '.tools/distribution-cargo'
 $android=$Platform -ne 'windows'
-$options=@('--locked','--release','--target-dir',$targetDir,'--config','source.crates-io.replace-with="ustc"','--config','source.ustc.registry="sparse+https://mirrors.ustc.edu.cn/crates.io-index/"')
+$options=@('--locked','--release','--config','source.crates-io.replace-with="ustc"','--config','source.ustc.registry="sparse+https://mirrors.ustc.edu.cn/crates.io-index/"')
 $output=Join-Path $targetDir 'release'
 $save=@{}
 function ProcessEnv($name,$value) {
@@ -34,15 +34,23 @@ try {
   foreach($lib in 'core','host','store','engine'){
     $manifest=switch($lib){'core'{"$PSScriptRoot/Cargo.toml"} 'host'{"$PSScriptRoot/host/Cargo.toml"} 'store'{"$root/backend-rust-store/Cargo.toml"} 'engine'{"$PSScriptRoot/engine/Cargo.toml"}}
     $file=if($android){"libsmartvpn_$lib.so"}elseif($lib -eq 'host'){'smartvpn-host.exe'}else{"smartvpn_$lib.dll"}
-    if($android){ProcessEnv 'RUSTFLAGS' "-C link-arg=-Wl,-z,max-page-size=16384"}
+    # The engine is both a host dependency and a standalone JNI library. Its
+    # independent lockfile/linker flags must not overwrite the host's rlib.
+    $libTarget=if($lib -eq 'engine'){Join-Path $targetDir 'standalone-engine'}else{$targetDir}
+    $libOutput=Join-Path $libTarget ($output.Substring($targetDir.Length).TrimStart('\','/'))
+    $libOptions=$options+@('--target-dir',$libTarget)
+    $cargoCache=if($env:CARGO_HOME){$env:CARGO_HOME}else{Join-Path $env:USERPROFILE '.cargo'}
+    $flags=@("--remap-path-prefix=$root=/src","--remap-path-prefix=$env:USERPROFILE=/home/builder","--remap-path-prefix=$cargoCache=/cargo")
+    if($android){$flags+=@('-C','link-arg=-Wl,-z,max-page-size=16384')}
+    ProcessEnv 'CARGO_ENCODED_RUSTFLAGS' ($flags -join [char]31)
     if($android -and $lib -eq 'host'){
-      & cargo rustc --lib --crate-type cdylib @options --manifest-path $manifest -- -C "link-arg=-Wl,-soname,$file"
+      & cargo rustc --lib --crate-type cdylib @libOptions --manifest-path $manifest -- -C "link-arg=-Wl,-soname,$file"
     }elseif($android){
-      & cargo rustc --lib @options --manifest-path $manifest -- -C "link-arg=-Wl,-soname,$file"
+      & cargo rustc --lib @libOptions --manifest-path $manifest -- -C "link-arg=-Wl,-soname,$file"
     }else{
-      & cargo build @options --manifest-path $manifest
+      & cargo build @libOptions --manifest-path $manifest
     }
     if($LASTEXITCODE){throw "Rust $lib build failed for $Platform"}
-    Copy-Item -LiteralPath (Join-Path $output $file) -Destination $Destination -Force
+    Copy-Item -LiteralPath (Join-Path $libOutput $file) -Destination $Destination -Force
   }
 } finally {foreach($name in $save.Keys){[Environment]::SetEnvironmentVariable($name,$save[$name],'Process')}}

@@ -4,7 +4,7 @@ exclude = ["vendor/clash-rs"]
 members = ["crates/smartvpn-runtime", "crates/smartvpn-android-jni", "crates/smartvpn-win-service"]
 
 [workspace.package]
-version = "0.4.0-alpha.11"
+version = "0.4.0-alpha.16"
 edition = "2021"
 
 [workspace.dependencies]

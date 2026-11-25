@@ -102,6 +102,8 @@ pub struct SavedSubscription {
     pub user_info: Option<QuotaInfo>,
     #[serde(default)]
     pub raw_proxies: Vec<Value>,
+    #[serde(default)]
+    pub rules: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
@@ -124,23 +126,55 @@ pub struct ProxyChain {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct HealthParams {
-    pub interval_sec: u64,
-    pub timeout_ms: u64,
-    pub max_delay_ms: u64,
+    #[serde(alias = "intervalSec")]
+    pub patrol_interval_sec: u64,
+    #[serde(alias = "timeoutMs")]
+    pub connect_timeout_ms: u64,
     pub cooldown_sec: u64,
+    pub failure_threshold: u64,
+    pub min_dwell_sec: u64,
+    pub recovery_successes: u64,
 }
-
 impl Default for HealthParams {
     fn default() -> Self {
         Self {
-            interval_sec: 120,
-            timeout_ms: 4000,
-            max_delay_ms: 2500,
-            cooldown_sec: 180,
+            patrol_interval_sec: 60,
+            connect_timeout_ms: 3000,
+            cooldown_sec: 60,
+            failure_threshold: 2,
+            min_dwell_sec: 30,
+            recovery_successes: 3,
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PathTarget {
+    pub label: String,
+    pub url: String,
+    pub enabled: bool,
+}
+
+fn read_targets<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<PathTarget>, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Entry {
+        Current(PathTarget),
+        Old(String),
+    }
+    Ok(Vec::<Entry>::deserialize(d)?
+        .into_iter()
+        .map(|entry| match entry {
+            Entry::Current(t) => t,
+            Entry::Old(url) => PathTarget {
+                label: url.clone(),
+                url,
+                enabled: true,
+            },
+        })
+        .collect())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -148,7 +182,8 @@ impl Default for HealthParams {
 pub struct PathChecksConfig {
     pub enabled: bool,
     pub interval_sec: u64,
-    pub targets: Vec<String>,
+    #[serde(deserialize_with = "read_targets")]
+    pub targets: Vec<PathTarget>,
 }
 
 impl Default for PathChecksConfig {
@@ -157,8 +192,16 @@ impl Default for PathChecksConfig {
             enabled: false,
             interval_sec: 120,
             targets: vec![
-                "https://www.google.com/generate_204".to_owned(),
-                "https://www.youtube.com/generate_204".to_owned(),
+                PathTarget {
+                    label: "Google".into(),
+                    url: "https://www.google.com/generate_204".into(),
+                    enabled: true,
+                },
+                PathTarget {
+                    label: "YouTube".into(),
+                    url: "https://www.youtube.com/generate_204".into(),
+                    enabled: true,
+                },
             ],
         }
     }
@@ -191,6 +234,8 @@ pub struct PersistedState {
     #[serde(default)]
     pub locked_region: String,
     #[serde(default)]
+    pub regions: BTreeMap<String, Value>,
+    #[serde(default)]
     pub locked_node: String,
     #[serde(default = "default_connection_mode")]
     pub connection_mode: String,
@@ -210,6 +255,8 @@ pub struct PersistedState {
     pub app_groups: Vec<AppGroup>,
     #[serde(default)]
     pub auto_merge_hours: u64,
+    #[serde(default)]
+    pub last_merge_at: i64,
     #[serde(default)]
     pub subscriptions: Vec<SavedSubscription>,
     #[serde(default)]
@@ -248,6 +295,7 @@ impl Default for PersistedState {
             selected_node: String::new(),
             selection_mode: "manual".to_owned(),
             locked_region: String::new(),
+            regions: BTreeMap::new(),
             locked_node: String::new(),
             connection_mode: default_connection_mode(),
             domestic_web: true,
@@ -258,6 +306,7 @@ impl Default for PersistedState {
             game_bypass: Vec::new(),
             app_groups: Vec::new(),
             auto_merge_hours: 0,
+            last_merge_at: 0,
             subscriptions: Vec::new(),
             merged_proxies: Vec::new(),
             manual_nodes: Vec::new(),
@@ -282,21 +331,25 @@ pub struct RuntimeState {
     pub started_at: String,
     pub node_delays: BTreeMap<String, i64>,
     pub node_first_delays: BTreeMap<String, i64>,
-    pub node_regions: BTreeMap<String, String>,
+    pub verifying: bool,
+    pub health: BTreeMap<String, Value>,
     pub chain_probes: BTreeMap<String, Value>,
+    pub path_status: Value,
     pub next_event_id: u64,
-    pub rx_bytes: u64,
-    pub tx_bytes: u64,
+    pub(super) traffic: super::traffic::Monitor,
+    pub traffic_snapshot: Value,
 }
 
 impl RuntimeState {
-    pub fn load(home: &Path, bridge: Arc<dyn PlatformBridge>) -> Self {
-        let _ = fs::create_dir_all(home);
+    pub fn load(home: &Path, bridge: Arc<dyn PlatformBridge>) -> Result<Self, String> {
+        fs::create_dir_all(home).map_err(|e| e.to_string())?;
         let path = home.join("rust_host_state.json");
-        let mut persisted: PersistedState = fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
+        let mut persisted: PersistedState = match fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|e| format!("invalid rust_host_state.json: {e}"))?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => PersistedState::default(),
+            Err(error) => return Err(format!("read rust_host_state.json: {error}")),
+        };
         if persisted.subscription_url.starts_with("enc:v1:") {
             if let Some(opened) = open_maybe_sealed(&*bridge, &persisted.subscription_url) {
                 persisted.subscription_url = opened;
@@ -328,7 +381,7 @@ impl RuntimeState {
             persisted.connection_mode = "vpn".to_owned();
         }
         let next_event_id = persisted.events.iter().map(|e| e.id).max().unwrap_or(0) + 1;
-        Self {
+        Ok(Self {
             china: super::china::China::load(home),
             home: home.to_path_buf(),
             bridge,
@@ -340,12 +393,14 @@ impl RuntimeState {
             started_at: chrono::Utc::now().to_rfc3339(),
             node_delays: BTreeMap::new(),
             node_first_delays: BTreeMap::new(),
-            node_regions: BTreeMap::new(),
+            verifying: false,
+            health: BTreeMap::new(),
             chain_probes: BTreeMap::new(),
+            path_status: json!({"running":false}),
             next_event_id,
-            rx_bytes: 0,
-            tx_bytes: 0,
-        }
+            traffic: super::traffic::Monitor::open(home)?,
+            traffic_snapshot: json!({"available":false,"reason":"未连接"}),
+        })
     }
 
     pub fn save(&mut self) -> Result<(), String> {
@@ -473,13 +528,13 @@ impl RuntimeState {
             "blocked": false,
             "blockReason": "",
             "health": {
-                "counts": {"healthy": total_nodes, "cooldown": 0, "unhealthy": 0},
+                "counts": {"healthy":self.health.values().filter(|n|n["state"]=="HEALTHY").count(),"cooldown":0,"unhealthy":self.health.values().filter(|n|n["state"]=="UNHEALTHY").count()},
                 "params": self.persisted.health_params,
                 "lockedRegion": self.persisted.locked_region,
                 "poolSize": total_nodes,
                 "sweepNote": ""
             },
-            "regionJob": {"running": false, "done": 0, "total": 0},
+            "regionJob": {"running": self.verifying, "done": 0, "total": 0},
             "connectionMode": self.persisted.connection_mode,
             "strictPrivacy": self.persisted.strict_privacy,
             "domesticWeb": self.persisted.domestic_web,

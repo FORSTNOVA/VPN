@@ -69,6 +69,16 @@ impl Store {
         CREATE TABLE IF NOT EXISTS active_catalog(singleton INTEGER PRIMARY KEY CHECK(singleton=1),doc TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS chain_profiles(name TEXT PRIMARY KEY,hops TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS chain(singleton INTEGER PRIMARY KEY CHECK(singleton=1),doc TEXT NOT NULL);")?;
+        if !tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('chain_profiles') WHERE name='backups')",
+            [],
+            |r| r.get::<_, bool>(0),
+        )? {
+            tx.execute(
+                "ALTER TABLE chain_profiles ADD COLUMN backups TEXT NOT NULL DEFAULT '{}'",
+                [],
+            )?;
+        }
         for (k, v) in defaults().as_object().unwrap() {
             tx.execute(
                 "INSERT OR IGNORE INTO settings VALUES(?,?)",
@@ -196,16 +206,27 @@ impl Store {
         }
         Ok(())
     }
+    pub fn profile_backups(&self, name: &str) -> Result<crate::config::Backups> {
+        let doc: String = self.db.query_row(
+            "SELECT coalesce((SELECT backups FROM chain_profiles WHERE name=?),'{}')",
+            [name],
+            |r| r.get(0),
+        )?;
+        Ok(serde_json::from_str(&doc)?)
+    }
     pub fn save_profile(&mut self, doc: &Value) -> Result<Value> {
         #[derive(serde::Deserialize)]
         struct Profile {
             name: String,
             original: String,
             hops: Vec<String>,
+            #[serde(default)]
+            backups: crate::config::Backups,
         }
         let p: Profile = serde_json::from_value(doc.clone())?;
         ensure!(!p.name.trim().is_empty(), "empty chain name");
         self.validate_hops(&p.hops)?;
+        crate::config::compile_chain(&self.configs()?, &p.hops, &p.backups, "SmartVPN-Route")?;
         let chain = self.chain()?;
         let tx = self
             .db
@@ -215,6 +236,9 @@ impl Store {
                 tx.execute("DELETE FROM chain_profiles WHERE name=?", [&p.original])? == 1,
                 "unknown chain profile"
             );
+            if p.original != p.name {
+                tx.execute("UPDATE settings SET value=(SELECT json_group_array(json(CASE WHEN item.value->>'targetType'='chain' AND item.value->>'targetChainId'=?1 THEN json_set(item.value,'$.targetChainId',?2) ELSE item.value END)) FROM json_each(settings.value) item) WHERE key='appGroups'",params![p.original,p.name])?;
+            }
             if chain["enabled"] == true && chain["name"] == p.original {
                 tx.execute(
                     "UPDATE chain SET doc=?",
@@ -223,13 +247,19 @@ impl Store {
             }
         }
         tx.execute(
-            "INSERT INTO chain_profiles VALUES(?,?)",
-            params![p.name, serde_json::to_string(&p.hops)?],
+            "INSERT INTO chain_profiles(name,hops,backups) VALUES(?,?,?)",
+            params![
+                p.name,
+                serde_json::to_string(&p.hops)?,
+                serde_json::to_string(&p.backups)?
+            ],
         )?;
         tx.commit()?;
         Ok(json!({"ok":true}))
     }
     pub fn delete_profile(&mut self, name: &str) -> Result<()> {
+        let used=self.db.query_row("SELECT EXISTS(SELECT 1 FROM settings,json_each(settings.value) g WHERE settings.key='appGroups' AND g.value->>'targetType'='chain' AND g.value->>'targetChainId'=?)",[name],|r|r.get::<_,bool>(0))?;
+        ensure!(!used, "代理链正在被应用分组使用");
         let tx = self
             .db
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -293,10 +323,11 @@ impl Store {
             [],
             |r| r.get(0),
         )?;
+        let (backups,names):(String,String)=self.db.query_row("SELECT json_group_object(name,json(backups)),json_group_object(name,name) FROM chain_profiles",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
         let active_label:Option<String>=self.db.query_row("SELECT (SELECT name FROM subscriptions WHERE url=(SELECT json_extract(value,'$') FROM settings WHERE key='subscriptionUrl'))",[],|r|r.get(0))?;
         let nodes=self.configs()?.into_iter().map(|n|json!({"name":n["name"],"type":n["type"],"network":n["network"],"tls":n["tls"],"sourceLabel":if manual.contains(&n["name"]){Some("手动节点")}else{n["smartvpn-source"].as_str().or(active_label.as_deref())},"manual":manual.contains(&n["name"]),"selected":n["name"].as_str()==selected.as_deref()})).collect::<Vec<_>>();
         Ok(
-            json!({"nodes":nodes,"selectedNode":selected,"selectionMode":"manual","chain":chain,"chains":serde_json::from_str::<Value>(&profiles)?}),
+            json!({"nodes":nodes,"selectedNode":selected,"selectionMode":"manual","chain":chain,"chains":serde_json::from_str::<Value>(&profiles)?,"chainBackups":serde_json::from_str::<Value>(&backups)?,"appGroupChains":serde_json::from_str::<Value>(&names)?}),
         )
     }
     pub fn manual_nodes(&self) -> Result<Vec<Value>> {

@@ -22,12 +22,12 @@ Example from the project root (adjust explicit paths to your offline tools):
 
 ```powershell
 ./backend-rust/package-android-native.ps1 `
-  -OutDir C:/Users/21654/SmartVPN-Android-native-staging-001 `
-  -GoExe D:/codebuddythink/vpn/.tools/go/bin/go.exe `
-  -GoPath D:/codebuddythink/vpn/.tools/gopath `
-  -CargoHome C:/Users/21654/SmartVPN-Rust-Phase6/cargo-home `
-  -GoCache C:/Users/21654/AppData/Local/go-build `
-  -NdkRoot C:/Users/21654/AppData/Local/Android/Sdk/ndk/27.2.12479018
+  -OutDir "$env:TEMP/SmartVPN-Android-native-staging-001" `
+  -GoExe ./.tools/go/bin/go.exe `
+  -GoPath ./.tools/gopath `
+  -CargoHome $env:CARGO_HOME `
+  -GoCache "$env:LOCALAPPDATA/go-build" `
+  -NdkRoot "$env:ANDROID_HOME/ndk/27.2.12479018"
 ```
 
 ## Output and verification

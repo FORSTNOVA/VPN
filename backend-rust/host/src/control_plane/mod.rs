@@ -1,4 +1,7 @@
+mod checks;
 mod china;
+mod regions;
+mod traffic;
 pub mod nodes;
 pub mod state;
 pub mod subs;
@@ -62,6 +65,7 @@ pub struct ControlPlane {
     pub token: String,
     pub state: Arc<Mutex<RuntimeState>>,
     shutdown_tx: Mutex<Option<oneshot::Sender<()>>>,
+    merge_lock: Mutex<()>,
 }
 
 impl ControlPlane {
@@ -72,7 +76,7 @@ impl ControlPlane {
         rand::rng().fill_bytes(&mut token_bytes);
         let token: String = token_bytes.iter().map(|b| format!("{b:02x}")).collect();
 
-        let state = Arc::new(Mutex::new(RuntimeState::load(&home, bridge)));
+        let state = Arc::new(Mutex::new(RuntimeState::load(&home, bridge)?));
         let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
             .await
             .map_err(|e| format!("bind loopback failed: {e}"))?;
@@ -87,8 +91,68 @@ impl ControlPlane {
             token,
             state,
             shutdown_tx: Mutex::new(Some(shutdown_tx)),
+            merge_lock: Mutex::new(()),
         });
 
+        let state_ref = Arc::downgrade(&cp.state);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let Some(shared) = state_ref.upgrade() else {
+                    break;
+                };
+                let mut st = shared.lock().await;
+                if st.connected {
+                    if let Err(e) = traffic::refresh(&mut st) {
+                        st.traffic_snapshot = json!({"available":false,"reason":e});
+                    }
+                }
+            }
+        });
+        let weak = Arc::downgrade(&cp);
+        tokio::spawn(async move {
+            let mut last_check = std::time::Instant::now();
+            let mut last_merge_attempt = 0;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                let Some(cp) = weak.upgrade() else { break };
+                let (merge, check) = {
+                    let st = cp.state.lock().await;
+                    let hours = st.persisted.auto_merge_hours;
+                    (
+                        st.persisted.subscription_url == "__merged__"
+                            && hours > 0
+                            && chrono::Utc::now()
+                                .timestamp()
+                                .saturating_sub(st.persisted.last_merge_at.max(last_merge_attempt))
+                                as i128
+                                >= i128::from(hours) * 3600,
+                        st.connected
+                            && st.persisted.path_checks.enabled
+                            && last_check.elapsed().as_secs()
+                                >= st.persisted.path_checks.interval_sec,
+                    )
+                };
+                if merge {
+                    last_merge_attempt = chrono::Utc::now().timestamp();
+                    let res = cp.handle_sub_merge(true).await;
+                    if !res.status().is_success() {
+                        cp.state.lock().await.push_event(
+                            "subscription",
+                            "定时合并失败",
+                            &res.status().to_string(),
+                            false,
+                        );
+                    }
+                }
+                if check {
+                    last_check = std::time::Instant::now();
+                    let _response = cp.handle_run_path_checks().await;
+                }
+            }
+        });
         let cp_srv = Arc::clone(&cp);
         tokio::spawn(async move {
             loop {
@@ -139,7 +203,9 @@ impl ControlPlane {
     pub async fn shutdown(&self) {
         {
             let mut st = self.state.lock().await;
-            tunnel::stop_tun(&mut st);
+            if let Err(e) = tunnel::stop_tun(&mut st) {
+                eprintln!("shutdown: {e}");
+            }
             let _ = st.save();
         }
         if let Some(tx) = self.shutdown_tx.lock().await.take() {
@@ -185,12 +251,16 @@ impl ControlPlane {
             (Method::POST, "/api/connect") => self.handle_connect().await,
             (Method::POST, "/api/disconnect") => {
                 let mut st = self.state.lock().await;
-                tunnel::stop_tun(&mut st);
+                if let Err(e) = tunnel::stop_tun(&mut st) {
+                    return text_resp(StatusCode::INTERNAL_SERVER_ERROR, &e);
+                }
                 json_resp(StatusCode::OK, json!({"ok": true}))
             }
             (Method::POST, "/api/shutdown") => {
                 let mut st = self.state.lock().await;
-                tunnel::stop_tun(&mut st);
+                if let Err(e) = tunnel::stop_tun(&mut st) {
+                    return text_resp(StatusCode::INTERNAL_SERVER_ERROR, &e);
+                }
                 let _ = st.save();
                 json_resp(StatusCode::OK, json!({"ok": true}))
             }
@@ -256,7 +326,7 @@ impl ControlPlane {
             (Method::POST, "/api/subscriptions/update") => self.handle_sub_update(&body).await,
             (Method::DELETE, "/api/subscriptions") => self.handle_sub_delete(&query).await,
             (Method::POST, "/api/subscriptions/activate") => self.handle_sub_activate(&body).await,
-            (Method::POST, "/api/subscriptions/merge") => self.handle_sub_merge().await,
+            (Method::POST, "/api/subscriptions/merge") => self.handle_sub_merge(false).await,
             (Method::POST, "/api/subscriptions/auto-merge") => self.handle_sub_auto_merge(&body).await,
             (Method::POST, "/api/subscriptions/refresh") => self.handle_sub_refresh(&body).await,
             (Method::POST, "/api/subscriptions/quota") => self.handle_sub_quota(&body).await,
@@ -267,18 +337,60 @@ impl ControlPlane {
                 let st = self.state.lock().await;
                 json_resp(
                     StatusCode::OK,
-                    json!({"importPolicy": st.persisted.import_policy}),
+                    json!({"enabled":st.persisted.import_policy == "enabled","running":st.connected,
+                        "rules":subs::active_rules(&st.persisted).map(|r| json!({"source":r,"applied":subs::applied_rule(&st.persisted,r)})).collect::<Vec<_>>()}),
                 )
             }
             (Method::GET, "/api/regions") => {
                 let st = self.state.lock().await;
-                json_resp(StatusCode::OK, self.regions_payload(&st))
+                json_resp(StatusCode::OK, regions::report(&st))
             }
             (Method::POST, "/api/regions/verify") => self.handle_regions_verify(&body).await,
             (Method::POST, "/api/region/lock") => self.handle_region_lock(&body).await,
             (Method::POST, "/api/health/patrol") => {
-                let st = self.state.lock().await;
-                json_resp(StatusCode::OK, json!({"ok": true, "health": st.state_json()["health"]}))
+                let (proxies, protect, timeout) = {
+                    let st = self.state.lock().await;
+                    (
+                        st.all_proxy_values(),
+                        st.active_protect_hook(),
+                        st.persisted.health_params.connect_timeout_ms,
+                    )
+                };
+                let mut pending = proxies.into_iter();
+                let mut jobs = tokio::task::JoinSet::new();
+                loop {
+                    while jobs.len() < 4 {
+                        let Some(proxy) = pending.next() else { break };
+                        jobs.spawn(async move {
+                            let result = nodes::probe_proxy_latency(&proxy, protect, timeout).await;
+                            (proxy, result)
+                        });
+                    }
+                    let Some(result) = jobs.join_next().await else {
+                        break;
+                    };
+                    let (proxy, sample) = match result {
+                        Ok(v) => v,
+                        Err(e) => {
+                            return text_resp(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string())
+                        }
+                    };
+                    let row = match sample {
+                        Ok((_, ms)) => json!({"state":"HEALTHY","latencyMs":ms}),
+                        Err(e) => json!({"state":"UNHEALTHY","detail":e}),
+                    };
+                    let mut row = row;
+                    row["updatedAt"] = json!(chrono::Utc::now().to_rfc3339());
+                    self.state
+                        .lock()
+                        .await
+                        .health
+                        .insert(proxy["name"].as_str().unwrap().to_owned(), row);
+                }
+                json_resp(
+                    StatusCode::OK,
+                    json!({"health":self.state.lock().await.state_json()["health"]}),
+                )
             }
             (Method::PUT, "/api/health/params") => self.handle_health_params(&body).await,
             (Method::GET, "/api/path-checks") => {
@@ -287,7 +399,7 @@ impl ControlPlane {
                     StatusCode::OK,
                     json!({
                         "settings": st.persisted.path_checks,
-                        "status": {"running": false},
+                        "status": st.path_status,
                         "limits": {"minIntervalSec": 10}
                     }),
                 )
@@ -297,31 +409,15 @@ impl ControlPlane {
             (Method::POST, "/api/path-checks/recovery/cancel") => {
                 json_resp(StatusCode::OK, json!({"ok": true}))
             }
-            (Method::GET, "/api/traffic") => {
-                let st = self.state.lock().await;
-                json_resp(
-                    StatusCode::OK,
-                    json!({
-                        "available": st.connected,
-                        "reason": if st.connected { "" } else { "内核未运行：连接与流量监控只在连接期间有意义" },
-                        "up": st.tx_bytes,
-                        "down": st.rx_bytes,
-                        "connections": []
-                    }),
-                )
-            }
+            (Method::GET, "/api/traffic") => json_resp(
+                StatusCode::OK,
+                self.state.lock().await.traffic_snapshot.clone(),
+            ),
             (Method::GET, "/api/traffic/history") => {
-                json_resp(
-                    StatusCode::OK,
-                    json!({
-                        "upload": 0,
-                        "download": 0,
-                        "total": 0,
-                        "connections": 0,
-                        "apps": [],
-                        "recent": []
-                    }),
-                )
+                match self.state.lock().await.traffic.history(&query) {
+                    Ok(report) => json_resp(StatusCode::OK, report),
+                    Err(error) => text_resp(StatusCode::BAD_REQUEST, &error),
+                }
             }
             (Method::GET, "/api/events") => {
                 let st = self.state.lock().await;
@@ -390,8 +486,17 @@ impl ControlPlane {
         if let Some(v) = obj.get("subscriptionUrl").and_then(|v| v.as_str()) {
             st.persisted.subscription_url = v.trim().to_owned();
         }
-        if let Some(v) = obj.get("importPolicy").and_then(|v| v.as_str()) {
-            st.persisted.import_policy = v.to_owned();
+        if let Some(v) = obj.get("importPolicy") {
+            let Some(enabled) = v.as_bool() else {
+                return text_resp(StatusCode::BAD_REQUEST, "importPolicy must be boolean");
+            };
+            if st.connected {
+                return text_resp(
+                    StatusCode::CONFLICT,
+                    "disconnect before changing subscription policy",
+                );
+            }
+            st.persisted.import_policy = if enabled { "enabled" } else { "default" }.to_owned();
         }
         if let Some(v) = obj.get("connectionMode").and_then(|v| v.as_str()) {
             st.persisted.connection_mode = v.to_owned();
@@ -462,9 +567,11 @@ impl ControlPlane {
                 let delay = st.node_delays.get(name).copied().unwrap_or(0);
                 let first_delay = st.node_first_delays.get(name).copied().unwrap_or(delay);
                 let region = st
-                    .node_regions
+                    .persisted
+                    .regions
                     .get(name)
-                    .map(String::as_str)
+                    .filter(|r| regions::fresh(r, p))
+                    .and_then(|r| r["country"].as_str())
                     .unwrap_or_else(|| nodes::infer_region_from_name(name));
                 Some(json!({
                     "name": name,
@@ -504,13 +611,19 @@ impl ControlPlane {
             let st = self.state.lock().await;
             (st.persisted.subscription_url.clone(), st.active_protect_hook())
         };
-        if url.trim().is_empty() {
-            return self.handle_sub_merge().await;
+        if url.trim().is_empty() || url == "__merged__" {
+            return self.handle_sub_merge(false).await;
         }
         match subs::fetch_subscription_text(&url, protect).await {
-            Ok((text, _)) => match subs::parse_proxies_from_payload(&text) {
-                Ok(proxies) => {
+            Ok((text, _)) => match subs::parse_catalog(&text) {
+                Ok((proxies, rules)) => {
                     let mut st = self.state.lock().await;
+                    if let Some(sub) = st.persisted.subscriptions.iter_mut().find(|s| s.url == url)
+                    {
+                        sub.raw_proxies = proxies.clone();
+                        sub.rules = rules;
+                        sub.node_count = proxies.len();
+                    }
                     st.persisted.merged_proxies = proxies;
                     if st.persisted.selected_node.is_empty() {
                         if let Some(first) = st
@@ -784,48 +897,48 @@ impl ControlPlane {
     }
 
     async fn handle_speedtest(&self, body: &[u8]) -> Response<Full<Bytes>> {
-        let _ = body;
-        let (persisted, proxies, protect) = {
-            let st = self.state.lock().await;
-            (
-                st.persisted.clone(),
-                st.all_proxy_values(),
-                st.active_protect_hook(),
-            )
+        let mb = match serde_json::from_slice::<Value>(body)
+            .ok()
+            .and_then(|v| v["megaBytes"].as_u64())
+        {
+            Some(mb @ (10 | 30 | 100)) => mb as usize,
+            _ => {
+                return text_resp(
+                    StatusCode::BAD_REQUEST,
+                    "expected megaBytes of 10, 30 or 100",
+                )
+            }
         };
-        let (hops, backups) = if let Some(c) = persisted.chains.iter().find(|c| c.id == persisted.active_chain_id) {
-            (c.hops.clone(), c.backups.clone())
-        } else if !persisted.selected_node.is_empty() {
-            (vec![persisted.selected_node.clone()], Default::default())
-        } else {
-            return text_resp(StatusCode::BAD_REQUEST, "no node selected\n");
+        let router = match self.active_router().await {
+            Ok(router) => router,
+            Err(error) => return text_resp(StatusCode::CONFLICT, &error),
         };
-        let timeout_ms = if hops.len() > 1 { 12000 } else { 6000 };
-        match nodes::probe_chain_latency(&backups, &proxies, &hops, protect, timeout_ms).await {
-            Ok((first_ms, steady_ms)) => json_resp(
-                StatusCode::OK,
-                json!({
-                    "ok": true,
-                    "latencyMs": steady_ms,
-                    "firstMs": first_ms,
-                    "mbps": 0.0
-                }),
-            ),
-            Err(e) => text_resp(StatusCode::BAD_GATEWAY, &format!("{e}\n")),
+        match checks::speed(&router, mb).await {
+            Ok(speed) => json_resp(StatusCode::OK, speed),
+            Err(error) => text_resp(StatusCode::BAD_GATEWAY, &error.to_string()),
         }
     }
 
+    async fn active_router(&self) -> Result<Arc<smartvpn_engine::router::Router>, String> {
+        let handle = self.state.lock().await.tun_handle.ok_or("请先连接 VPN")?;
+        smartvpn_engine::ffi::tun_router(handle).map_err(|e| e.to_string())
+    }
+
     async fn handle_diagnose(&self) -> Response<Full<Bytes>> {
-        let st = self.state.lock().await;
+        let router = match self.active_router().await {
+            Ok(router) => router,
+            Err(e) => return text_resp(StatusCode::CONFLICT, &e),
+        };
+        let node = self.state.lock().await.state_json()["activeNode"].clone();
+        let egress = match checks::egress(&router).await {
+            Ok(std::net::IpAddr::V4(addr)) => json!({"ipv4":addr}),
+            Ok(std::net::IpAddr::V6(addr)) => json!({"ipv6":addr}),
+            Err(e) => json!({"error":e.to_string()}),
+        };
+        let site = checks::site(&router, "YouTube", "https://www.youtube.com/generate_204").await;
         json_resp(
             StatusCode::OK,
-            json!({
-                "ok": true,
-                "connected": st.connected,
-                "rustEngine": true,
-                "nodeCount": st.all_proxy_values().len(),
-                "selectedNode": st.persisted.selected_node,
-            }),
+            json!({"node":node,"temporary":false,"egress":egress,"sites":[site]}),
         )
     }
 
@@ -845,9 +958,10 @@ impl ControlPlane {
             .map(|s| s.trim().to_owned())
             .unwrap_or_else(|| url.split("://").nth(1).unwrap_or(&url).split('/').next().unwrap_or("sub").to_owned());
         let protect = self.state.lock().await.active_protect_hook();
-        let (proxies, user_info) = match subs::fetch_subscription_text(&url, protect).await {
+        let ((proxies, rules), user_info) = match subs::fetch_subscription_text(&url, protect).await
+        {
             Ok((text, uinfo)) => {
-                let proxies = subs::parse_proxies_from_payload(&text)
+                let proxies = subs::parse_catalog(&text)
                     .map_err(|e| text_resp(StatusCode::BAD_REQUEST, &format!("{e}\n")));
                 match proxies {
                     Ok(p) => (p, uinfo),
@@ -874,6 +988,7 @@ impl ControlPlane {
             quota_error: String::new(),
             user_info,
             raw_proxies: proxies,
+            rules,
         });
         let _ = st.save();
         json_resp(StatusCode::OK, json!({"ok": true}))
@@ -946,7 +1061,8 @@ impl ControlPlane {
         json_resp(StatusCode::OK, json!({"ok": true}))
     }
 
-    async fn handle_sub_merge(&self) -> Response<Full<Bytes>> {
+    async fn handle_sub_merge(&self, scheduled: bool) -> Response<Full<Bytes>> {
+        let _merge = self.merge_lock.lock().await;
         let (targets, protect) = {
             let st = self.state.lock().await;
             let targets: Vec<(String, String)> = st
@@ -959,8 +1075,11 @@ impl ControlPlane {
             (targets, st.active_protect_hook())
         };
 
+        if targets.is_empty() {
+            return text_resp(StatusCode::BAD_REQUEST, "没有启用的订阅");
+        }
         let mut tasks = tokio::task::JoinSet::new();
-        for (id, url) in targets {
+        for (id, url) in targets.iter().cloned() {
             tasks.spawn(async move {
                 let res = match tokio::time::timeout(
                     std::time::Duration::from_secs(25),
@@ -977,18 +1096,40 @@ impl ControlPlane {
 
         let mut fetched = Vec::new();
         while let Some(joined) = tasks.join_next().await {
-            if let Ok(item) = joined {
-                fetched.push(item);
+            match joined {
+                Ok(item) => fetched.push(item),
+                Err(e) => {
+                    return text_resp(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("订阅下载任务失败: {e}"),
+                    )
+                }
             }
         }
 
         let now = chrono::Utc::now().timestamp();
         let mut st = self.state.lock().await;
+        let active: Vec<_> = st
+            .persisted
+            .subscriptions
+            .iter()
+            .filter(|s| s.enabled && !s.url.trim().is_empty())
+            .map(|s| (s.id.clone(), s.url.clone()))
+            .collect();
+        if targets != active
+            || (scheduled
+                && (st.persisted.subscription_url != "__merged__"
+                    || st.persisted.auto_merge_hours == 0))
+        {
+            return text_resp(StatusCode::CONFLICT, "下载期间订阅配置已更改");
+        }
+        let mut warnings = Vec::new();
         for (id, res) in fetched {
             if let Some(sub) = st.persisted.subscriptions.iter_mut().find(|s| s.id == id) {
                 match res {
-                    Ok((text, uinfo)) => match subs::parse_proxies_from_payload(&text) {
-                        Ok(proxies) => {
+                    Ok((text, uinfo)) => match subs::parse_catalog(&text) {
+                        Ok((proxies, rules)) => {
+                            sub.rules = rules;
                             sub.node_count = proxies.len();
                             sub.raw_proxies = proxies;
                             sub.updated_at = now;
@@ -1000,14 +1141,29 @@ impl ControlPlane {
                             }
                         }
                         Err(e) => {
+                            warnings.push(json!({"id":id,"error":e}));
                             sub.last_error = e;
                         }
                     },
                     Err(e) => {
+                        warnings.push(json!({"id":id,"error":e}));
                         sub.last_error = e;
                     }
                 }
             }
+        }
+        if !warnings.is_empty() {
+            st.push_event(
+                "subscription",
+                "订阅合并遇到下载或解析错误",
+                &Value::Array(warnings.clone()).to_string(),
+                false,
+            );
+            if let Err(e) = st.save() {
+                return text_resp(StatusCode::INTERNAL_SERVER_ERROR, &e);
+            }
+            return json_resp(StatusCode::BAD_GATEWAY,
+                json!({"error":"订阅合并失败，当前节点列表未更新","warnings":warnings}));
         }
 
         let merged = subs::merge_enabled_subscriptions(&st.persisted.subscriptions);
@@ -1015,6 +1171,7 @@ impl ControlPlane {
         for sub in &mut st.persisted.subscriptions {
             sub.active = false;
         }
+        st.persisted.last_merge_at = now;
         st.persisted.subscription_url = "__merged__".to_owned();
         if st.persisted.selected_node.is_empty() {
             if let Some(first) = st
@@ -1026,11 +1183,14 @@ impl ControlPlane {
                 st.persisted.selected_node = first.to_owned();
             }
         }
-        let _ = st.save();
+        if let Err(e) = st.save() {
+            return text_resp(StatusCode::INTERNAL_SERVER_ERROR, &e);
+        }
         json_resp(
             StatusCode::OK,
             json!({
                 "ok": true,
+                "warnings":warnings,
                 "nodes": st.persisted.merged_proxies.len(),
                 "nodeCount": st.persisted.merged_proxies.len()
             }),
@@ -1041,10 +1201,18 @@ impl ControlPlane {
         let Ok(val) = serde_json::from_slice::<Value>(body) else {
             return text_resp(StatusCode::BAD_REQUEST, "invalid JSON\n");
         };
-        let hours = val.get("hours").and_then(|v| v.as_u64()).unwrap_or(0);
+        let Some(hours) = val["hours"].as_u64() else {
+            return text_resp(
+                StatusCode::BAD_REQUEST,
+                "hours must be a non-negative integer",
+            );
+        };
         let mut st = self.state.lock().await;
         st.persisted.auto_merge_hours = hours;
-        let _ = st.save();
+        st.persisted.last_merge_at = chrono::Utc::now().timestamp();
+        if let Err(e) = st.save() {
+            return text_resp(StatusCode::INTERNAL_SERVER_ERROR, &e);
+        }
         json_resp(StatusCode::OK, json!({"ok": true}))
     }
 
@@ -1061,14 +1229,15 @@ impl ControlPlane {
             (sub.url.clone(), st.active_protect_hook())
         };
         match subs::fetch_subscription_text(&url, protect).await {
-            Ok((text, uinfo)) => match subs::parse_proxies_from_payload(&text) {
-                Ok(proxies) => {
+            Ok((text, uinfo)) => match subs::parse_catalog(&text) {
+                Ok((proxies, rules)) => {
                     let now = chrono::Utc::now().timestamp();
                     let mut st = self.state.lock().await;
                     let mut updated_sub = None;
                     if let Some(sub) = st.persisted.subscriptions.iter_mut().find(|s| s.id == id) {
                         sub.node_count = proxies.len();
                         sub.raw_proxies = proxies;
+                        sub.rules = rules;
                         sub.updated_at = now;
                         sub.last_error.clear();
                         if uinfo.is_some() {
@@ -1117,29 +1286,62 @@ impl ControlPlane {
         }
     }
 
-    fn regions_payload(&self, st: &RuntimeState) -> Value {
-        let mut counts: BTreeMap<String, usize> = BTreeMap::new();
-        for p in st.all_proxy_values() {
-            if let Some(name) = p.get("name").and_then(|n| n.as_str()) {
-                let r = st
-                    .node_regions
-                    .get(name)
-                    .map(String::as_str)
-                    .unwrap_or_else(|| nodes::infer_region_from_name(name));
-                if !r.is_empty() {
-                    *counts.entry(r.to_owned()).or_insert(0) += 1;
+    async fn handle_regions_verify(&self, body: &[u8]) -> Response<Full<Bytes>> {
+        let Some(refresh) = serde_json::from_slice::<Value>(body)
+            .ok()
+            .and_then(|v| v["refresh"].as_bool())
+        else {
+            return text_resp(StatusCode::BAD_REQUEST, "missing refresh flag");
+        };
+        let mut st = self.state.lock().await;
+        if st.verifying {
+            return json_resp(StatusCode::OK, regions::report(&st));
+        }
+        let nodes: Vec<_> = st
+            .all_proxy_values()
+            .into_iter()
+            .filter(|n| {
+                refresh
+                    || !st
+                        .persisted
+                        .regions
+                        .get(n["name"].as_str().unwrap())
+                        .is_some_and(|r| regions::fresh(r, n))
+            })
+            .collect();
+        st.verifying = true;
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            let mut pending = nodes.into_iter();
+            let mut jobs = tokio::task::JoinSet::new();
+            loop {
+                while jobs.len() < 4 {
+                    let Some(node) = pending.next() else { break };
+                    jobs.spawn(async move {
+                        let row = regions::verify(&node).await;
+                        (node, row)
+                    });
+                }
+                let Some(result) = jobs.join_next().await else {
+                    break;
+                };
+                let mut st = state.lock().await;
+                match result {
+                    Ok((node, row)) => {
+                        st.persisted
+                            .regions
+                            .insert(node["name"].as_str().unwrap().to_owned(), row);
+                    }
+                    Err(e) => st.push_event("region", "地区验证中断", &e.to_string(), false),
                 }
             }
-        }
-        json!({
-            "lockedRegion": st.persisted.locked_region,
-            "regions": counts,
-        })
-    }
-
-    async fn handle_regions_verify(&self, _body: &[u8]) -> Response<Full<Bytes>> {
-        let st = self.state.lock().await;
-        json_resp(StatusCode::OK, self.regions_payload(&st))
+            let mut st = state.lock().await;
+            st.verifying = false;
+            if let Err(e) = st.save() {
+                st.push_event("region", "无法保存地区验证结果", &e, false);
+            }
+        });
+        json_resp(StatusCode::OK, regions::report(&st))
     }
 
     async fn handle_region_lock(&self, body: &[u8]) -> Response<Full<Bytes>> {
@@ -1148,8 +1350,16 @@ impl ControlPlane {
         };
         let country = val.get("country").and_then(|v| v.as_str()).unwrap_or("").to_owned();
         let mut st = self.state.lock().await;
+        if st.connected {
+            return text_resp(StatusCode::CONFLICT, "修改地区锁前请断开连接");
+        }
+        if !country.is_empty() && regions::pool(&st, &country).is_empty() {
+            return text_resp(StatusCode::BAD_REQUEST, "没有该地区的已验证节点");
+        }
         st.persisted.locked_region = country;
-        let _ = st.save();
+        if let Err(e) = st.save() {
+            return text_resp(StatusCode::INTERNAL_SERVER_ERROR, &e);
+        }
         json_resp(StatusCode::OK, json!({"ok": true}))
     }
 
@@ -1159,7 +1369,9 @@ impl ControlPlane {
         };
         let mut st = self.state.lock().await;
         st.persisted.health_params = params.clone();
-        let _ = st.save();
+        if let Err(e) = st.save() {
+            return text_resp(StatusCode::INTERNAL_SERVER_ERROR, &e);
+        }
         json_resp(StatusCode::OK, json!({"ok": true, "params": params}))
     }
 
@@ -1169,35 +1381,43 @@ impl ControlPlane {
         };
         let mut st = self.state.lock().await;
         st.persisted.path_checks = cfg;
-        let _ = st.save();
+        if let Err(e) = st.save() {
+            return text_resp(StatusCode::INTERNAL_SERVER_ERROR, &e);
+        }
         json_resp(StatusCode::OK, json!({"ok": true}))
     }
 
     async fn handle_run_path_checks(&self) -> Response<Full<Bytes>> {
-        let (persisted, proxies, protect) = {
-            let st = self.state.lock().await;
+        let router = match self.active_router().await {
+            Ok(router) => router,
+            Err(e) => return text_resp(StatusCode::CONFLICT, &e),
+        };
+        let (targets, node) = {
+            let mut st = self.state.lock().await;
+            if st.path_status["running"] == true {
+                return text_resp(StatusCode::CONFLICT, "path check already running");
+            }
+            st.path_status["running"] = json!(true);
             (
-                st.persisted.clone(),
-                st.all_proxy_values(),
-                st.active_protect_hook(),
+                st.persisted.path_checks.targets.clone(),
+                st.state_json()["activeNode"].clone(),
             )
         };
-        let (hops, backups) = if let Some(c) = persisted.chains.iter().find(|c| c.id == persisted.active_chain_id) {
-            (c.hops.clone(), c.backups.clone())
-        } else if !persisted.selected_node.is_empty() {
-            (vec![persisted.selected_node.clone()], Default::default())
-        } else {
-            return text_resp(StatusCode::BAD_REQUEST, "no node selected\n");
-        };
-        let res = nodes::probe_chain_latency(&backups, &proxies, &hops, protect, 5000).await;
-        let ok = res.is_ok();
-        let detail = match &res {
-            Ok((first_ms, steady_ms)) => format!("首次 {first_ms} ms · 连接后 {steady_ms} ms"),
-            Err(e) => e.clone(),
-        };
+        let mut results = Vec::new();
+        let mut failures = Vec::new();
+        for target in targets.into_iter().filter(|t| t.enabled) {
+            let site = checks::site(&router, &target.label, &target.url).await;
+            if site["state"] == "error" {
+                failures.push(target.label);
+            }
+            results.push(site);
+        }
         let mut st = self.state.lock().await;
-        st.push_event("path_check", "通路检测", &detail, ok);
-        json_resp(StatusCode::OK, json!({"ok": ok, "detail": detail}))
+        st.path_status = json!({"at": chrono::Utc::now().to_rfc3339(), "activeNode":node, "running":false,"results":results,"failures":failures});
+        json_resp(
+            StatusCode::OK,
+            json!({"settings":st.persisted.path_checks,"status":st.path_status}),
+        )
     }
 }
 

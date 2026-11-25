@@ -10,6 +10,7 @@ use std::{
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TargetType {
+    Chain,
     Node,
     Direct,
     Reject,
@@ -24,6 +25,8 @@ pub struct AppGroup {
     target_type: TargetType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     target_node: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    target_chain_id: Option<String>,
     enabled: bool,
 }
 
@@ -40,6 +43,15 @@ pub(crate) fn parse_app_groups(value: Value) -> Result<Vec<AppGroup>> {
         }
         let mut seen = HashSet::new();
         group.apps.retain(|app| seen.insert(app.to_lowercase()));
+        if matches!(group.target_type, TargetType::Chain) {
+            ensure!(
+                group
+                    .target_chain_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty()),
+                "missing app group chain"
+            );
+        }
         if matches!(group.target_type, TargetType::Node) {
             ensure!(
                 group
@@ -74,6 +86,8 @@ pub struct Profile {
     pub tun: bool,
     #[serde(default, deserialize_with = "deserialize_groups")]
     pub app_groups: Vec<AppGroup>,
+    #[serde(default)]
+    game_bypass: Vec<String>,
     // Names of the catalog nodes supplied separately to TunnelDataPlane::connect.
     #[serde(default)]
     stored_node_names: Vec<String>,
@@ -112,13 +126,15 @@ pub fn probe_config(
     secret: &str,
 ) -> Value {
     let exit = nodes.last().unwrap()["name"].as_str().unwrap();
-    json!({
+    let mut config = json!({
         "mode":"rule", "bind-address":"127.0.0.1", "mixed-port":mixed,
         "external-controller":controller.to_string(),"secret":secret,
         "dns":{"enable":true,"ipv6":false,"default-nameserver":["223.5.5.5","119.29.29.29"],
                "nameserver":["223.5.5.5","119.29.29.29"]},
-        "proxies":nodes,"rules":[format!("MATCH,{exit}")]
-    })
+        "proxies":[],"proxy-groups":[],"rules":[format!("MATCH,{exit}")]
+    });
+    install_chain_members(&mut config, nodes);
+    config
 }
 
 pub(crate) fn chain_nodes(mut catalog: Vec<Value>, hops: &[String]) -> Result<Vec<Value>> {
@@ -139,6 +155,82 @@ pub(crate) fn chain_nodes(mut catalog: Vec<Value>, hops: &[String]) -> Result<Ve
         chain.push(node);
     }
     Ok(chain)
+}
+
+pub(crate) type Backups = BTreeMap<String, Vec<String>>;
+
+pub(crate) fn compile_chain(
+    catalog: &[Value],
+    hops: &[String],
+    backups: &Backups,
+    prefix: &str,
+) -> Result<Vec<Value>> {
+    ensure!(!hops.is_empty() && hops.len() <= 8, "invalid hop count");
+    ensure!(
+        backups.keys().all(|hop| hops.contains(hop)),
+        "unknown primary hop in backup policy"
+    );
+    let mut generated = Vec::new();
+    let mut exit = None;
+    let mut all = HashSet::new();
+    let mut timeout = 6;
+    for (index, primary) in hops.iter().enumerate() {
+        let mut members = Vec::new();
+        for (candidate, name) in std::iter::once(primary)
+            .chain(backups.get(primary).into_iter().flatten())
+            .enumerate()
+        {
+            ensure!(all.insert(name), "repeated node in chain policy: {name}");
+            let Some(found) = catalog.iter().find(|p| p["name"] == name.as_str()) else {
+                continue;
+            };
+            let mut proxy = found.clone();
+            let alias = format!("{prefix}-{index}-{candidate}");
+            ensure!(
+                !catalog.iter().any(|p| p["name"] == alias),
+                "chain alias collision: {alias}"
+            );
+            let object = proxy.as_object_mut().unwrap();
+            object.remove("smartvpn-source");
+            object.remove("dialer-proxy");
+            if let Some(previous) = &exit {
+                object.insert("dialer-proxy".into(), json!(previous));
+            }
+            object.insert("name".into(), json!(alias));
+            generated.push(proxy);
+            members.push(alias);
+        }
+        ensure!(
+            !members.is_empty(),
+            "no configured candidate available at hop {} ({primary})",
+            index + 1
+        );
+        let candidates = members.len();
+        exit = Some(if members.len() == 1 {
+            members.pop().unwrap()
+        } else {
+            let alias = format!("{prefix}-{index}-policy");
+            ensure!(
+                !catalog.iter().any(|p| p["name"] == alias),
+                "chain group collision"
+            );
+            generated.push(json!({"name":alias,"type":"fallback","proxies":members,"url":"https://www.gstatic.com/generate_204","interval":0,"lazy":true,"hop-attempt-seconds":timeout}));
+            alias
+        });
+        timeout += 8 * candidates;
+    }
+    Ok(generated)
+}
+
+pub fn install_chain_members(config: &mut Value, nodes: &[Value]) {
+    for node in nodes {
+        let key = if node["type"] == "fallback" {
+            "proxy-groups"
+        } else {
+            "proxies"
+        };
+        config[key].as_array_mut().unwrap().push(node.clone());
+    }
 }
 
 // The kernel splits on commas at depth zero, including in regular expressions.
@@ -408,6 +500,7 @@ impl Profile {
             .filter(|g| g.enabled && !g.apps.is_empty())
         {
             let target = match app_group.target_type {
+                TargetType::Chain => anyhow::bail!("unresolved application chain"),
                 TargetType::Direct => "DIRECT".to_owned(),
                 TargetType::Reject => "REJECT".to_owned(),
                 TargetType::Node => {
@@ -437,6 +530,20 @@ impl Profile {
                     .map(|app| format!("PROCESS-NAME,{app},{target}")),
             );
         }
+        if !android {
+            for game in &self.game_bypass {
+                ensure!(
+                    !game.is_empty() && !game.contains(',') && !game.chars().any(char::is_control),
+                    "invalid game bypass entry"
+                );
+                let kind = if game.contains(['/', '\\']) {
+                    "PROCESS-PATH"
+                } else {
+                    "PROCESS-NAME"
+                };
+                rules.push(format!("{kind},{game},DIRECT"));
+            }
+        }
         let allow_direct =
             self.domestic_direct || !(self.prevent_dns_leaks || self.web_rtc_protection);
         if self.import_policy {
@@ -459,7 +566,11 @@ impl Profile {
         if allow_direct {
             let option = if android { ",no-resolve" } else { "" };
             for name in self.rule_providers.keys() {
-                rules.push(format!("RULE-SET,{name},DIRECT{option}"));
+                if !android && self.domestic_direct {
+                    rules.push(format!("AND,((NETWORK,TCP),(RULE-SET,{name})),DIRECT"));
+                } else {
+                    rules.push(format!("RULE-SET,{name},DIRECT{option}"));
+                }
             }
         }
         cfg["dns"] = json!({"enable":true,"ipv6":false,"enhanced-mode":"redir-host",
@@ -488,7 +599,13 @@ impl Profile {
                     cfg["dns"]["nameserver-policy"][format!("+.{domain}")] =
                         json!("https://223.5.5.5/dns-query#DIRECT");
                 }
-                rules.push(format!("DOMAIN-SUFFIX,{domain},DIRECT"));
+                if android {
+                    rules.push(format!("DOMAIN-SUFFIX,{domain},DIRECT"));
+                } else {
+                    rules.push(format!(
+                        "AND,((NETWORK,TCP),(DOMAIN-SUFFIX,{domain})),DIRECT"
+                    ));
+                }
             }
         }
         rules.push("MATCH,SmartVPN".into());
@@ -620,7 +737,7 @@ mod tests {
         assert_eq!(cfg["rule-providers"]["china"]["format"], "text");
         let rules = cfg["rules"].as_array().unwrap();
         assert_eq!(rules[0], "DST-PORT,53,REJECT");
-        assert!(rules.contains(&json!("RULE-SET,china,DIRECT")));
+        assert!(rules.contains(&json!("AND,((NETWORK,TCP),(RULE-SET,china)),DIRECT")));
         assert_eq!(rules.last().unwrap(), "MATCH,SmartVPN");
         input["controllerPort"] = input["mixedPort"].clone();
         assert!(serde_json::from_value::<Profile>(input.clone())

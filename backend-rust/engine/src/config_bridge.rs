@@ -35,6 +35,8 @@ struct Config {
     #[serde(default)]
     smartvpn_china_ranges: Vec<String>,
     #[serde(default)]
+    smartvpn_block_stun: bool,
+    #[serde(default)]
     proxies: Vec<serde_yaml_ng::Value>,
     #[serde(default)]
     proxy_groups: Vec<Group>,
@@ -479,6 +481,7 @@ pub fn build_router_from_clash_yaml(
     }
     let fake_ip_pool = Arc::new(FakeIpPool::default());
     let mut router = Router::new(rules, outbounds);
+    router.block_stun = config.smartvpn_block_stun;
     if config.dns.enable && !config.smartvpn_china_ranges.is_empty() {
         router.classification_proxy = Some(
             router

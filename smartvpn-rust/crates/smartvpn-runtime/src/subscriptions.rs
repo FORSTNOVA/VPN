@@ -870,13 +870,13 @@ mod tests {
                 assert_eq!(rules.last().unwrap(), "MATCH,SmartVPN");
                 assert_eq!(rules.contains(&json!("GEOIP,CN,DIRECT")), domestic);
                 assert_eq!(
-                    rules.contains(&json!("DOMAIN-SUFFIX,bilibili.com,DIRECT")),
+                    rules.contains(&json!(if android { "DOMAIN-SUFFIX,bilibili.com,DIRECT" } else { "AND,((NETWORK,TCP),(DOMAIN-SUFFIX,bilibili.com)),DIRECT" })),
                     domestic
                 );
                 let china = if android {
                     "RULE-SET,SmartVPNChina,DIRECT,no-resolve"
                 } else {
-                    "RULE-SET,SmartVPNChina,DIRECT"
+                    "AND,((NETWORK,TCP),(RULE-SET,SmartVPNChina)),DIRECT"
                 };
                 assert_eq!(rules.contains(&json!(china)), domestic);
                 assert_eq!(

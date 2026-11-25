@@ -37,10 +37,9 @@ Timestamp fields are Unix integer seconds with zero representing unset values, m
 Use the prepared dependency cache, not the user's alternate Cargo registry configuration:
 
 ```powershell
-Set-Location C:\
-$env:CARGO_HOME = 'C:\Users\21654\SmartVPN-Rust-Phase6\cargo-home'
+# Run from the repository root with a populated offline Cargo cache.
 $env:CARGO_INCREMENTAL = '0'
-$manifest = 'C:\Users\21654\SmartVPN-Rust-Phase7\backend-rust-store\Cargo.toml'
+$manifest = '.\backend-rust-store\Cargo.toml'
 cargo test --offline --locked --manifest-path $manifest
 cargo fmt --manifest-path $manifest --check
 cargo clippy --offline --locked --manifest-path $manifest --all-targets -- -D warnings

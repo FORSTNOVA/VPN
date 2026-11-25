@@ -16,6 +16,7 @@ pub mod dns_server;
 #[cfg(windows)]
 pub mod process_win;
 mod proxy_group;
+pub mod traffic;
 pub mod tun;
 
 #[cfg(target_os = "android")]

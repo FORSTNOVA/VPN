@@ -32,7 +32,7 @@ Windows x64 便携版使用 Flutter Runner、本地 Rust 服务和独立 clash-r
 
 ```powershell
 . .\smartvpn-rust\build-env.ps1
-cargo test --manifest-path smartvpn-rust/Cargo.toml --target-dir D:\codebuddythink\vpn\.tools\rust-pure-cargo
+cargo test --manifest-path smartvpn-rust/Cargo.toml --target-dir .\.tools\rust-pure-cargo
 powershell -ExecutionPolicy Bypass -File smartvpn-rust\package-android.ps1
 powershell -ExecutionPolicy Bypass -File smartvpn-rust\package-windows.ps1
 python -I -B smartvpn-rust/tests/windows_loopback.py
@@ -132,7 +132,7 @@ error[E0554]: `#![feature]` may not be used on the stable release channel
 
 ```powershell
 . .\smartvpn-rust\build-env.ps1
-cargo test --manifest-path smartvpn-rust/Cargo.toml --target-dir D:\codebuddythink\vpn\.tools\rust-pure-cargo
+cargo test --manifest-path smartvpn-rust/Cargo.toml --target-dir .\.tools\rust-pure-cargo
 powershell -ExecutionPolicy Bypass -File smartvpn-rust\build-android.ps1
 powershell -ExecutionPolicy Bypass -File smartvpn-rust\build-windows.ps1
 python -I -B smartvpn-rust/tests/windows_loopback.py

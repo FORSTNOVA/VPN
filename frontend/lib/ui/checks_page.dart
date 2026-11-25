@@ -42,8 +42,10 @@ extension _ChecksPage on _HomePageState {
           const SizedBox(height: 12),
           _egressPanel(_diagnose!),
           const SizedBox(height: 16),
-          _ipQualityPanel(_diagnose!),
-          const SizedBox(height: 16),
+          if (_diagnose!.quality.ipType.isNotEmpty) ...[
+            _ipQualityPanel(_diagnose!),
+            const SizedBox(height: 16),
+          ],
           _dnsPanel(_diagnose!),
           const SizedBox(height: 16),
           _udpPanel(_diagnose!),

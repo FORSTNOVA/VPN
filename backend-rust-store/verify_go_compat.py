@@ -61,7 +61,7 @@ with tempfile.TemporaryDirectory(prefix='smartvpn-store-go-compat-') as tmp:
  if facade_helpers:(harness/'facade_helpers.go').write_text(facade_helpers,encoding='utf-8')
  (harness/'helpers.go').write_text('package main\nimport("encoding/json";"runtime";"time")\ntype proxyNode struct{Name,Type,Network string;TLS bool}\n'+health+'\nconst trafficHistorySchema = `'+traffic+'`\n'+probe,encoding='utf-8')
  (harness/'main.go').write_text(main,encoding='utf-8')
- env=os.environ.copy();env.update(GOPROXY='off',GOSUMDB='off',GOTOOLCHAIN='local',GOWORK='off',GOFLAGS='-mod=readonly -buildvcs=false',GOPATH=r'D:\codebuddythink\vpn\.tools\gopath',GOCACHE=str(tmp/'go-cache'),CARGO_HOME=cargo_home,CARGO_INCREMENTAL='0')
+ env=os.environ.copy();env.update(GOPROXY='off',GOSUMDB='off',GOTOOLCHAIN='local',GOWORK='off',GOFLAGS='-mod=readonly -buildvcs=false',GOPATH=str(root.parent/'.tools'/'gopath'),GOCACHE=str(tmp/'go-cache'),CARGO_HOME=cargo_home,CARGO_INCREMENTAL='0')
  subprocess.run([go,'build','-o',str(tmp/'oracle.exe'),'.'],cwd=harness,env=env,check=True)
  for fresh in [False,True]:
   db=tmp/('fresh.db' if fresh else 'shared.db')

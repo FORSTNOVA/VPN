@@ -112,10 +112,7 @@ impl TunnelDataPlane for Android {
         let secret = token()?;
         profile.prepare_runtime(std::path::Path::new(&self.dir))?;
         let mut config = profile.generate(&secret)?;
-        config["proxies"]
-            .as_array_mut()
-            .unwrap()
-            .extend_from_slice(stored);
+        smartvpn_runtime::install_chain_members(&mut config, stored);
         config["tun"] = json!({"enable":true,"device-id":format!("fd://{fd}"),"route-all":false,"mtu":1500,"dns-hijack":true});
         let policy = json!({"dnsIPv6":config["dns"]["ipv6"],"dnsMode":config["dns"]["enhanced-mode"],"mtu":config["tun"]["mtu"],
             "dnsHijack":config["tun"]["dns-hijack"],

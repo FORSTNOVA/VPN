@@ -27,7 +27,7 @@ func TestServiceStatePathOldDLLChild(t *testing.T) {
 	}
 }
 func TestServiceStatePathOldDLLSelection(t *testing.T) {
-	old := filepath.Join("C:\\Users\\21654\\SmartVPN-Rust-Phase32", "core-target", "release", "smartvpn_core.dll")
+	old := filepath.Join(os.Getenv("USERPROFILE"), "SmartVPN-Rust-Phase32", "core-target", "release", "smartvpn_core.dll")
 	if _, e := os.Stat(old); e != nil {
 		t.Skip("previous-stage DLL not present")
 	}

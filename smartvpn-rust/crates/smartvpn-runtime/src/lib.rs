@@ -1,3 +1,4 @@
+pub use config::install_chain_members;
 #[cfg(any(target_os = "android", test))]
 mod android_dns;
 mod checks;
@@ -418,7 +419,18 @@ fn prepare_probe<P: TunnelDataPlane>(
     ensure!(bytes.len() <= 1024 * 1024, "request exceeds 1 MiB");
     let args: Value = serde_json::from_slice(&bytes)?;
     let hops: Vec<String> = serde_json::from_value(args["hops"].clone())?;
-    let chain = config::chain_nodes(store.configs()?, &hops)?;
+    let backups: config::Backups = args
+        .get("backups")
+        .cloned()
+        .map(serde_json::from_value)
+        .transpose()?
+        .unwrap_or_default();
+    let catalog = store.configs()?;
+    let chain = if backups.is_empty() {
+        config::chain_nodes(catalog, &hops)?
+    } else {
+        config::compile_chain(&catalog, &hops, &backups, "SmartVPN-Probe")?
+    };
     let measured = chrono::Utc::now().timestamp_millis();
     let target = match args.get("url") {
         Some(url) => store::web_url(url.as_str().context("invalid probe URL")?)?.to_string(),
@@ -428,7 +440,12 @@ fn prepare_probe<P: TunnelDataPlane>(
     let db = store::existing_connection(&store.dir, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
     Ok(move || {
         let result = job();
-        let mut row = json!({"hops":hops,"measured":measured,"target":target});
+        let key = if backups.is_empty() {
+            json!(hops)
+        } else {
+            json!([hops, backups])
+        };
+        let mut row = json!({"hops":hops,"backups":backups,"measured":measured,"target":target});
         match result {
             Ok((first, warm)) => {
                 row["delay"] = json!(first);
@@ -436,10 +453,36 @@ fn prepare_probe<P: TunnelDataPlane>(
             }
             Err(e) => row["error"] = json!(http::redact(&e.to_string())),
         }
-        db.execute("INSERT OR REPLACE INTO probe_results(name,latency_ms,error,timestamp,report) VALUES(?,?,?,?,?)",rusqlite::params![serde_json::to_vec(&hops)?,row["delay"].as_i64(),row["error"].as_str(),measured/1000,row.to_string()])?;
+        db.execute("INSERT OR REPLACE INTO probe_results(name,latency_ms,error,timestamp,report) VALUES(?,?,?,?,?)",rusqlite::params![serde_json::to_vec(&key)?,row["delay"].as_i64(),row["error"].as_str(),measured/1000,row.to_string()])?;
         Ok(serde_json::to_vec(&row)?)
     })
 }
+fn check_chain_region(
+    plane: &impl TunnelDataPlane,
+    store: &Store,
+    chain: &Value,
+    country: &str,
+) -> Result<()> {
+    let mut hops: Vec<String> = serde_json::from_value(chain["hops"].clone())?;
+    let mut backups = store.profile_backups(chain["name"].as_str().unwrap_or(""))?;
+    let last = hops.last().context("chain has no exit")?.clone();
+    let exits = std::iter::once(last.clone()).chain(backups.remove(&last).into_iter().flatten());
+    let catalog = store.configs()?;
+    for exit in exits {
+        *hops.last_mut().unwrap() = exit;
+        let nodes = if backups.is_empty() {
+            config::chain_nodes(catalog.clone(), &hops)?
+        } else {
+            config::compile_chain(&catalog, &hops, &backups, "SmartVPN-Region")?
+        };
+        ensure!(
+            plane.region(nodes)?["country"] == country,
+            "chain exit outside locked region"
+        );
+    }
+    Ok(())
+}
+
 fn active_node_label(
     plane: &impl TunnelDataPlane,
     store: &Store,
@@ -748,12 +791,7 @@ fn route<P: TunnelDataPlane>(
             let country = args["country"].as_str().context("missing country")?;
             let chain = store.chain()?;
             if !country.is_empty() && chain["enabled"] == true {
-                let hops: Vec<String> = serde_json::from_value(chain["hops"].clone())?;
-                let nodes = config::chain_nodes(store.configs()?, &hops)?;
-                ensure!(
-                    plane.region(nodes)?["country"] == country,
-                    "chain exit outside locked region"
-                );
+                check_chain_region(&*plane, store, &chain, country)?;
             } else if !country.is_empty() {
                 let pool = store.region_pool(country)?;
                 ensure!(!pool.is_empty(), "no verified nodes in region");
@@ -1118,6 +1156,41 @@ fn route<P: TunnelDataPlane>(
                 let selected = store.selected()?;
                 let chain = store.chain()?;
                 let mut group_nodes = Vec::new();
+                let mut app_groups = settings["appGroups"].clone();
+                let profiles = store.nodes()?;
+                let mut app_exits = std::collections::BTreeMap::new();
+                for group in app_groups
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .filter(|g| g["enabled"] == true && g["targetType"] == "chain")
+                {
+                    let id = group["targetChainId"]
+                        .as_str()
+                        .context("missing app chain")?
+                        .to_owned();
+                    let exit = if let Some(exit) = app_exits.get(&id) {
+                        String::clone(exit)
+                    } else {
+                        let hops: Vec<String> =
+                            serde_json::from_value(profiles["chains"][&id].clone())
+                                .context("unknown application chain")?;
+                        let backups =
+                            serde_json::from_value(profiles["chainBackups"][&id].clone())?;
+                        let members = config::compile_chain(
+                            &nodes,
+                            &hops,
+                            &backups,
+                            &format!("SmartVPN-AppChain-{}", app_exits.len()),
+                        )?;
+                        let exit = members.last().unwrap()["name"].as_str().unwrap().to_owned();
+                        app_exits.insert(id, exit.clone());
+                        group_nodes.extend(members);
+                        exit
+                    };
+                    group["targetType"] = json!("node");
+                    group["targetNode"] = json!(exit);
+                }
                 let mut choices: Vec<_> = nodes
                     .iter()
                     .map(|n| n["name"].as_str().unwrap().to_owned())
@@ -1144,8 +1217,13 @@ fn route<P: TunnelDataPlane>(
                             })
                             .cloned(),
                     );
-                    nodes = config::chain_nodes(nodes, &hops)?;
-                    choices = vec![hops.last().unwrap().clone()];
+                    let backups = store.profile_backups(chain["name"].as_str().unwrap_or(""))?;
+                    nodes = if backups.is_empty() {
+                        config::chain_nodes(nodes, &hops)?
+                    } else {
+                        config::compile_chain(&nodes, &hops, &backups, "SmartVPN-Route")?
+                    };
+                    choices = vec![nodes.last().unwrap()["name"].as_str().unwrap().to_owned()];
                 } else if let Some(name) = selected.as_deref() {
                     let i = choices
                         .iter()
@@ -1156,10 +1234,7 @@ fn route<P: TunnelDataPlane>(
                 {
                     let lock = store.pref("lockedRegion")?;
                     if lock != "" && chain["enabled"] == true {
-                        ensure!(
-                            plane.region(nodes.clone())?["country"] == lock,
-                            "chain exit outside locked region"
-                        );
+                        check_chain_region(&*plane, store, &chain, lock.as_str().unwrap())?;
                     } else if lock != "" {
                         store.verify_regions(&*plane, false)?;
                         let pool = store.region_pool(lock.as_str().unwrap())?;
@@ -1187,7 +1262,7 @@ fn route<P: TunnelDataPlane>(
                 let catalog = store.active_catalog()?;
                 nodes.extend(group_nodes);
                 let stored_names: Vec<_> = nodes.iter().map(|n| &n["name"]).collect();
-                let profile = json!({"storedNodeNames":stored_names,"appGroups":settings["appGroups"],"mixedPort":mixed.local_addr()?.port(),"controllerPort":ctrl.local_addr()?.port(),"proxies":[],"choices":choices,
+                let profile = json!({"storedNodeNames":stored_names,"appGroups":app_groups,"gameBypass":settings["gameBypass"],"mixedPort":mixed.local_addr()?.port(),"controllerPort":ctrl.local_addr()?.port(),"proxies":[],"choices":choices,
                     "proxyProviders":{},"ruleProviders":providers,"webRtcProtection":settings["webRTCProtection"],"importPolicy":settings["importPolicy"],"subscriptionRuleProviders":catalog.rule_providers,"subscriptionRules":catalog.rules,"domesticDirect":settings["domesticWeb"],"preventDnsLeaks":settings["dnsProtection"]});
                 drop((mixed, ctrl));
                 #[cfg(target_os = "windows")]

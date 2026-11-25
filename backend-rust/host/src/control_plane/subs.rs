@@ -263,6 +263,58 @@ where
     Ok((status, location, user_info, body))
 }
 
+pub fn parse_catalog(payload: &str) -> Result<(Vec<Value>, Vec<String>), String> {
+    let nodes = parse_proxies_from_payload(payload)?;
+    let rules = match serde_yaml_ng::from_str::<Value>(payload) {
+        Ok(doc) if doc.get("rules").is_some() => serde_json::from_value(doc["rules"].clone())
+            .map_err(|e| format!("invalid subscription rules: {e}"))?,
+        _ => Vec::new(), // URI lists have no rules section.
+    };
+    Ok((nodes, rules))
+}
+
+pub fn active_rules(state: &super::state::PersistedState) -> impl Iterator<Item = &String> {
+    state
+        .subscriptions
+        .iter()
+        .filter(move |s| {
+            if state.subscription_url == "__merged__" {
+                s.enabled
+            } else {
+                s.url == state.subscription_url
+            }
+        })
+        .flat_map(|s| &s.rules)
+}
+
+pub fn applied_rule(settings: &super::state::PersistedState, source: &str) -> Option<String> {
+    let parts: Vec<_> = source.split(',').map(str::trim).collect();
+    let [kind @ ("DOMAIN" | "DOMAIN-SUFFIX" | "DOMAIN-KEYWORD" | "IP-CIDR" | "IP-CIDR6"), value, target, rest @ ..] =
+        parts.as_slice()
+    else {
+        return None;
+    };
+    if !rest.is_empty() && rest != ["no-resolve"] {
+        return None;
+    }
+    let action = match *target {
+        "DIRECT"
+            if !settings.domestic_web
+                && (settings.dns_protection || settings.webrtc_protection) =>
+        {
+            return None
+        }
+        "DIRECT" => "DIRECT",
+        "REJECT" | "REJECT-DROP" => "REJECT",
+        "" => return None,
+        _ => "SmartVPN",
+    };
+    let line = format!("{kind},{value},{action}");
+    smartvpn_engine::rule::RuleSet::from_lines(&[&line])
+        .ok()
+        .map(|_| line)
+}
+
 pub fn parse_proxies_from_payload(payload: &str) -> Result<Vec<Value>, String> {
     let trimmed = payload.trim();
     if trimmed.is_empty() {
@@ -501,4 +553,24 @@ pub fn merge_enabled_subscriptions(subs: &[SavedSubscription]) -> Vec<Value> {
         }
     }
     merged
+}
+#[cfg(test)]
+mod rule_tests {
+    use super::{applied_rule, parse_catalog};
+    use crate::control_plane::state::PersistedState;
+
+    #[test]
+    fn validates_rule_list_and_applies_supported_policies() {
+        let catalog = "proxies: [{name: example, type: socks5, server: localhost, port: 1080}]\n";
+        let (_, rules) = parse_catalog(&format!("{catalog}rules: ['DOMAIN,example.org,DIRECT', 'DOMAIN,blocked.example,REJECT', 'DOMAIN,proxy.example,Group']")).unwrap();
+        assert!(parse_catalog(&format!("{catalog}rules: true")).is_err());
+        let mut settings = PersistedState::default();
+        settings.domestic_web = false;
+        settings.dns_protection = true;
+        assert_eq!(applied_rule(&settings, &rules[0]), None);
+        assert_eq!(applied_rule(&settings, &rules[1]).as_deref(), Some("DOMAIN,blocked.example,REJECT"));
+        assert_eq!(applied_rule(&settings, &rules[2]).as_deref(), Some("DOMAIN,proxy.example,SmartVPN"));
+        settings.domestic_web = true;
+        assert_eq!(applied_rule(&settings, &rules[0]).as_ref(), Some(&rules[0]));
+    }
 }

@@ -666,6 +666,8 @@ pub struct OutboundGroupUrlTest {
 }
 #[derive(serde::Serialize, serde::Deserialize, Debug, Default, Clone)]
 pub struct OutboundGroupFallback {
+    #[serde(default, rename = "hop-attempt-seconds")]
+    pub hop_attempt_seconds: Option<u64>,
     pub name: String,
 
     pub proxies: Option<Vec<String>>,

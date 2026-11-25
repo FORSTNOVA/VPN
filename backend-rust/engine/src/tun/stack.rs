@@ -193,8 +193,22 @@ async fn relay(flow: Flow, router: &Router, mut stream: DuplexStream) -> io::Res
             "TCP rejected by rule",
         )),
         RouteResult::Connected {
-            stream: mut remote, ..
+            stream: remote,
+            action,
         } => {
+            let destination = host.or_else(|| {
+                router
+                    .fake_ip_pool
+                    .as_ref()
+                    .and_then(|pool| pool.lookup(flow.dst.ip()))
+            });
+            let target = destination.map_or_else(
+                || flow.dst.to_string(),
+                |h| format!("{h}:{}", flow.dst.port()),
+            );
+            let meter =
+                crate::traffic::Meter::open(router, flow.src, flow.dst, false, target, &action)?;
+            let mut remote = crate::traffic::MeteredStream(remote, meter);
             remote.write_all(&prefix).await?;
             tokio::io::copy_bidirectional(&mut stream, &mut remote).await?;
             Ok(())

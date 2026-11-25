@@ -154,14 +154,16 @@ pub(super) async fn run(
             Session::Proxy(dialer.dial_udp().await?)
         }
     };
+    let meter =
+        crate::traffic::Meter::open(router, flow.src, flow.dst, true, target.to_string(), action)?;
     let mut buf = vec![0; 65535];
     loop {
         tokio::select! {
             msg = incoming.recv() => match msg {
-                Some(data) => session.send(&data, &target).await?,
+                Some(data) => {session.send(&data, &target).await?; meter.up(data.len());},
                 None => return Ok(()),
             },
-            n = session.recv(&mut buf, &target) => reply(flow, &buf[..n?], &tx).await?,
+            n = session.recv(&mut buf, &target) => {let n=n?; reply(flow, &buf[..n], &tx).await?; meter.down(n);},
             _ = sleep(Duration::from_secs(60)) => return Ok(()),
         }
     }

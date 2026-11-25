@@ -804,6 +804,7 @@ impl OutboundManager {
                         proto.name.clone(),
                         Arc::new(fallback::Handler::new(
                             fallback::HandlerOptions {
+                                hop_attempt_seconds: proto.hop_attempt_seconds,
                                 name: proto.name.clone(),
                                 common_opts: crate::proxy::HandlerCommonOptions {
                                     icon: proto.icon.clone(),
