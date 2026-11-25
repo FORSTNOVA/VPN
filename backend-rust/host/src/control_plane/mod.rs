@@ -1164,11 +1164,41 @@ impl ControlPlane {
     }
 }
 
+fn url_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hi = (bytes[i + 1] as char).to_digit(16);
+                let lo = (bytes[i + 2] as char).to_digit(16);
+                if let (Some(h), Some(l)) = (hi, lo) {
+                    out.push(((h << 4) | l) as u8);
+                    i += 3;
+                } else {
+                    out.push(b'%');
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 fn query_param(query: &str, key: &str) -> Option<String> {
     for pair in query.split('&') {
         if let Some((k, v)) = pair.split_once('=') {
-            if k == key {
-                return Some(v.to_owned());
+            if url_decode(k) == key {
+                return Some(url_decode(v));
             }
         }
     }
@@ -1276,6 +1306,61 @@ mod tests {
         let body3 = res3.into_body().collect().await.unwrap().to_bytes();
         let json3: Value = serde_json::from_slice(&body3).unwrap();
         assert_eq!(json3["failureStage"], "建立代理连接");
+
+        cp.shutdown().await;
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn chain_profile_save_rename_and_percent_encoded_delete() {
+        let dir = std::env::temp_dir().join(format!(
+            "smartvpn-chain-del-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let cp = ControlPlane::start(dir.clone(), Arc::new(NoopBridge))
+            .await
+            .unwrap();
+
+        let save_req = Request::put("/api/nodes/chain/profile")
+            .header(AUTHORIZATION, format!("Bearer {}", cp.token))
+            .body(Full::new(Bytes::from(
+                serde_json::to_vec(&json!({
+                    "original": "",
+                    "name": "11%",
+                    "hops": ["nodeA", "nodeB"]
+                }))
+                .unwrap(),
+            )))
+            .unwrap();
+        let stream = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, cp.port))
+            .await
+            .unwrap();
+        let (mut tx, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            let _ = conn.await;
+        });
+        assert_eq!(tx.send_request(save_req).await.unwrap().status(), 200);
+
+        let del_req = Request::delete("/api/nodes/chain/profile?name=11%25")
+            .header(AUTHORIZATION, format!("Bearer {}", cp.token))
+            .body(http_body_util::Empty::<Bytes>::new())
+            .unwrap();
+        let stream2 = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, cp.port))
+            .await
+            .unwrap();
+        let (mut tx2, conn2) = hyper::client::conn::http1::handshake(TokioIo::new(stream2))
+            .await
+            .unwrap();
+        tokio::spawn(async move {
+            let _ = conn2.await;
+        });
+        assert_eq!(tx2.send_request(del_req).await.unwrap().status(), 200);
+
+        let st = cp.state.lock().await;
+        assert!(st.persisted.chains.is_empty(), "chain should be deleted");
+        drop(st);
 
         cp.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);
