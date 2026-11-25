@@ -123,9 +123,19 @@ async fn fetch_once(
     }
 
     let mut last_err = String::from("connect failed");
-    let mut connected_stream = None;
-    for addr in addrs {
-        let attempt = timeout(Duration::from_secs(5), async {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let mut cfg = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let tls_cfg = Arc::new(cfg);
+    if scheme == "https" {
+        smartvpn_engine::transport::tls::ensure_crypto_provider();
+    }
+
+    for addr in addrs.into_iter().take(8) {
+        let tcp_res = timeout(Duration::from_secs(5), async {
             let sock = if addr.is_ipv4() {
                 tokio::net::TcpSocket::new_v4()
             } else {
@@ -145,42 +155,46 @@ async fn fetch_once(
             sock.connect(addr).await.map_err(|e| e.to_string())
         })
         .await;
-        match attempt {
-            Ok(Ok(s)) => {
-                connected_stream = Some(s);
-                break;
+        let std_stream = match tcp_res {
+            Ok(Ok(s)) => s,
+            Ok(Err(e)) => {
+                last_err = e;
+                continue;
             }
-            Ok(Err(e)) => last_err = e,
-            Err(_) => last_err = "connect timeout".to_owned(),
+            Err(_) => {
+                last_err = "connect timeout".to_owned();
+                continue;
+            }
+        };
+
+        let req = Request::get(path_and_query)
+            .header("Host", authority)
+            .header("User-Agent", "clash-verge/v2.0.0")
+            .header("Connection", "close")
+            .body(Empty::<Bytes>::new())
+            .map_err(|e| e.to_string())?;
+
+        if scheme == "https" {
+            let connector = TlsConnector::from(Arc::clone(&tls_cfg));
+            let server_name = ServerName::try_from(host.clone())
+                .map_err(|_| "invalid TLS server name".to_owned())?;
+            let tls = match timeout(Duration::from_secs(6), connector.connect(server_name, std_stream)).await {
+                Ok(Ok(t)) => t,
+                Ok(Err(e)) => {
+                    last_err = format!("TLS handshake failed: {e}");
+                    continue;
+                }
+                Err(_) => {
+                    last_err = "TLS handshake timeout".to_owned();
+                    continue;
+                }
+            };
+            return send_http1(tls, req).await;
+        } else {
+            return send_http1(std_stream, req).await;
         }
     }
-    let std_stream = connected_stream.ok_or(last_err)?;
-
-    let req = Request::get(path_and_query)
-        .header("Host", authority)
-        .header("User-Agent", "clash-verge/v2.0.0")
-        .header("Connection", "close")
-        .body(Empty::<Bytes>::new())
-        .map_err(|e| e.to_string())?;
-
-    if scheme == "https" {
-        smartvpn_engine::transport::tls::ensure_crypto_provider();
-        let mut roots = RootCertStore::empty();
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        let cfg = ClientConfig::builder()
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-        let connector = TlsConnector::from(Arc::new(cfg));
-        let server_name =
-            ServerName::try_from(host.clone()).map_err(|_| "invalid TLS server name".to_owned())?;
-        let tls = connector
-            .connect(server_name, std_stream)
-            .await
-            .map_err(|e| format!("TLS handshake failed: {e}"))?;
-        send_http1(tls, req).await
-    } else {
-        send_http1(std_stream, req).await
-    }
+    Err(last_err)
 }
 
 async fn send_http1<S>(
