@@ -279,6 +279,8 @@ impl Flow {
                 if !r.ok {
                     self.error = r.error;
                     self.result(502, 5);
+                } else if r.flag {
+                    self.result(200, 20);
                 } else {
                     self.emit(8, 5);
                 }

@@ -92,12 +92,12 @@ public class SmartVpnService extends VpnService {
             stopSelf();
             return START_NOT_STICKY;
         }
-        startForeground(NOTIFICATION_ID, notification("正在建立隧道"));
         if (!ACTION_START.equals(action)) systemStarted = true;
         if (tunnel != null) {
             answer(true, "");
             return START_NOT_STICKY;
         }
+        startForeground(NOTIFICATION_ID, notification("正在建立隧道"));
         boolean systemStart = !ACTION_START.equals(action);
         String bootstrap = null;
         if (systemStart) {

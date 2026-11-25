@@ -4,12 +4,7 @@ use http_body_util::{BodyExt, Empty, Limited};
 use hyper::{body::Bytes, Request};
 use hyper_util::rt::TokioIo;
 use serde_json::{json, Value};
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::Arc,
-    time::Duration,
-};
+use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
 use tokio::time::timeout;
 use tokio_rustls::{
     rustls::{pki_types::ServerName, ClientConfig, RootCertStore},
@@ -50,11 +45,33 @@ pub async fn fetch_subscription_text(
     url: &str,
     protect: Option<smartvpn_engine::dialer::SocketProtectHook>,
 ) -> Result<(String, Option<QuotaInfo>), String> {
+    let (bytes, quota) = fetch_bytes(url, protect, 16 << 20, false).await?;
+    Ok((String::from_utf8_lossy(&bytes).into_owned(), quota))
+}
+
+pub(super) async fn fetch_https_list(
+    url: &str,
+    protect: Option<smartvpn_engine::dialer::SocketProtectHook>,
+    limit: usize,
+) -> Result<String, String> {
+    let (bytes, _) = fetch_bytes(url, protect, limit, true).await?;
+    String::from_utf8(bytes.to_vec()).map_err(|e| e.to_string())
+}
+
+async fn fetch_bytes(
+    url: &str,
+    protect: Option<smartvpn_engine::dialer::SocketProtectHook>,
+    limit: usize,
+    https_only: bool,
+) -> Result<(Bytes, Option<QuotaInfo>), String> {
     let mut current = url.trim().to_owned();
     let mut last_user_info = None;
     for _hop in 0..6 {
+        if https_only && !current.starts_with("https://") {
+            return Err("list download requires HTTPS".into());
+        }
         let (status, location, user_info, body_bytes) =
-            fetch_once(&current, protect).await?;
+            fetch_once(&current, protect, limit).await?;
         if user_info.is_some() {
             last_user_info = user_info;
         }
@@ -67,8 +84,7 @@ pub async fn fetch_subscription_text(
         if !(200..300).contains(&status) {
             return Err(format!("HTTP {status}"));
         }
-        let text = String::from_utf8_lossy(&body_bytes).into_owned();
-        return Ok((text, last_user_info));
+        return Ok((body_bytes, last_user_info));
     }
     Err("too many redirects".to_owned())
 }
@@ -92,6 +108,7 @@ fn resolve_redirect(base: &str, location: &str) -> Result<String, String> {
 async fn fetch_once(
     url: &str,
     protect: Option<smartvpn_engine::dialer::SocketProtectHook>,
+    limit: usize,
 ) -> Result<(u16, Option<String>, Option<QuotaInfo>, Bytes), String> {
     let trimmed = url.trim();
     let (scheme, rest) = trimmed
@@ -108,10 +125,16 @@ async fn fetch_once(
         if let Ok(port_num) = p.parse::<u16>() {
             (h.to_owned(), port_num)
         } else {
-            (authority.to_owned(), if scheme == "https" { 443 } else { 80 })
+            (
+                authority.to_owned(),
+                if scheme == "https" { 443 } else { 80 },
+            )
         }
     } else {
-        (authority.to_owned(), if scheme == "https" { 443 } else { 80 })
+        (
+            authority.to_owned(),
+            if scheme == "https" { 443 } else { 80 },
+        )
     };
 
     let mut addrs: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port))
@@ -124,6 +147,10 @@ async fn fetch_once(
     addrs.sort_by_key(|a| if a.is_ipv4() { 0 } else { 1 });
 
     let mut last_err = String::from("connect failed");
+    if scheme == "https" {
+        smartvpn_engine::transport::tls::ensure_crypto_provider();
+    }
+
     let mut roots = RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let mut cfg = ClientConfig::builder()
@@ -131,10 +158,6 @@ async fn fetch_once(
         .with_no_client_auth();
     cfg.alpn_protocols = vec![b"http/1.1".to_vec()];
     let tls_cfg = Arc::new(cfg);
-    if scheme == "https" {
-        smartvpn_engine::transport::tls::ensure_crypto_provider();
-    }
-
     for addr in addrs.into_iter().take(8) {
         let tcp_res = timeout(Duration::from_secs(3), async {
             let sock = if addr.is_ipv4() {
@@ -179,7 +202,12 @@ async fn fetch_once(
             let connector = TlsConnector::from(Arc::clone(&tls_cfg));
             let server_name = ServerName::try_from(host.clone())
                 .map_err(|_| "invalid TLS server name".to_owned())?;
-            let tls = match timeout(Duration::from_secs(6), connector.connect(server_name, std_stream)).await {
+            let tls = match timeout(
+                Duration::from_secs(6),
+                connector.connect(server_name, std_stream),
+            )
+            .await
+            {
                 Ok(Ok(t)) => t,
                 Ok(Err(e)) => {
                     last_err = format!("TLS handshake failed: {e}");
@@ -190,9 +218,9 @@ async fn fetch_once(
                     continue;
                 }
             };
-            return send_http1(tls, req).await;
+            return send_http1(tls, req, limit).await;
         } else {
-            return send_http1(std_stream, req).await;
+            return send_http1(std_stream, req, limit).await;
         }
     }
     Err(last_err)
@@ -201,6 +229,7 @@ async fn fetch_once(
 async fn send_http1<S>(
     stream: S,
     req: Request<Empty<Bytes>>,
+    limit: usize,
 ) -> Result<(u16, Option<String>, Option<QuotaInfo>, Bytes), String>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -226,7 +255,7 @@ where
         .get("subscription-userinfo")
         .and_then(|v| v.to_str().ok())
         .and_then(parse_userinfo_header);
-    let body = Limited::new(res.into_body(), 16 << 20)
+    let body = Limited::new(res.into_body(), limit)
         .collect()
         .await
         .map_err(|e| e.to_string())?
@@ -317,10 +346,16 @@ pub fn parse_proxy_uri(uri: &str) -> Option<Value> {
                     map.insert("sni".into(), json!(sni));
                 }
             }
-            if params.get("allowInsecure").is_some_and(|v| v == "1" || v == "true") {
+            if params
+                .get("allowInsecure")
+                .is_some_and(|v| v == "1" || v == "true")
+            {
                 map.insert("skip-cert-verify".into(), json!(true));
             }
-            if params.get("security").is_some_and(|v| v == "tls" || v == "reality") {
+            if params
+                .get("security")
+                .is_some_and(|v| v == "tls" || v == "reality")
+            {
                 map.insert("tls".into(), json!(true));
             }
             if let Some(pbk) = params.get("pbk") {
@@ -370,7 +405,10 @@ pub fn parse_proxy_uri(uri: &str) -> Option<Value> {
             if let Some(sni) = params.get("sni") {
                 map.insert("sni".into(), json!(sni));
             }
-            if params.get("insecure").is_some_and(|v| v == "1" || v == "true") {
+            if params
+                .get("insecure")
+                .is_some_and(|v| v == "1" || v == "true")
+            {
                 map.insert("skip-cert-verify".into(), json!(true));
             }
             Some(Value::Object(map))

@@ -116,6 +116,8 @@ pub struct ManualNode {
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ProxyChain {
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub backups: BTreeMap<String, Vec<String>>,
     pub id: String,
     pub name: String,
     pub hops: Vec<String>,
@@ -269,6 +271,7 @@ impl Default for PersistedState {
 }
 
 pub struct RuntimeState {
+    pub(super) china: super::china::China,
     pub home: PathBuf,
     pub bridge: Arc<dyn PlatformBridge>,
     pub persisted: PersistedState,
@@ -326,6 +329,7 @@ impl RuntimeState {
         }
         let next_event_id = persisted.events.iter().map(|e| e.id).max().unwrap_or(0) + 1;
         Self {
+            china: super::china::China::load(home),
             home: home.to_path_buf(),
             bridge,
             persisted,
@@ -462,6 +466,7 @@ impl RuntimeState {
                 "hops": active_chain_hops,
             },
             "chains": chains_map,
+            "chainBackups": self.persisted.chains.iter().map(|c| (&c.name, &c.backups)).collect::<BTreeMap<_, _>>(),
             "activeChainId": self.persisted.active_chain_id,
             "activeRegion": self.persisted.locked_region,
             "lockedRegion": self.persisted.locked_region,
@@ -488,7 +493,7 @@ impl RuntimeState {
             "tunAvailable": true,
             "tunReason": "",
             "tunActive": self.connected && self.tun_handle.is_some(),
-            "chinaDirect": {"enabled": self.persisted.domestic_web},
+            "chinaDirect": self.china.status(self.persisted.domestic_web),
             "rustCore": true,
             "rustEngineActive": self.tun_handle.is_some()
         })

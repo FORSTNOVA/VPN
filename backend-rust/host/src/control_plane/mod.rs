@@ -1,3 +1,4 @@
+mod china;
 pub mod nodes;
 pub mod state;
 pub mod subs;
@@ -193,7 +194,11 @@ impl ControlPlane {
                 let _ = st.save();
                 json_resp(StatusCode::OK, json!({"ok": true}))
             }
-            (Method::POST, "/api/proxy/reapply") | (Method::POST, "/api/direct/refresh") => {
+            (Method::POST, "/api/direct/refresh") => {
+                china::start_refresh(self.state.clone()).await;
+                json_resp(StatusCode::OK,json!({"ok":true}))
+            }
+            (Method::POST, "/api/proxy/reapply") => {
                 json_resp(StatusCode::OK, json!({"ok": true}))
             }
             (Method::GET, "/api/tun") => {
@@ -583,8 +588,15 @@ impl ControlPlane {
             return text_resp(StatusCode::BAD_REQUEST, "invalid JSON\n");
         };
         let mut st = self.state.lock().await;
+        let previous_id = st.persisted.active_chain_id.clone();
+        let previous_chains = st.persisted.chains.clone();
         if let Some(id) = val.get("id").and_then(|v| v.as_str()) {
             st.persisted.active_chain_id = id.to_owned();
+        } else if let Some(name) = val["name"].as_str().filter(|s| !s.is_empty() && val["enabled"] == true) {
+            let Some(chain) = st.persisted.chains.iter().find(|c| c.name == name) else {
+                return text_resp(StatusCode::BAD_REQUEST, "找不到已保存的代理链");
+            };
+            st.persisted.active_chain_id = chain.id.clone();
         } else if let Some(hops) = val.get("hops").and_then(|v| v.as_array()) {
             let clean: Vec<String> = hops
                 .iter()
@@ -596,6 +608,7 @@ impl ControlPlane {
                 let id = "default-chain".to_owned();
                 st.persisted.chains.retain(|c| c.id != id);
                 st.persisted.chains.push(ProxyChain {
+                    backups: Default::default(),
                     id: id.clone(),
                     name: clean.join(" → "),
                     hops: clean,
@@ -603,7 +616,11 @@ impl ControlPlane {
                 st.persisted.active_chain_id = id;
             }
         }
-        let _ = st.save();
+        if let Err(e) = st.save() {
+            st.persisted.active_chain_id = previous_id;
+            st.persisted.chains = previous_chains;
+            return text_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("保存代理链失败：{e}"));
+        }
         json_resp(StatusCode::OK, json!({"ok": true}))
     }
 
@@ -613,15 +630,25 @@ impl ControlPlane {
         };
         let name = val.get("name").and_then(|v| v.as_str()).unwrap_or("Chain").trim().to_owned();
         let original = val.get("original").and_then(|v| v.as_str()).unwrap_or("").trim().to_owned();
-        let hops: Vec<String> = val
-            .get("hops")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect())
-            .unwrap_or_default();
-        if hops.is_empty() {
-            return text_resp(StatusCode::BAD_REQUEST, "chain hops required\n");
+        #[derive(serde::Deserialize)]
+        struct Members {
+            hops: Vec<String>,
+            #[serde(default)]
+            backups: std::collections::BTreeMap<String, Vec<String>>,
+        }
+        let Ok(Members { hops, backups }) = serde_json::from_value(val.clone()) else {
+            return text_resp(StatusCode::BAD_REQUEST, "invalid chain members");
+        };
+        let mut used = std::collections::HashSet::new();
+        if !(2..=8).contains(&hops.len())
+            || backups.keys().any(|key| !hops.contains(key))
+            || hops.iter().chain(backups.values().flatten()).any(|n| n.trim().is_empty() || !used.insert(n))
+        {
+            return text_resp(StatusCode::BAD_REQUEST, "代理链需要 2 至 8 跳，首选和备用节点不可重复");
         }
         let mut st = self.state.lock().await;
+        let previous_id = st.persisted.active_chain_id.clone();
+        let previous_chains = st.persisted.chains.clone();
         let existing_id = if !original.is_empty() {
             st.persisted
                 .chains
@@ -649,9 +676,14 @@ impl ControlPlane {
             id: id.clone(),
             name,
             hops,
+            backups,
         });
         st.persisted.active_chain_id = id;
-        let _ = st.save();
+        if let Err(e) = st.save() {
+            st.persisted.active_chain_id = previous_id;
+            st.persisted.chains = previous_chains;
+            return text_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("保存代理链失败：{e}"));
+        }
         json_resp(StatusCode::OK, json!({"ok": true}))
     }
 
@@ -694,18 +726,21 @@ impl ControlPlane {
             .and_then(|v| v.as_array())
             .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect())
             .unwrap_or_default();
-        let (persisted, proxies, protect) = {
-            let st = self.state.lock().await;
-            (
-                st.persisted.clone(),
-                st.all_proxy_values(),
-                st.active_protect_hook(),
-            )
+        let backups: std::collections::BTreeMap<String, Vec<String>> = match val.get("backups") {
+            None => Default::default(),
+            Some(raw) => match serde_json::from_value(raw.clone()) {
+                Ok(map) => map,
+                Err(_) => return text_resp(StatusCode::BAD_REQUEST, "invalid hop backups"),
+            }
         };
-        let key = hops.join(" → ");
+        let (proxies, protect) = {
+            let st = self.state.lock().await;
+            (st.all_proxy_values(), st.active_protect_hook())
+        };
+        let key = if backups.is_empty() { hops.join(" → ") } else { json!([hops,backups]).to_string() };
         let measured = chrono::Utc::now().timestamp_millis();
         let timeout_ms = if hops.len() > 1 { 12000 } else { 6000 };
-        match nodes::probe_chain_latency(&persisted, &proxies, &hops, protect, timeout_ms).await {
+        match nodes::probe_chain_latency(&backups, &proxies, &hops, protect, timeout_ms).await {
             Ok((first_ms, steady_ms)) => {
                 let mut st = self.state.lock().await;
                 if hops.len() == 1 {
@@ -714,6 +749,7 @@ impl ControlPlane {
                 }
                 let probe_val = json!({
                     "hops": hops,
+                    "backups": backups,
                     "delay": first_ms,
                     "warmDelay": steady_ms,
                     "measured": measured,
@@ -733,6 +769,7 @@ impl ControlPlane {
             Err(e) => {
                 let probe_val = json!({
                     "hops": hops,
+                    "backups": backups,
                     "error": e,
                     "failureStage": "建立代理连接",
                     "measured": measured
@@ -756,15 +793,15 @@ impl ControlPlane {
                 st.active_protect_hook(),
             )
         };
-        let hops = if let Some(c) = persisted.chains.iter().find(|c| c.id == persisted.active_chain_id) {
-            c.hops.clone()
+        let (hops, backups) = if let Some(c) = persisted.chains.iter().find(|c| c.id == persisted.active_chain_id) {
+            (c.hops.clone(), c.backups.clone())
         } else if !persisted.selected_node.is_empty() {
-            vec![persisted.selected_node.clone()]
+            (vec![persisted.selected_node.clone()], Default::default())
         } else {
             return text_resp(StatusCode::BAD_REQUEST, "no node selected\n");
         };
         let timeout_ms = if hops.len() > 1 { 12000 } else { 6000 };
-        match nodes::probe_chain_latency(&persisted, &proxies, &hops, protect, timeout_ms).await {
+        match nodes::probe_chain_latency(&backups, &proxies, &hops, protect, timeout_ms).await {
             Ok((first_ms, steady_ms)) => json_resp(
                 StatusCode::OK,
                 json!({
@@ -1145,14 +1182,14 @@ impl ControlPlane {
                 st.active_protect_hook(),
             )
         };
-        let hops = if let Some(c) = persisted.chains.iter().find(|c| c.id == persisted.active_chain_id) {
-            c.hops.clone()
+        let (hops, backups) = if let Some(c) = persisted.chains.iter().find(|c| c.id == persisted.active_chain_id) {
+            (c.hops.clone(), c.backups.clone())
         } else if !persisted.selected_node.is_empty() {
-            vec![persisted.selected_node.clone()]
+            (vec![persisted.selected_node.clone()], Default::default())
         } else {
             return text_resp(StatusCode::BAD_REQUEST, "no node selected\n");
         };
-        let res = nodes::probe_chain_latency(&persisted, &proxies, &hops, protect, 5000).await;
+        let res = nodes::probe_chain_latency(&backups, &proxies, &hops, protect, 5000).await;
         let ok = res.is_ok();
         let detail = match &res {
             Ok((first_ms, steady_ms)) => format!("首次 {first_ms} ms · 连接后 {steady_ms} ms"),
@@ -1327,7 +1364,7 @@ mod tests {
                 serde_json::to_vec(&json!({
                     "original": "",
                     "name": "11%",
-                    "hops": ["nodeA", "nodeB"]
+                    "hops": ["nodeA", "nodeB"], "backups": {"nodeA":["nodeC"]}
                 }))
                 .unwrap(),
             )))
@@ -1342,6 +1379,17 @@ mod tests {
             let _ = conn.await;
         });
         assert_eq!(tx.send_request(save_req).await.unwrap().status(), 200);
+
+        let disabled = cp.handle_set_chain(br#"{"enabled":false,"hops":[]}"#).await;
+        assert_eq!(disabled.status(), 200);
+        let selected = cp.handle_set_chain(br#"{"name":"11%","enabled":true,"hops":["nodeA","nodeB"]}"#).await;
+        assert_eq!(selected.status(), 200);
+        {
+            let st = cp.state.lock().await;
+            let chain = st.persisted.chains.iter().find(|c| c.id == st.persisted.active_chain_id).unwrap();
+            assert_eq!(chain.backups["nodeA"], ["nodeC"]);
+            assert_eq!(st.state_json()["chainBackups"]["11%"]["nodeA"], json!(["nodeC"]));
+        }
 
         let del_req = Request::delete("/api/nodes/chain/profile?name=11%25")
             .header(AUTHORIZATION, format!("Bearer {}", cp.token))

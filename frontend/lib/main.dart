@@ -116,6 +116,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String? _selectedNode;
   String _activeNode = '';
   bool _chainEnabled = false;
+  Map<String, Map<String,List<String>>>? _chainBackups;
   Map<String, List<String>> _chains = {};
   String _chainName = '';
   List<String> _chainHops = const [];
@@ -165,7 +166,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
  final _expandedSources=<String>{};
   String _nodeQuery = '';
   late final _probes = ProbeBook((hops) =>
-      _request('POST', '/api/nodes/chain/probe', body: {'hops': hops}));
+      _request('POST', '/api/nodes/chain/probe', body: {'hops': hops}), sendPolicy: (hops, backups) => _request('POST', '/api/nodes/chain/probe', body: {'hops':hops,'backups':backups}));
   int _probeDone = 0, _probeTotal = 0;
   Future<void> _loadProbes() async {
     final revision = _probes.revision;
@@ -704,6 +705,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _chainName = chain['name'] as String? ?? '';
       _chains = (value['chains'] as Map<String, dynamic>? ?? {})
           .map((k, v) => MapEntry(k, (v as List).cast<String>()));
+      _chainBackups = (value['chainBackups'] as Map<String,dynamic>?)?.map((k, v) => MapEntry(k, (v as Map<String,dynamic>).map((primary, backups) => MapEntry(primary, (backups as List).cast<String>()))));
       _chainHops =
           (chain['hops'] as List? ?? const []).whereType<String>().toList();
       _activeNode = _nodeLabel(value['activeNode'] as String? ?? '');
@@ -780,7 +782,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     }
     if (!mounted) return;
     setState(() => _chinaDirect = _chinaDirect.asRefreshing());
-    for (var attempt = 0; attempt < 20; attempt++) {
+    for (var attempt = 0; attempt < 45; attempt++) {
       await Future<void>.delayed(const Duration(seconds: 1));
       if (!mounted) return;
       try {
@@ -788,8 +790,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (!mounted) return;
         setState(() => _applyChinaState(value));
         if (!_chinaDirect.refreshing) return;
-      } catch (_) {
-        // The service is gone or busy; the state poll will settle it.
+      } catch (e) {
+        if (mounted) setState(() => _error = '读取直连列表状态失败：$e');
         return;
       }
     }
@@ -1146,13 +1148,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               initialHops: _chains[original] ?? [],
                               tunnelActive: Platform.isWindows && _kernelRunning &&
                                   _connectionMode != 'system-proxy',
+                              initialBackups: _chainBackups == null ? null : _chainBackups![original] ?? {},
                               initialName: original ?? '',
                               book: _probes,
-                              save: (name, hops) async {
+                              save: (name, hops, backups) async {
                                 await _request(
                                     'PUT', '/api/nodes/chain/profile', body: {
                                   'original': original ?? '',
                                   'name': name,
+                                  if (_chainBackups != null) 'backups': backups,
                                   'hops': hops
                                 });
                               },
@@ -1237,9 +1241,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                         style: Theme.of(context)
                                             .textTheme
                                             .titleMedium),
-                                    Text(entry.value.join(' → ')),
+                                    Text(entry.value.map((primary) {
+                                      final backups = _chainBackups?[entry.key]?[primary];
+                                      return backups == null || backups.isEmpty
+                                          ? primary
+                                          : '$primary（备用：${backups.join('、')}）';
+                                    }).join(' → ')),
                                     PathProbeButton(
-                                        book: _probes,
+                                        book: _probes.forBackups(_chainBackups?[entry.key] ?? {}),
                                         hops: entry.value,
                                         title: '测整链'),
                                     Wrap(children: [
@@ -1306,7 +1315,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _measureLatency() async {
     final hops = _homeProbeHops;
-    if (hops.isNotEmpty) await _probes.run(hops);
+    if (hops.isNotEmpty) await _probes.forBackups(_chainBackups?[_chainName] ?? {}).run(hops);
   }
 
   Future<void> _measureAllNodes() async {

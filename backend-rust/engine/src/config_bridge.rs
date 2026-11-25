@@ -33,6 +33,8 @@ pub struct EngineYamlBundle {
 struct Config {
     mixed_port: u16,
     #[serde(default)]
+    smartvpn_china_ranges: Vec<String>,
+    #[serde(default)]
     proxies: Vec<serde_yaml_ng::Value>,
     #[serde(default)]
     proxy_groups: Vec<Group>,
@@ -128,10 +130,12 @@ struct Group {
     proxies: Vec<String>,
     url: Option<String>,
     interval: Option<u64>,
+    hop_timeout: Option<u64>,
 }
 #[derive(Clone, Copy, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 enum GroupKind {
+    OrderedFailover,
     Select,
     UrlTest,
     Fallback,
@@ -364,6 +368,24 @@ fn resolve(
                 None
             } else {
                 Some(match g.kind {
+                    GroupKind::OrderedFailover => {
+                        let url = g
+                            .url
+                            .as_deref()
+                            .unwrap_or("https://www.gstatic.com/generate_204")
+                            .parse::<http::Uri>()
+                            .map_err(|e| invalid(e.to_string()))?;
+                        if !matches!(url.scheme_str(), Some("http" | "https"))
+                            || url.host().is_none()
+                        {
+                            return Err(invalid("invalid hop health-check URL"));
+                        }
+                        NodeSpec::OrderedFailover {
+                            members,
+                            url,
+                            budget: Duration::from_secs(g.hop_timeout.unwrap_or(6)),
+                        }
+                    }
                     GroupKind::Select => members.into_iter().next().unwrap(),
                     GroupKind::Relay => NodeSpec::Chain(members),
                     GroupKind::UrlTest | GroupKind::Fallback => {
@@ -436,8 +458,10 @@ pub fn build_router_from_clash_yaml(
     for name in defs.keys() {
         resolve(name, &defs, &mut visiting, &mut specs)?;
     }
-    let mut rules =
-        RuleSet::from_clash_lines(&config.rules.iter().map(String::as_str).collect::<Vec<_>>())?;
+    let mut rules = RuleSet::from_clash_lines(
+        &config.rules.iter().map(String::as_str).collect::<Vec<_>>(),
+        crate::domestic::Ranges::new(&config.smartvpn_china_ranges)?,
+    )?;
     rules.resolve_actions(|name| match specs.get(name) {
         Some(Some(NodeSpec::Direct)) => Ok(RuleAction::Direct),
         Some(Some(NodeSpec::Reject)) => Ok(RuleAction::Reject),
@@ -455,6 +479,15 @@ pub fn build_router_from_clash_yaml(
     }
     let fake_ip_pool = Arc::new(FakeIpPool::default());
     let mut router = Router::new(rules, outbounds);
+    if config.dns.enable && !config.smartvpn_china_ranges.is_empty() {
+        router.classification_proxy = Some(
+            router
+                .outbounds
+                .get("SmartVPN")
+                .ok_or_else(|| invalid("missing DNS proxy for domestic classification"))?
+                .clone(),
+        );
+    }
     router.fake_ip_pool = Some(fake_ip_pool.clone());
     router.process_resolver = process_resolver;
     Ok(EngineYamlBundle {

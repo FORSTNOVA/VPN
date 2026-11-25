@@ -3,9 +3,18 @@ use serde_json::{json, Value};
 use std::ffi::CString;
 
 pub fn build_engine_yaml(persisted: &PersistedState, proxies: &[Value]) -> Result<String, String> {
+    engine_yaml(persisted, proxies, &[])
+}
+
+fn engine_yaml(
+    persisted: &PersistedState,
+    proxies: &[Value],
+    ranges: &[String],
+) -> Result<String, String> {
     let mut active_proxies: Vec<Value> = proxies.to_vec();
     let mut main_target = persisted.selected_node.clone();
 
+    let mut policy_groups = Vec::new();
     let mut chain_exits = std::collections::HashMap::new();
     let mut chain_exit = |id: &str| -> Result<String, String> {
         if let Some(exit) = chain_exits.get(id) {
@@ -19,6 +28,36 @@ pub fn build_engine_yaml(persisted: &PersistedState, proxies: &[Value]) -> Resul
             .ok_or_else(|| format!("找不到代理链 {id}"))?;
         if !(2..=8).contains(&chain.hops.len()) {
             return Err(format!("代理链「{}」需要 2 至 8 跳", chain.name));
+        }
+        if !chain.backups.is_empty() {
+            let mut stages = Vec::new();
+            // A later hop's first check may need to wait for earlier candidates to time out.
+            let mut budget = 6;
+            for (hop, name) in chain.hops.iter().enumerate() {
+                let available: Vec<_> = std::iter::once(name)
+                    .chain(chain.backups.get(name).into_iter().flatten())
+                    .filter(|n| {
+                        proxies
+                            .iter()
+                            .any(|p| p["name"].as_str() == Some(n.as_str()))
+                    })
+                    .collect();
+                if available.is_empty() {
+                    return Err(format!(
+                        "代理链「{}」第 {} 跳没有可用节点",
+                        chain.name,
+                        hop + 1
+                    ));
+                }
+                let stage = format!("__smartvpn_policy_{index}_{hop}");
+                policy_groups.push(json!({"name":stage,"type":"ordered-failover","proxies":available,"hop-timeout":budget}));
+                budget += 8 * available.len();
+                stages.push(stage);
+            }
+            let exit = format!("__smartvpn_relay_{index}");
+            policy_groups.push(json!({"name":exit,"type":"relay","proxies":stages}));
+            chain_exits.insert(id.to_owned(), exit.clone());
+            return Ok(exit);
         }
         let mut previous = chain.hops[0].clone();
         for (hop, name) in chain.hops.iter().enumerate() {
@@ -78,7 +117,7 @@ pub fn build_engine_yaml(persisted: &PersistedState, proxies: &[Value]) -> Resul
             rules.push(format!("PROCESS-NAME,{g},DIRECT"));
         }
     }
-    if persisted.domestic_web {
+    if persisted.domestic_web && !ranges.is_empty() {
         rules.push("GEOIP,CN,DIRECT".to_owned());
     }
     rules.push("MATCH,SmartVPN".to_owned());
@@ -87,6 +126,12 @@ pub fn build_engine_yaml(persisted: &PersistedState, proxies: &[Value]) -> Resul
         .iter()
         .filter_map(|p| p.get("name").and_then(|n| n.as_str()).map(str::to_owned))
         .collect();
+    if policy_groups
+        .iter()
+        .any(|group| group["name"] == main_target)
+    {
+        group_members = vec![main_target.clone()];
+    }
     if group_members.is_empty() {
         group_members.push("DIRECT".to_owned());
     }
@@ -97,18 +142,19 @@ pub fn build_engine_yaml(persisted: &PersistedState, proxies: &[Value]) -> Resul
         group_members.insert(0, item);
     }
 
+    policy_groups.insert(
+        0,
+        json!({"name":"SmartVPN","type":"select","proxies":group_members}),
+    );
     let doc = json!({
+        "smartvpn-china-ranges": ranges,
         "mixed-port": 0,
         "dns": {
             "enable": persisted.dns_protection,
             "listen": "0.0.0.0:1053"
         },
         "proxies": active_proxies,
-        "proxy-groups": [{
-            "name": "SmartVPN",
-            "type": "select",
-            "proxies": group_members
-        }],
+        "proxy-groups": policy_groups,
         "rules": rules
     });
 
@@ -126,7 +172,12 @@ pub fn start_tun(state: &mut RuntimeState) -> Result<(), String> {
     if proxies.is_empty() {
         return Err("no proxy nodes available; add or refresh a subscription first".to_owned());
     }
-    let yaml = build_engine_yaml(&state.persisted, &proxies)?;
+    let ranges = if state.persisted.domestic_web {
+        &state.china.rows[..]
+    } else {
+        &[]
+    };
+    let yaml = engine_yaml(&state.persisted, &proxies, ranges)?;
     let c_yaml = CString::new(yaml).map_err(|_| "invalid YAML NUL byte".to_owned())?;
     let protect = state.bridge.protect_hook();
     let resolve = state.bridge.resolve_hook();
@@ -137,6 +188,7 @@ pub fn start_tun(state: &mut RuntimeState) -> Result<(), String> {
         return Err(format!("pure-Rust TUN engine start failed (code {handle})"));
     }
     state.tun_handle = Some(handle);
+    state.china.active = !ranges.is_empty();
     state.connected = true;
     state.push_event(
         "tunnel",
@@ -148,6 +200,7 @@ pub fn start_tun(state: &mut RuntimeState) -> Result<(), String> {
 }
 
 pub fn stop_tun(state: &mut RuntimeState) {
+    state.china.active = false;
     if let Some(handle) = state.tun_handle.take() {
         smartvpn_engine::ffi::smartvpn_engine_tun_stop_v1(handle);
     }
@@ -197,8 +250,48 @@ mod tests {
     use crate::control_plane::state::ProxyChain;
 
     #[test]
+    fn saved_hop_policies_drive_global_and_app_rules_after_reload() {
+        let mut state = PersistedState::default();
+        state.chains = serde_json::from_value(json!([{
+            "id": "policy", "name": "route", "hops": ["A", "B"],
+            "backups": {"A": ["C"], "B": ["D"]}
+        }]))
+        .unwrap();
+        state.active_chain_id = "policy".into();
+        state.app_groups = serde_json::from_value(json!([{
+            "id": "app", "name":"app", "apps":["app.test"], "enabled":true,
+            "targetType":"chain", "targetChainId":"policy"
+        }]))
+        .unwrap();
+        let restored = serde_json::from_slice(&serde_json::to_vec(&state).unwrap()).unwrap();
+        let proxies: Vec<_> = ["A", "B", "C", "D"].iter().map(|name| json!({
+            "name": name, "type":"trojan", "server":"localhost", "port":443, "password":"test"
+        })).collect();
+        let yaml = build_engine_yaml(&restored, &proxies).unwrap();
+        let doc: Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let groups = &doc["proxy-groups"];
+        assert_eq!(groups[1]["proxies"], json!(["A", "C"]));
+        assert_eq!(groups[2]["proxies"], json!(["B", "D"]));
+        assert_eq!(
+            groups[3]["proxies"],
+            json!([groups[1]["name"], groups[2]["name"]])
+        );
+        assert_eq!(groups[0]["proxies"], json!([groups[3]["name"]]));
+        assert_eq!(
+            doc["rules"][0],
+            format!(
+                "PROCESS-NAME,app.test,{}",
+                groups[3]["name"].as_str().unwrap()
+            )
+        );
+        smartvpn_engine::config_bridge::build_router_from_clash_yaml(&yaml, None).unwrap();
+        assert!(build_engine_yaml(&restored, &proxies[..1]).is_err());
+    }
+
+    #[test]
     fn app_groups_share_chain_and_preserve_global_route() {
         let chain = |id: &str, hops: &[&str]| ProxyChain {
+            backups: Default::default(),
             id: id.into(),
             name: id.into(),
             hops: hops.iter().map(|s| s.to_string()).collect(),
@@ -222,7 +315,8 @@ mod tests {
         let proxies: Vec<_> = ["A", "B", "C"].iter().map(|name| json!({
             "name": name, "type": "trojan", "server": "localhost", "port": 443, "password": "fixture"
         })).collect();
-        let yaml = build_engine_yaml(&state, &proxies).unwrap();
+        state.domestic_web = true;
+        let yaml = engine_yaml(&state, &proxies, &["223.5.5.0/24".into()]).unwrap();
         let engine =
             smartvpn_engine::config_bridge::build_router_from_clash_yaml(&yaml, None).unwrap();
         let doc: Value = serde_yaml_ng::from_str(&yaml).unwrap();
@@ -252,6 +346,21 @@ mod tests {
                 engine.router.rules.evaluate(&context),
                 Some(&RuleAction::Proxy(target.into()))
             );
+        }
+        let domestic = "223.5.5.5".parse().unwrap();
+        for (process, expected) in [
+            (
+                "app.a",
+                RuleAction::Proxy(nodes[5]["name"].as_str().unwrap().into()),
+            ),
+            ("other.app", RuleAction::Direct),
+        ] {
+            let context = RuleContext {
+                process_name: Some(process),
+                ip: Some(domestic),
+                domain: None,
+            };
+            assert_eq!(engine.router.rules.evaluate(&context), Some(&expected));
         }
         state.chains[1].hops[1] = "missing".into();
         assert!(build_engine_yaml(&state, &proxies)

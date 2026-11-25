@@ -2,7 +2,28 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 
 class ProbeBook extends ChangeNotifier {
-  ProbeBook(this.send);
+  ProbeBook(this.send, {this.sendPolicy});
+  final Future<Map<String, dynamic>> Function(
+      List<String>, Map<String, List<String>>)? sendPolicy;
+  final _scopes = <String, ProbeBook>{};
+  ProbeBook forBackups(Map<String, List<String>> backups) {
+    if (backups.isEmpty) return this;
+    final members = {
+      for (final e in backups.entries) e.key: List<String>.of(e.value)
+    };
+    return _scopes.putIfAbsent(
+        jsonEncode(members),
+        () => ProbeBook((hops) {
+              final subset = {
+                for (final name in hops)
+                  if (members.containsKey(name)) name: members[name]!
+              };
+              return subset.isEmpty || hops.length == 1
+                  ? send(hops)
+                  : sendPolicy!(hops, subset);
+            }));
+  }
+
   final Future<Map<String, dynamic>> Function(List<String>) send;
   final _results = <String, Map<String, dynamic>>{};
   final _pending = <String, Future<void>>{};
@@ -63,6 +84,13 @@ class ProbeBook extends ChangeNotifier {
   void restore(List rows) {
     _results.clear();
     for (final row in rows.cast<Map<String, dynamic>>()) {
+      if (row['backups'] case final Map raw when raw.isNotEmpty) {
+        final book = forBackups(raw
+            .map((k, v) => MapEntry(k as String, (v as List).cast<String>())));
+        book._results[key((row['hops'] as List).cast<String>())] = row;
+        book.notifyListeners();
+        continue;
+      }
       _results[key((row['hops'] as List).cast<String>())] = row;
     }
     notifyListeners();

@@ -10,7 +10,12 @@ use crate::{
     },
     rule::{RuleAction, RuleContext, RuleSet},
 };
-use std::{collections::HashMap, io, net::SocketAddr, sync::Arc};
+use std::{
+    collections::HashMap,
+    io,
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
 
 #[derive(Clone)]
 pub enum NodeSpec {
@@ -23,6 +28,11 @@ pub enum NodeSpec {
     Vless(VlessConfig),
     Hysteria2(Hysteria2Config),
     Chain(Vec<NodeSpec>),
+    OrderedFailover {
+        members: Vec<NodeSpec>,
+        url: http::Uri,
+        budget: std::time::Duration,
+    },
 }
 
 type Dialer = Arc<dyn OutboundDialer>;
@@ -45,6 +55,26 @@ fn extend(spec: &NodeSpec, underlay: Option<Dialer>) -> io::Result<Option<Dialer
             Arc::new(crate::proxy_group::TestedGroup::new(
                 config.clone(),
                 members,
+            ))
+        }
+        NodeSpec::OrderedFailover {
+            members: nodes,
+            url,
+            budget,
+        } => {
+            let members = nodes
+                .iter()
+                .map(|n| {
+                    extend(n, underlay.clone()).map(|d| d.unwrap_or_else(|| Arc::new(DirectDialer)))
+                })
+                .collect::<io::Result<Vec<_>>>()?;
+            if members.len() == 1 {
+                return Ok(members.into_iter().next());
+            }
+            Arc::new(crate::proxy_group::OrderedFailover::new(
+                members,
+                url.clone(),
+                *budget,
             ))
         }
         NodeSpec::Direct => return Ok(underlay),
@@ -95,6 +125,8 @@ pub trait ProcessResolver: Send + Sync {
     }
 }
 pub struct Router {
+    pub(crate) classification_proxy: Option<Dialer>,
+    classification_cache: Arc<std::sync::Mutex<HashMap<String, (IpAddr, std::time::Instant)>>>,
     pub rules: RuleSet,
     pub outbounds: HashMap<String, Dialer>,
     pub fake_ip_pool: Option<Arc<FakeIpPool>>,
@@ -111,6 +143,8 @@ pub enum RouteResult {
 impl Router {
     pub fn new(rules: RuleSet, outbounds: HashMap<String, Dialer>) -> Self {
         Self {
+            classification_proxy: None,
+            classification_cache: Default::default(),
             rules,
             outbounds,
             fake_ip_pool: None,
@@ -155,6 +189,8 @@ impl Router {
 
     fn clone_for_probe(&self) -> Self {
         Self {
+            classification_proxy: self.classification_proxy.clone(),
+            classification_cache: self.classification_cache.clone(),
             rules: self.rules.clone(),
             outbounds: self.outbounds.clone(),
             fake_ip_pool: self.fake_ip_pool.clone(),
@@ -184,9 +220,8 @@ impl Router {
                 ))
             }
         };
-        let req = format!(
-            "GET /generate_204 HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
-        );
+        let req =
+            format!("GET /generate_204 HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n");
         tokio::time::timeout(budget, stream.write_all(req.as_bytes()))
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "write timeout"))??;
@@ -212,7 +247,9 @@ impl Router {
         sniffed_host: Option<&str>,
         listener: Option<SocketAddr>,
     ) -> io::Result<RouteResult> {
-        let (action, destination) = self.route(src, target, sniffed_host, listener, false)?;
+        let (action, destination) = self
+            .route(src, target, sniffed_host, listener, false)
+            .await?;
         let outbound: &dyn OutboundDialer = match action {
             RuleAction::Reject => return Ok(RouteResult::Reject),
             RuleAction::Direct => &DirectDialer,
@@ -230,7 +267,44 @@ impl Router {
             stream,
         })
     }
-    pub(crate) fn route(
+    async fn classify_address(&self, name: &str, port: u16) -> io::Result<SocketAddr> {
+        if let Some(proxy) = &self.classification_proxy {
+            if let Some(&(ip, until)) = self.classification_cache.lock().unwrap().get(name) {
+                if until > std::time::Instant::now() {
+                    return Ok(SocketAddr::new(ip, port));
+                }
+            }
+            let (ip, ttl) = tokio::time::timeout(
+                std::time::Duration::from_secs(12),
+                crate::domestic::encrypted_address(proxy.as_ref(), name),
+            )
+            .await
+            .map_err(io::Error::other)??;
+            let mut cache = self.classification_cache.lock().unwrap();
+            if cache.len() >= 4096 {
+                cache.retain(|_, (_, until)| *until > std::time::Instant::now());
+            }
+            if cache.len() < 4096 {
+                cache.insert(
+                    name.to_owned(),
+                    (
+                        ip,
+                        std::time::Instant::now() + std::time::Duration::from_secs(ttl.into()),
+                    ),
+                );
+            }
+            return Ok(SocketAddr::new(ip, port));
+        }
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tokio::net::lookup_host((name, port)),
+        )
+        .await
+        .map_err(io::Error::other)??
+        .next()
+        .ok_or_else(|| io::Error::other(format!("no address for domestic classification: {name}")))
+    }
+    pub(crate) async fn route(
         &self,
         src: SocketAddr,
         target: &TargetAddr,
@@ -266,25 +340,114 @@ impl Router {
                 _ => sniffed_host.map(str::to_owned),
             },
         };
-        let action = self
-            .rules
-            .evaluate(&RuleContext {
-                domain: host.as_deref(),
-                ip,
-                process_name: process_name.as_deref(),
-            })
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::NotFound,
-                    format!("no matching rule for {target}"),
-                )
-            })?;
+        let real_ip = ip.filter(|i| !self.fake_ip_pool.as_ref().is_some_and(|p| p.is_fake_ip(*i)));
+        let ctx = RuleContext {
+            domain: host.as_deref(),
+            ip,
+            process_name: process_name.as_deref(),
+        };
+        let candidate = !is_udp
+            && !self.rules.china.is_empty()
+            && real_ip.map_or(host.is_some(), |ip| self.rules.china.contains(ip));
+        let mut selected = self.rules.match_rule(&ctx, candidate);
+        let mut direct_addr = None;
+        if let Some((crate::rule::Rule::China, _)) = selected {
+            let addr = match real_ip {
+                Some(ip) => SocketAddr::new(ip, target.port()),
+                None => {
+                    self.classify_address(
+                        host.as_deref().expect("domain classification candidate"),
+                        target.port(),
+                    )
+                    .await?
+                }
+            };
+            if self.rules.china.contains(addr.ip()) {
+                direct_addr = Some(addr);
+            } else {
+                selected = self.rules.match_rule(&ctx, false);
+            }
+        }
+        let action = selected.map(|(_, a)| a).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("no matching rule for {target}"),
+            )
+        })?;
         Ok((
             action,
-            match host {
-                Some(h) => TargetAddr::Domain(h, target.port()),
-                None => target.clone(),
+            match (direct_addr, host) {
+                (Some(addr), _) if matches!(action, RuleAction::Direct) => TargetAddr::Ip(addr),
+                (_, Some(h)) => TargetAddr::Domain(h, target.port()),
+                (_, None) => target.clone(),
             },
         ))
+    }
+}
+
+#[cfg(test)]
+mod domestic_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn domestic_routing_preserves_precedence_and_pins_direct_tcp() {
+        let mut rules = RuleSet::from_lines(&[
+            "DOMAIN,blocked.invalid,REJECT",
+            "GEOIP,CN,DIRECT",
+            "MATCH,chain",
+        ])
+        .unwrap();
+        rules.china = Arc::new(
+            crate::domestic::Ranges::new(&[
+                "127.0.0.0/8".into(),
+                "::1/128".into(),
+                "2001:db8::/126".into(),
+            ])
+            .unwrap(),
+        );
+        let mut router = Router::new(rules, HashMap::new());
+        let pool = Arc::new(FakeIpPool::default());
+        let fake = pool.allocate("localhost");
+        router.fake_ip_pool = Some(pool);
+        let src = "127.0.0.1:4321".parse().unwrap();
+        for (ip, udp, expected) in [
+            ("127.0.0.1", true, RuleAction::Proxy("chain".into())),
+            ("2001:db8::3", false, RuleAction::Direct),
+            ("2001:db8::4", false, RuleAction::Proxy("chain".into())),
+        ] {
+            let target = TargetAddr::Ip(SocketAddr::new(ip.parse().unwrap(), 80));
+            assert_eq!(
+                router.route(src, &target, None, None, udp).await.unwrap().0,
+                &expected
+            );
+        }
+        let target = TargetAddr::Ip(SocketAddr::new(fake.into(), 80));
+        let (action, dest) = router.route(src, &target, None, None, false).await.unwrap();
+        assert_eq!(action, &RuleAction::Direct);
+        assert!(matches!(dest,TargetAddr::Ip(addr) if addr.ip().is_loopback()));
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = TargetAddr::Ip(server.local_addr().unwrap());
+        assert_eq!(
+            router
+                .route(src, &target, Some("blocked.invalid"), None, false)
+                .await
+                .unwrap()
+                .0,
+            &RuleAction::Reject
+        );
+        let RouteResult::Connected { action, mut stream } = router
+            .dial_tcp(src, &target, Some("unresolvable.invalid"))
+            .await
+            .unwrap()
+        else {
+            panic!("expected direct connection")
+        };
+        assert_eq!(action, RuleAction::Direct);
+        stream.write_all(b"domestic").await.unwrap();
+        let (mut peer, _) = server.accept().await.unwrap();
+        let mut received = [0; 8];
+        peer.read_exact(&mut received).await.unwrap();
+        assert_eq!(&received, b"domestic");
     }
 }

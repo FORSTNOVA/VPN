@@ -108,6 +108,8 @@ impl TunStack {
     /// Dropping the run future drops the device and cancels all flow workers.
     pub async fn run(self, mut device: impl TunDevice) -> io::Result<()> {
         let (tx, mut rx) = mpsc::channel::<Vec<u8>>(128);
+        #[cfg(target_os = "android")]
+        let mut last_error_log = None::<Instant>;
         let mut workers = JoinSet::new();
         let mut flows = HashMap::<Flow, (mpsc::Sender<Vec<u8>>, tokio::task::Id)>::new();
         loop {
@@ -118,6 +120,11 @@ impl TunStack {
                         flows.remove(&flow);
                     }
                     if let Err(err) = result {
+                        #[cfg(target_os = "android")]
+                        if last_error_log.is_none_or(|t| t.elapsed() >= Duration::from_secs(5)) {
+                            crate::android_network_log(&format!("TUN {}: {err}", if flow.tcp { "TCP" } else { "UDP" }));
+                            last_error_log = Some(Instant::now());
+                        }
                         eprintln!("TUN {flow:?}: {err}");
                     }
                 }

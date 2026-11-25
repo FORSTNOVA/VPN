@@ -305,6 +305,8 @@ impl Flow {
             17 => {
                 if !r.ok {
                     self.fail(1, &r);
+                } else if r.flag {
+                    self.finish();
                 } else {
                     self.s.kernel = true;
                     self.emit(19, 19);

@@ -107,7 +107,9 @@ pub(super) async fn run(
         }
         return Ok(());
     }
-    let (action, target) = router.route(flow.src, &TargetAddr::Ip(flow.dst), None, None, true)?;
+    let (action, target) = router
+        .route(flow.src, &TargetAddr::Ip(flow.dst), None, None, true)
+        .await?;
     let session = match action {
         RuleAction::Reject => {
             return Err(io::Error::new(

@@ -278,3 +278,52 @@ async fn mixed_tls_sniff_preserves_hello_and_allows_server_first() {
     )
     .await;
 }
+
+#[tokio::test]
+async fn ordered_failover_in_each_hop_keeps_both_hops_in_the_path() {
+    let health = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/health", health.local_addr().unwrap())
+        .parse::<http::Uri>()
+        .unwrap();
+    let responder = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (mut stream, _) = health.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(stream.read_u8().await.unwrap());
+            }
+            stream
+                .write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+                .await
+                .unwrap();
+        }
+    });
+    let (entry, first) = ss().await;
+    let (exit, second) = trojan().await;
+    let group = |members| NodeSpec::OrderedFailover {
+        members,
+        url: url.clone(),
+        budget: Duration::from_secs(4),
+    };
+    let chain = build_dialer(&NodeSpec::Chain(vec![
+        group(vec![NodeSpec::Reject, entry]),
+        group(vec![NodeSpec::Reject, exit]),
+    ]))
+    .unwrap();
+    let target = TargetAddr::Ip(spawn_echo_target().await);
+    for _ in 0..2 {
+        let mut stream = chain.dial_tcp(&target).await.unwrap();
+        stream.write_all(b"hop-test").await.unwrap();
+        let mut answer = [0; 8];
+        stream.read_exact(&mut answer).await.unwrap();
+        assert_eq!(&answer, b"hop-test");
+    }
+    responder.await.unwrap();
+    assert_eq!(first.load(Ordering::SeqCst), 4);
+    assert_eq!(second.load(Ordering::SeqCst), 3);
+    let failed = build_dialer(&group(vec![NodeSpec::Reject, NodeSpec::Reject])).unwrap();
+    let Err(err) = failed.dial_tcp(&target).await else {
+        panic!("failed group bypassed its members")
+    };
+    assert!(err.to_string().contains("member 2"));
+}

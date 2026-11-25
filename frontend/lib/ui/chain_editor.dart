@@ -7,9 +7,11 @@ class ChainEditor extends StatefulWidget {
   final Map<String, String> nodeTransports;
   final List<String> initialHops;
   final String initialName;
+  final Map<String, List<String>>? initialBackups;
   final bool tunnelActive;
   final ProbeBook book;
-  final Future<void> Function(String name, List<String> hops) save;
+  final Future<void> Function(
+      String name, List<String> hops, Map<String, List<String>> backups) save;
 
   const ChainEditor({
     super.key,
@@ -18,6 +20,7 @@ class ChainEditor extends StatefulWidget {
     this.nodeTransports = const {},
     required this.initialHops,
     required this.initialName,
+    this.initialBackups,
     this.tunnelActive = false,
     required this.book,
     required this.save,
@@ -31,6 +34,9 @@ class _ChainEditorState extends State<ChainEditor> {
   late final TextEditingController _nameController;
   late List<String> _hops;
 
+  late final Map<String, List<String>> _backups;
+  Set<String> get _used => {..._hops, ..._backups.values.expand((v) => v)};
+  ProbeBook get _pathBook => widget.book.forBackups(_backups);
   bool _isSaving = false;
   String? _globalError;
 
@@ -38,6 +44,11 @@ class _ChainEditorState extends State<ChainEditor> {
   void initState() {
     super.initState();
     _nameController = TextEditingController(text: widget.initialName);
+    _backups = {
+      for (final e
+          in (widget.initialBackups ?? <String, List<String>>{}).entries)
+        e.key: List.of(e.value)
+    };
     _hops = List<String>.from(widget.initialHops);
   }
 
@@ -71,7 +82,7 @@ class _ChainEditorState extends State<ChainEditor> {
   void _remove(int index) {
     if (index < 0 || index >= _hops.length) return;
     setState(() {
-      _hops.removeAt(index);
+      _backups.remove(_hops.removeAt(index));
       _onChainModified();
     });
   }
@@ -79,14 +90,14 @@ class _ChainEditorState extends State<ChainEditor> {
   Future<void> _replace(int index) async {
     final current = _hops[index];
     final candidates = widget.available
-        .where((n) => !_hops.contains(n) || n == current)
+        .where((n) => !_used.contains(n) || n == current)
         .toList();
 
     final selected = await showModalBottomSheet<String>(
       context: context,
       isScrollControlled: true,
       builder: (ctx) => _NodeSelectionSheet(
-        book: widget.book,
+        book: _pathBook,
         prefix: _hops.take(index).toList(),
         title: '替换第 ${index + 1} 跳节点',
         current: current,
@@ -98,6 +109,8 @@ class _ChainEditorState extends State<ChainEditor> {
 
     if (selected != null && selected != current && mounted) {
       setState(() {
+        final backups = _backups.remove(current);
+        if (backups != null) _backups[selected] = backups;
         _hops[index] = selected;
         _onChainModified();
       });
@@ -111,7 +124,7 @@ class _ChainEditorState extends State<ChainEditor> {
     }
 
     final candidates =
-        widget.available.where((n) => !_hops.contains(n)).toList();
+        widget.available.where((n) => !_used.contains(n)).toList();
     if (candidates.isEmpty) {
       setState(() => _globalError = '没有更多可选的非重复节点');
       return;
@@ -121,7 +134,7 @@ class _ChainEditorState extends State<ChainEditor> {
       context: context,
       isScrollControlled: true,
       builder: (ctx) => _NodeSelectionSheet(
-        book: widget.book,
+        book: _pathBook,
         prefix: List.of(_hops),
         title: '选择第 ${_hops.length + 1} 跳节点',
         nodes: candidates,
@@ -136,6 +149,23 @@ class _ChainEditorState extends State<ChainEditor> {
         _onChainModified();
       });
     }
+  }
+
+  Future<void> _addBackup(int index) async {
+    final primary = _hops[index];
+    final selected = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _NodeSelectionSheet(
+          book: _pathBook,
+          prefix: _hops.take(index).toList(),
+          title: '选择第 ${index + 1} 跳的备用节点',
+          nodes: widget.available.where((n) => !_used.contains(n)).toList(),
+          nodeGroups: widget.nodeGroups,
+          nodeTransports: widget.nodeTransports),
+    );
+    if (mounted && selected != null)
+      setState(() => (_backups[primary] ??= []).add(selected));
   }
 
   Future<void> _handleSave() async {
@@ -159,7 +189,7 @@ class _ChainEditorState extends State<ChainEditor> {
     });
 
     try {
-      await widget.save(name, List<String>.unmodifiable(_hops));
+      await widget.save(name, List<String>.unmodifiable(_hops), _backups);
       if (!mounted) return;
       Navigator.of(context).pop(true);
     } catch (e) {
@@ -175,7 +205,7 @@ class _ChainEditorState extends State<ChainEditor> {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final canAdd = _hops.length < 8 &&
-        widget.available.any((item) => !_hops.contains(item));
+        widget.available.any((item) => !_used.contains(item));
 
     return Scaffold(
       appBar: AppBar(
@@ -355,10 +385,31 @@ class _ChainEditorState extends State<ChainEditor> {
                   book: widget.book, hops: [hopName], title: '测单节点'),
               if (index > 0)
                 PathProbeButton(
-                    book: widget.book,
+                    book: _pathBook,
                     hops: _hops.sublist(0, index + 1),
                     title: index == _hops.length - 1 ? '测整链' : '测前置路径'),
             ]),
+            if (widget.initialBackups != null) ...[
+              for (final backup in _backups[hopName] ?? <String>[])
+                ListTile(
+                    dense: true,
+                    title: Text(backup),
+                    leading: const Icon(Icons.alt_route),
+                    trailing: IconButton(
+                        tooltip: '移除备用节点',
+                        icon: const Icon(Icons.close),
+                        onPressed: () => setState(() {
+                              final members = _backups[hopName]!;
+                              members.remove(backup);
+                              if (members.isEmpty) _backups.remove(hopName);
+                            }))),
+              TextButton.icon(
+                  icon: const Icon(Icons.add),
+                  label: const Text('添加备用节点'),
+                  onPressed: widget.available.any((n) => !_used.contains(n))
+                      ? () => _addBackup(index)
+                      : null),
+            ],
             const Divider(height: 12, thickness: 0.5),
             Row(
               mainAxisAlignment: MainAxisAlignment.end,
@@ -467,8 +518,7 @@ class _NodeSelectionSheetState extends State<_NodeSelectionSheet> {
     final transport = widget.nodeTransports[node] ?? '';
     return ListTile(
       dense: true,
-      title: Text(
-          transport.isEmpty ? node : '$node [$transport]',
+      title: Text(transport.isEmpty ? node : '$node [$transport]',
           style: TextStyle(
             fontWeight: current ? FontWeight.bold : FontWeight.normal,
             color: current ? Theme.of(context).colorScheme.primary : null,

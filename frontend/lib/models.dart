@@ -1147,13 +1147,13 @@ String chinaDirectLabel(ChinaDirect china) {
   if (china.refreshing) return '正在获取国内地址列表…';
   if (!china.available) {
     return china.error.isEmpty
-        ? '国内地址列表还没有获取：没被订阅规则点名的国内网站会被送到节点上'
+        ? '国内地址列表还没有获取，当前无法按国内 IP 地址段分流'
         : '国内直连未生效：${china.error}';
   }
   if (!china.active) {
     return '国内直连已就绪（${china.entries} 条地址段），重新连接后生效';
   }
-  return '国内直连已启用：${china.entries} 条地址段，未被订阅规则点名的国内网站直连';
+  return '国内直连已启用：${china.entries} 条地址段，命中地址段的 TCP 连接按规则优先级直连';
 }
 
 class WintunStatus {

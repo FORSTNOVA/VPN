@@ -93,7 +93,7 @@ extension _ConnectPage on _HomePageState {
       connected: _connected,
       busy: _busy,
       port: _port,
-      probe: hops.isEmpty ? const Tooltip(message: '选择具体节点或连接后可测当前路径', child: TextButton(onPressed: null, child: Text('测试真连接延迟'))) : PathProbeButton(book: _probes, hops: hops, title: '测试真连接延迟'),
+      probe: hops.isEmpty ? const Tooltip(message: '选择具体节点或连接后可测当前路径', child: TextButton(onPressed: null, child: Text('测试真连接延迟'))) : PathProbeButton(book: _probes.forBackups(_chainBackups?[_chainName] ?? {}), hops: hops, title: '测试真连接延迟'),
       onToggle: _toggleConnection,
       statusDetail: protectionStateDetail(
         connected: _connected,
@@ -406,6 +406,8 @@ extension _ConnectPage on _HomePageState {
       Expanded(
         child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           Text(chinaDirectLabel(china), style: Tokens.small),
+          if (china.available && china.error.isNotEmpty)
+            Text('更新失败：${china.error}', style: Tokens.hint),
           if (china.available && china.updatedAt.isNotEmpty)
             Text(
               '更新于 ${dayLabel(china.updatedAt)}'

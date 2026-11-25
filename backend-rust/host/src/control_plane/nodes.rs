@@ -46,7 +46,7 @@ pub async fn probe_proxy_latency(
 }
 
 pub async fn probe_chain_latency(
-    _persisted: &PersistedState,
+    backups: &std::collections::BTreeMap<String, Vec<String>>,
     proxies: &[Value],
     hops: &[String],
     protect: Option<smartvpn_engine::dialer::SocketProtectHook>,
@@ -62,36 +62,13 @@ pub async fn probe_chain_latency(
             .ok_or_else(|| format!("node not found: {}", hops[0]))?;
         return probe_proxy_latency(p, protect, timeout_ms).await;
     }
-    let mut cloned_proxies = Vec::new();
-    let mut prev_name: Option<String> = None;
-    for (idx, hop_name) in hops.iter().enumerate() {
-        let base = proxies
-            .iter()
-            .find(|p| p.get("name").and_then(|n| n.as_str()) == Some(hop_name.as_str()))
-            .ok_or_else(|| format!("hop not found: {hop_name}"))?;
-        let mut clone = base.clone();
-        let alias = format!("__probe_hop_{idx}");
-        if let Some(obj) = clone.as_object_mut() {
-            obj.insert("name".into(), json!(alias));
-            if let Some(prev) = &prev_name {
-                obj.insert("dialer-proxy".into(), json!(prev));
-            }
-        }
-        cloned_proxies.push(clone);
-        prev_name = Some(alias);
-    }
-    let last_alias = prev_name.unwrap();
-    let yaml_doc = json!({
-        "mixed-port": 0,
-        "proxies": cloned_proxies,
-        "proxy-groups": [{
-            "name": "SmartVPN",
-            "type": "select",
-            "proxies": [last_alias]
-        }],
-        "rules": ["MATCH,SmartVPN"]
+    let mut probe = PersistedState::default();
+    probe.active_chain_id = "probe".into();
+    probe.chains.push(super::state::ProxyChain {
+        id: probe.active_chain_id.clone(), name: "测速".into(),
+        hops: hops.to_vec(), backups: backups.clone(),
     });
-    let yaml = serde_yaml_ng::to_string(&yaml_doc).map_err(|e| e.to_string())?;
+    let yaml = super::tunnel::build_engine_yaml(&probe, proxies)?;
     dial_and_measure_yaml(&yaml, protect, timeout_ms).await
 }
 

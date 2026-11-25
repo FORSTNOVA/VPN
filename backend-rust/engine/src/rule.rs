@@ -7,6 +7,7 @@ pub enum Rule {
     DomainKeyword(String),
     IpCidr { addr: IpAddr, prefix: u8 },
     ProcessName(String),
+    China,
     Match,
 }
 
@@ -25,18 +26,24 @@ pub struct RuleContext<'a> {
 }
 
 #[derive(Clone)]
-pub struct RuleSet(Vec<(Rule, RuleAction)>);
+pub struct RuleSet {
+    rules: Vec<(Rule, RuleAction)>,
+    pub(crate) china: std::sync::Arc<crate::domestic::Ranges>,
+}
 
 impl RuleSet {
     pub fn from_lines(lines: &[&str]) -> io::Result<Self> {
-        Self::parse(lines, false)
+        Self::parse(lines, false, Default::default())
     }
 
-    pub(crate) fn from_clash_lines(lines: &[&str]) -> io::Result<Self> {
-        Self::parse(lines, true)
+    pub(crate) fn from_clash_lines(
+        lines: &[&str],
+        china: crate::domestic::Ranges,
+    ) -> io::Result<Self> {
+        Self::parse(lines, true, china)
     }
 
-    fn parse(lines: &[&str], clash: bool) -> io::Result<Self> {
+    fn parse(lines: &[&str], clash: bool, china: crate::domestic::Ranges) -> io::Result<Self> {
         let mut rules = Vec::new();
         for (i, line) in lines.iter().enumerate() {
             let invalid = || {
@@ -61,10 +68,13 @@ impl RuleSet {
                             "fc00::/7",
                             "fe80::/10",
                         ] {
-                            rules.extend(Self::from_lines(&[&format!("IP-CIDR,{cidr},{tag}")])?.0);
+                            rules.extend(
+                                Self::from_lines(&[&format!("IP-CIDR,{cidr},{tag}")])?.rules,
+                            );
                         }
                         continue;
                     }
+                    ["GEOIP", "CN", _] if !china.is_empty() => {}
                     ["GEOIP", "LAN", ..] => return Err(invalid()),
                     ["MATCH" | "DOMAIN" | "DOMAIN-SUFFIX" | "DOMAIN-KEYWORD" | "PROCESS-NAME"
                     | "IP-CIDR" | "IP-CIDR6", ..] => {}
@@ -75,6 +85,7 @@ impl RuleSet {
                 return Err(invalid());
             }
             let (rule, tag) = match parts.as_slice() {
+                ["GEOIP", "CN", tag] => (Rule::China, tag),
                 ["MATCH", tag] => (Rule::Match, tag),
                 ["DOMAIN", v, tag] => (Rule::Domain(v.to_ascii_lowercase()), tag),
                 ["DOMAIN-SUFFIX", v, tag] => (Rule::DomainSuffix(v.to_ascii_lowercase()), tag),
@@ -103,11 +114,14 @@ impl RuleSet {
                 },
             ));
         }
-        Ok(Self(rules))
+        Ok(Self {
+            rules,
+            china: std::sync::Arc::new(china),
+        })
     }
 
     pub(crate) fn needs_process_name(&self) -> bool {
-        self.0
+        self.rules
             .iter()
             .any(|(rule, _)| matches!(rule, Rule::ProcessName(_)))
     }
@@ -116,7 +130,7 @@ impl RuleSet {
         &mut self,
         mut resolve: impl FnMut(&str) -> io::Result<RuleAction>,
     ) -> io::Result<()> {
-        for (_, action) in &mut self.0 {
+        for (_, action) in &mut self.rules {
             if let RuleAction::Proxy(tag) = action {
                 *action = resolve(tag)?;
             }
@@ -125,29 +139,36 @@ impl RuleSet {
     }
 
     pub fn evaluate(&self, ctx: &RuleContext<'_>) -> Option<&RuleAction> {
-        let domain = ctx.domain.map(str::to_ascii_lowercase);
-        self.0
-            .iter()
-            .find(|(rule, _)| match rule {
-                Rule::Domain(v) => domain.as_ref() == Some(v),
-                Rule::DomainSuffix(v) => domain.as_ref().is_some_and(|d| {
-                    d.strip_suffix(v)
-                        .is_some_and(|p| p.is_empty() || p.ends_with('.'))
-                }),
-                Rule::DomainKeyword(v) => domain.as_ref().is_some_and(|d| d.contains(v)),
-                Rule::IpCidr { addr, prefix } => match (*addr, ctx.ip) {
-                    (IpAddr::V4(a), Some(IpAddr::V4(b))) => {
-                        (u32::from(a) ^ u32::from(b)).leading_zeros() >= u32::from(*prefix)
-                    }
-                    (IpAddr::V6(a), Some(IpAddr::V6(b))) => {
-                        (u128::from(a) ^ u128::from(b)).leading_zeros() >= u32::from(*prefix)
-                    }
-                    _ => false,
-                },
-                Rule::ProcessName(v) => ctx.process_name.is_some_and(|p| process_matches(p, v)),
-                Rule::Match => true,
-            })
+        self.match_rule(ctx, ctx.ip.is_some_and(|ip| self.china.contains(ip)))
             .map(|(_, action)| action)
+    }
+
+    pub(crate) fn match_rule(
+        &self,
+        ctx: &RuleContext<'_>,
+        china_matches: bool,
+    ) -> Option<&(Rule, RuleAction)> {
+        let domain = ctx.domain.map(str::to_ascii_lowercase);
+        self.rules.iter().find(|(rule, _)| match rule {
+            Rule::Domain(v) => domain.as_ref() == Some(v),
+            Rule::DomainSuffix(v) => domain.as_ref().is_some_and(|d| {
+                d.strip_suffix(v)
+                    .is_some_and(|p| p.is_empty() || p.ends_with('.'))
+            }),
+            Rule::DomainKeyword(v) => domain.as_ref().is_some_and(|d| d.contains(v)),
+            Rule::IpCidr { addr, prefix } => match (*addr, ctx.ip) {
+                (IpAddr::V4(a), Some(IpAddr::V4(b))) => {
+                    (u32::from(a) ^ u32::from(b)).leading_zeros() >= u32::from(*prefix)
+                }
+                (IpAddr::V6(a), Some(IpAddr::V6(b))) => {
+                    (u128::from(a) ^ u128::from(b)).leading_zeros() >= u32::from(*prefix)
+                }
+                _ => false,
+            },
+            Rule::ProcessName(v) => ctx.process_name.is_some_and(|p| process_matches(p, v)),
+            Rule::China => china_matches,
+            Rule::Match => true,
+        })
     }
 }
 

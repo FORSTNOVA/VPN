@@ -22,7 +22,7 @@ void main() {
                 'measured': 0
               };
             }),
-            save: (name, hops) async {
+            save: (name, hops, backups) async {
               saved = hops;
             })));
     await tester.tap(find.text('追加下一跳节点'));
@@ -37,6 +37,38 @@ void main() {
     await tester.pumpAndSettle();
     expect(saved, ['entry', 'exit']);
   });
+  testWidgets('backup stays with its hop when reordered and saved',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(1000, 1200));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    Map<String, List<String>>? stored;
+    List<String>? order;
+    await tester.pumpWidget(MaterialApp(
+        home: ChainEditor(
+      available: const ['entry', 'exit', 'spare'],
+      initialHops: const ['entry', 'exit'],
+      initialName: 'chain',
+      initialBackups: const {},
+      book: ProbeBook((_) => throw StateError('unexpected probe')),
+      save: (_, hops, backups) async {
+        order = hops;
+        stored = backups;
+      },
+    )));
+    await tester.tap(find.text('添加备用节点').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('spare'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('下移').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+    expect(order, ['exit', 'entry']);
+    expect(stored, {
+      'entry': ['spare']
+    });
+  });
+
   Future<void> openPicker(WidgetTester tester, {double width = 960}) async {
     await tester.binding.setSurfaceSize(Size(width, 900));
     addTearDown(() => tester.binding.setSurfaceSize(null));
@@ -59,7 +91,7 @@ void main() {
         'Kyoto': 'East'
       },
       book: ProbeBook((_) => throw StateError('Unexpected probe')),
-      save: (_, __) async {},
+      save: (_, __, ___) async {},
     )));
     await tester.tap(find.text('追加下一跳节点'));
     await tester.pumpAndSettle();
