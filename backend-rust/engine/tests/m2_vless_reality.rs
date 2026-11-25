@@ -2,7 +2,7 @@ use std::{net::SocketAddr, sync::Arc};
 
 use aes_gcm::{
     aead::{Aead, KeyInit, Payload},
-    Aes128Gcm, Nonce,
+    Aes128Gcm, Aes256Gcm, Nonce,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use bytes::{BufMut, Bytes, BytesMut};
@@ -19,7 +19,7 @@ use smartvpn_engine::{
     protocol::vless::{VlessConfig, VlessDialer, VlessNetwork, VlessSecurity},
     transport::{
         grpc::GrpcConfig,
-        reality::{derive_reality_auth_key, RealityConfig},
+        reality::RealityConfig,
         tls::{ensure_crypto_provider, TlsConfig},
         ws::WsConfig,
     },
@@ -284,9 +284,17 @@ fn open_tls13(key: &[u8], iv: &[u8; 12], seq: &mut u64, hdr: &[u8; 5], ct: &[u8]
     (rt, plain)
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum ServerProof {
+    Valid,
+    BadCertificateMac,
+    BadTranscriptSignature,
+}
+
 async fn spawn_reality_vless_vision_server(
     server_priv: StaticSecret,
     expected_sid: [u8; 4],
+    proof_case: ServerProof,
     uuid: [u8; 16],
 ) -> SocketAddr {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -328,10 +336,12 @@ async fn spawn_reality_vless_vision_server(
 
                 // Verify Reality session_id using server_priv
                 let auth_shared = server_priv.diffie_hellman(&client_pub);
-                let auth_key = derive_reality_auth_key(auth_shared.as_bytes(), &client_random);
+                let mut auth_key = [0u8; 32];
+                Hkdf::<Sha256>::new(Some(&client_random[..20]), auth_shared.as_bytes())
+                    .expand(b"REALITY", &mut auth_key).unwrap();
                 let mut ch_zero = ch_hs.clone();
                 ch_zero[4 + 35..4 + 67].fill(0);
-                let plain_sid = Aes128Gcm::new_from_slice(&auth_key)
+                let plain_sid = Aes256Gcm::new_from_slice(&auth_key)
                     .unwrap()
                     .decrypt(
                         Nonce::from_slice(&client_random[20..32]),
@@ -391,6 +401,38 @@ async fn spawn_reality_vless_vision_server(
                 transcript.update(&ee);
                 let ee_rec = seal_tls13(&s_hs_key, &s_hs_iv, &mut s_hs_seq, 0x16, &ee);
                 s.write_all(&ee_rec).await.unwrap();
+
+                let signing_key = rcgen::KeyPair::generate_for(&rcgen::PKCS_ED25519).unwrap();
+                let cert = rcgen::CertificateParams::new(vec!["localhost".into()]).unwrap()
+                    .self_signed(&signing_key).unwrap();
+                let mut der = cert.der().to_vec();
+                let sig_start = der.len() - 64;
+                let mut mac = <Hmac<sha2::Sha512> as Mac>::new_from_slice(&auth_key).unwrap();
+                mac.update(signing_key.public_key_raw());
+                der[sig_start..].copy_from_slice(&mac.finalize().into_bytes());
+                if proof_case == ServerProof::BadCertificateMac { der[sig_start] ^= 1; }
+                let mut cert_body = vec![0];
+                cert_body.extend_from_slice(&((der.len()+5) as u32).to_be_bytes()[1..]);
+                cert_body.extend_from_slice(&(der.len() as u32).to_be_bytes()[1..]);
+                cert_body.extend_from_slice(&der);
+                cert_body.extend_from_slice(&[0,0]);
+                let mut cert_msg = vec![0x0b];
+                cert_msg.extend_from_slice(&(cert_body.len() as u32).to_be_bytes()[1..]);
+                cert_msg.extend_from_slice(&cert_body);
+                transcript.update(&cert_msg);
+                let mut signed = vec![0x20; 64];
+                signed.extend_from_slice(b"TLS 1.3, server CertificateVerify\0");
+                signed.extend_from_slice(&transcript.clone().finalize());
+                let ed = ring::signature::Ed25519KeyPair::from_pkcs8(&signing_key.serialize_der()).unwrap();
+                let mut proof = vec![0x0f,0,0,68,8,7,0,64];
+                proof.extend_from_slice(ed.sign(&signed).as_ref());
+                if proof_case == ServerProof::BadTranscriptSignature { proof[8] ^= 1; }
+                transcript.update(&proof);
+                cert_msg.extend_from_slice(&proof);
+                let cert_rec = seal_tls13(&s_hs_key, &s_hs_iv, &mut s_hs_seq, 0x16, &cert_msg);
+                s.write_all(&cert_rec).await.unwrap();
+
+                if proof_case != ServerProof::Valid { return; }
 
                 let pre_fin: [u8; 32] = transcript.clone().finalize().into();
                 let s_fin_key = hkdf_expand_label(&s_hs_sec, b"finished", &[], 32);
@@ -527,25 +569,41 @@ async fn vless_tls_grpc_round_trip() {
     assert_eq!(&got, msg);
 }
 
-#[tokio::test]
-async fn vless_reality_vision_round_trip() {
-    let echo = spawn_echo_target().await;
+async fn reality_dialer(proof_case: ServerProof) -> VlessDialer {
     let uuid = VlessConfig::parse_uuid("99999999-8888-7777-6666-555555555555").unwrap();
     let srv_priv = StaticSecret::random_from_rng(rand::thread_rng());
     let srv_pub = PublicKey::from(&srv_priv);
     let pbk_b64 = URL_SAFE_NO_PAD.encode(srv_pub.as_bytes());
     let sid = [0xab, 0xcd, 0xef, 0x01];
-    let srv_addr = spawn_reality_vless_vision_server(srv_priv, sid, uuid).await;
+    let srv_addr = spawn_reality_vless_vision_server(srv_priv, sid, proof_case, uuid).await;
 
     let reality_cfg = RealityConfig::from_strings("www.example.com", &pbk_b64, "abcdef01").unwrap();
-    let dialer = VlessDialer::new(VlessConfig {
+    VlessDialer::new(VlessConfig {
         server: TargetAddr::Ip(srv_addr),
         uuid,
         flow: Some("xtls-rprx-vision".into()),
         security: VlessSecurity::Reality(reality_cfg),
         network: VlessNetwork::Tcp,
-    });
+    })
+}
 
+#[tokio::test]
+async fn reality_rejects_unauthenticated_server() {
+    let target = TargetAddr::Ip("127.0.0.1:443".parse().unwrap());
+    for (case, error) in [
+        (ServerProof::BadCertificateMac, "invalid REALITY server certificate"),
+        (ServerProof::BadTranscriptSignature, "invalid REALITY CertificateVerify"),
+    ] {
+        let dialer = reality_dialer(case).await;
+        let err = dialer.dial_tcp(&target).await.err().expect("invalid proof accepted");
+        assert_eq!(err.to_string(), error);
+    }
+}
+
+#[tokio::test]
+async fn vless_reality_vision_round_trip() {
+    let echo = spawn_echo_target().await;
+    let dialer = reality_dialer(ServerProof::Valid).await;
     let mut stream = dialer.dial_tcp(&TargetAddr::Ip(echo)).await.unwrap();
     let msg = b"hello vless reality vision!";
     stream.write_all(msg).await.unwrap();

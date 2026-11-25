@@ -3,6 +3,7 @@
 use std::{
     io,
     pin::Pin,
+    sync::{atomic::Ordering, Arc},
     task::{Context, Poll},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -18,10 +19,11 @@ use hkdf::{
     Hkdf,
 };
 use rand::RngCore;
-use sha2::{Digest, Sha256, Sha384};
+use sha2::{Digest, Sha256, Sha384, Sha512};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use x25519_dalek::{PublicKey, StaticSecret};
 
+use super::tls::SpliceFlags;
 use crate::dialer::BoxedStream;
 
 #[derive(Clone, Debug)]
@@ -40,7 +42,9 @@ impl RealityConfig {
     ) -> io::Result<Self> {
         let pbk_bytes = URL_SAFE_NO_PAD
             .decode(public_key_b64.trim().trim_end_matches('='))
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, format!("invalid pbk: {e}")))?;
+            .map_err(|e| {
+                io::Error::new(io::ErrorKind::InvalidInput, format!("invalid pbk: {e}"))
+            })?;
         let public_key: [u8; 32] = pbk_bytes.try_into().map_err(|_| {
             io::Error::new(io::ErrorKind::InvalidInput, "Reality pbk must be 32 bytes")
         })?;
@@ -62,7 +66,10 @@ impl RealityConfig {
 
 fn decode_hex(s: &str) -> io::Result<Vec<u8>> {
     if !s.len().is_multiple_of(2) {
-        return Err(io::Error::new(io::ErrorKind::InvalidInput, "odd hex length"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "odd hex length",
+        ));
     }
     let mut out = Vec::with_capacity(s.len() / 2);
     for i in (0..s.len()).step_by(2) {
@@ -73,17 +80,18 @@ fn decode_hex(s: &str) -> io::Result<Vec<u8>> {
     Ok(out)
 }
 
-/// Derives the 16-byte Reality `auth_key` from ECDH shared secret and ClientHello random[..20].
-pub fn derive_reality_auth_key(shared_secret: &[u8; 32], client_random: &[u8; 32]) -> [u8; 16] {
+/// Derives the 32-byte Reality `auth_key` from ECDH shared secret and ClientHello random[..20].
+pub fn derive_reality_auth_key(shared_secret: &[u8; 32], client_random: &[u8; 32]) -> [u8; 32] {
     let hk = Hkdf::<Sha256>::new(Some(&client_random[..20]), shared_secret);
-    let mut auth_key = [0u8; 16];
-    let _ = hk.expand(b"REALITY", &mut auth_key);
+    let mut auth_key = [0u8; 32];
+    hk.expand(b"REALITY", &mut auth_key)
+        .expect("32 bytes fit HKDF-SHA256");
     auth_key
 }
 
 /// Seals the 16-byte Reality metadata payload into a 32-byte TLS ClientHello `session_id`.
 pub fn seal_reality_session_id(
-    auth_key: &[u8; 16],
+    auth_key: &[u8; 32],
     client_random: &[u8; 32],
     short_id: &[u8],
     aad_handshake_msg: &[u8],
@@ -100,7 +108,7 @@ pub fn seal_reality_session_id(
     let copy_len = short_id.len().min(8);
     plain[8..8 + copy_len].copy_from_slice(&short_id[..copy_len]);
 
-    let cipher = Aes128Gcm::new_from_slice(auth_key)
+    let cipher = Aes256Gcm::new_from_slice(auth_key)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid Reality auth key"))?;
     let nonce = Nonce::from_slice(&client_random[20..32]);
     let sealed = cipher
@@ -113,7 +121,10 @@ pub fn seal_reality_session_id(
         )
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Reality seal failed"))?;
     sealed.try_into().map_err(|_| {
-        io::Error::new(io::ErrorKind::InvalidData, "Reality session_id must be 32 bytes")
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Reality session_id must be 32 bytes",
+        )
     })
 }
 
@@ -121,7 +132,7 @@ fn build_client_hello(
     client_random: &[u8; 32],
     eph_pub: &[u8; 32],
     cfg: &RealityConfig,
-    auth_key: &[u8; 16],
+    auth_key: &[u8; 32],
 ) -> io::Result<(Vec<u8>, Vec<u8>)> {
     let mut exts = Vec::new();
     // SNI (0x0000)
@@ -486,10 +497,71 @@ async fn read_tls_record(stream: &mut BoxedStream) -> io::Result<([u8; 5], Vec<u
     Ok((hdr, body))
 }
 
+// The REALITY leaf uses an Ed25519 SPKI and carries an HMAC-SHA512 of that
+// public key in the X.509 signature. CertificateVerify then proves possession.
+fn reality_leaf_key(body: &[u8], auth_key: &[u8; 32]) -> io::Result<[u8; 32]> {
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid REALITY server certificate",
+        )
+    };
+    let [0, a, b, c, x, y, z, rest @ ..] = body else {
+        return Err(invalid());
+    };
+    let list_len = u32::from_be_bytes([0, *a, *b, *c]) as usize;
+    let leaf_len = u32::from_be_bytes([0, *x, *y, *z]) as usize;
+    if list_len != body.len() - 4 || rest.len() < leaf_len + 2 {
+        return Err(invalid());
+    }
+    let der = rustls::pki_types::CertificateDer::from(&rest[..leaf_len]);
+    let cert = rustls::server::ParsedCertificate::try_from(&der).map_err(|_| invalid())?;
+    let spki = cert.subject_public_key_info();
+    // RFC 8410 DER prefix for a 32-byte Ed25519 public key.
+    let key: [u8; 32] = spki
+        .as_ref()
+        .strip_prefix(&[0x30, 0x2a, 0x30, 5, 6, 3, 0x2b, 0x65, 0x70, 3, 0x21, 0][..])
+        .ok_or_else(invalid)?
+        .try_into()
+        .map_err(|_| invalid())?;
+    let sig = der.as_ref().last_chunk::<67>().ok_or_else(invalid)?;
+    if sig[..3] != [3, 65, 0] {
+        return Err(invalid());
+    }
+    let mut mac =
+        <Hmac<Sha512> as Mac>::new_from_slice(auth_key).expect("HMAC accepts a 32-byte key");
+    mac.update(&key);
+    mac.verify_slice(&sig[3..]).map_err(|_| invalid())?;
+    Ok(key)
+}
+
+fn verify_server_proof(key: &[u8; 32], body: &[u8], transcript: &[u8]) -> io::Result<()> {
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid REALITY CertificateVerify",
+        )
+    };
+    let signature = body
+        .strip_prefix(&[0x08, 0x07, 0, 64][..])
+        .ok_or_else(invalid)?;
+    let mut signed = vec![0x20; 64];
+    signed.extend_from_slice(b"TLS 1.3, server CertificateVerify\0");
+    signed.extend_from_slice(transcript);
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, key)
+        .verify(&signed, signature)
+        .map_err(|_| invalid())
+}
+
 /// Performs a TLS 1.3 Reality client handshake over `stream` and returns an encrypted stream.
-pub async fn connect_reality(
+pub async fn connect_reality(stream: BoxedStream, cfg: &RealityConfig) -> io::Result<BoxedStream> {
+    connect_reality_with_splice(stream, cfg, None).await
+}
+
+pub(crate) async fn connect_reality_with_splice(
     mut stream: BoxedStream,
     cfg: &RealityConfig,
+    splice: Option<Arc<SpliceFlags>>,
 ) -> io::Result<BoxedStream> {
     let mut client_random = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut client_random);
@@ -533,6 +605,8 @@ pub async fn connect_reality(
 
     // Read encrypted server handshake messages until Finished (0x14)
     let mut hs_buf = Vec::new();
+    let mut server_key = None;
+    let mut server_verified = false;
     let mut server_finished_seen = false;
     while !server_finished_seen {
         let (hdr, rec) = read_tls_record(&mut stream).await?;
@@ -557,11 +631,36 @@ pub async fn connect_reality(
                 break;
             }
             let msg: Vec<u8> = hs_buf.drain(..4 + msg_len).collect();
+            match msg[0] {
+                0x08 if server_key.is_none() => (),
+                0x0b if server_key.is_none() => {
+                    server_key = Some(reality_leaf_key(&msg[4..], &auth_key)?)
+                }
+                0x0f if !server_verified => {
+                    let key = server_key.as_ref().ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "missing REALITY certificate")
+                    })?;
+                    verify_server_proof(key, &msg[4..], &transcript.current_hash(cipher))?;
+                    server_verified = true;
+                }
+                0x14 if server_verified => (),
+                _ => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "unexpected REALITY server handshake message",
+                    ))
+                }
+            }
             if msg[0] == 0x14 {
                 // Verify Server Finished
                 let pre_hash = transcript.current_hash(cipher);
-                let finished_key =
-                    hkdf_expand_label_for(cipher, &s_hs_secret, b"finished", &[], cipher.hash_len());
+                let finished_key = hkdf_expand_label_for(
+                    cipher,
+                    &s_hs_secret,
+                    b"finished",
+                    &[],
+                    cipher.hash_len(),
+                );
                 if !hmac_verify_for(cipher, &finished_key, &pre_hash, &msg[4..]) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
@@ -578,7 +677,12 @@ pub async fn connect_reality(
     }
 
     let server_fin_hash = transcript.current_hash(cipher);
-    let derived2 = derive_secret_for(cipher, &handshake_secret, b"derived", &empty_hash_for(cipher));
+    let derived2 = derive_secret_for(
+        cipher,
+        &handshake_secret,
+        b"derived",
+        &empty_hash_for(cipher),
+    );
     let master_secret = hkdf_extract_for(cipher, &derived2, &zeros);
     let c_app_secret = derive_secret_for(cipher, &master_secret, b"c ap traffic", &server_fin_hash);
     let s_app_secret = derive_secret_for(cipher, &master_secret, b"s ap traffic", &server_fin_hash);
@@ -600,6 +704,7 @@ pub async fn connect_reality(
 
     Ok(Box::new(RealityStream {
         inner: stream,
+        splice,
         read_keys: TrafficKeys::from_secret(cipher, &s_app_secret),
         write_keys: TrafficKeys::from_secret(cipher, &c_app_secret),
         read_hdr: [0u8; 5],
@@ -616,6 +721,7 @@ pub async fn connect_reality(
 }
 
 struct RealityStream {
+    splice: Option<Arc<SpliceFlags>>,
     inner: BoxedStream,
     read_keys: TrafficKeys,
     write_keys: TrafficKeys,
@@ -674,6 +780,13 @@ impl AsyncRead for RealityStream {
                 return Poll::Ready(Ok(()));
             }
             let this = self.as_mut().get_mut();
+            if this
+                .splice
+                .as_ref()
+                .is_some_and(|f| f.read.load(Ordering::Acquire))
+            {
+                return Pin::new(&mut this.inner).poll_read(cx, out);
+            }
             while this.read_hdr_filled < 5 {
                 let mut rb = ReadBuf::new(&mut this.read_hdr[this.read_hdr_filled..]);
                 match Pin::new(&mut this.inner).poll_read(cx, &mut rb) {
@@ -748,6 +861,13 @@ impl AsyncWrite for RealityStream {
                 Poll::Pending => return Poll::Pending,
             }
         }
+        if self
+            .splice
+            .as_ref()
+            .is_some_and(|f| f.write.load(Ordering::Acquire))
+        {
+            return Pin::new(&mut self.inner).poll_write(cx, buf);
+        }
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
@@ -774,6 +894,13 @@ impl AsyncWrite for RealityStream {
     }
 
     fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self
+            .splice
+            .as_ref()
+            .is_some_and(|f| f.write.load(Ordering::Acquire))
+        {
+            return Pin::new(&mut self.inner).poll_shutdown(cx);
+        }
         if self.write_buf.is_empty() {
             if let Ok(alert) = self.write_keys.seal_record(0x15, &[1, 0]) {
                 self.write_buf = alert;

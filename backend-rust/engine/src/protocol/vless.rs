@@ -19,7 +19,7 @@ use crate::{
     },
     transport::{
         grpc::{connect_grpc, GrpcConfig},
-        reality::{connect_reality, RealityConfig},
+        reality::{connect_reality_with_splice, RealityConfig},
         tls::{connect_tls, connect_tls_spliceable, SpliceFlags, TlsConfig},
         ws::{connect_ws, WsConfig},
     },
@@ -131,7 +131,10 @@ impl VlessDialer {
                 stream
             }
             VlessSecurity::Tls(tls) => connect_tls(raw, &host, tls).await?,
-            VlessSecurity::Reality(reality) => connect_reality(raw, reality).await?,
+            VlessSecurity::Reality(reality) => {
+                splice = is_vision.then(|| Arc::new(SpliceFlags::default()));
+                connect_reality_with_splice(raw, reality, splice.clone()).await?
+            }
         };
         let mut transport = match &cfg.network {
             VlessNetwork::Tcp => sec_stream,

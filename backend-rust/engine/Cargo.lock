@@ -1158,6 +1158,7 @@ dependencies = [
  "quinn",
  "rand 0.8.8",
  "rcgen",
+ "ring",
  "rustls",
  "serde",
  "serde_yaml_ng",

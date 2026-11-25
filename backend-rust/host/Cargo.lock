@@ -1380,6 +1380,7 @@ dependencies = [
  "md-5",
  "quinn",
  "rand 0.8.8",
+ "ring",
  "rustls",
  "serde",
  "serde_yaml_ng",
