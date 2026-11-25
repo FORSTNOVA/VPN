@@ -9,10 +9,13 @@ use std::{
 
 use rand::Rng;
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf, ReadHalf, WriteHalf};
 
 use crate::{
-    dialer::{BoxFuture, BoxedStream, DirectDialer, OutboundDialer, TargetAddr},
+    dialer::{
+        BoxFuture, BoxedStream, DirectDialer, OutboundDialer, OutboundUdpDialer, TargetAddr,
+        UdpPacketSocket,
+    },
     transport::tls::{connect_tls, TlsConfig},
 };
 
@@ -71,7 +74,13 @@ fn push_frame(out: &mut Vec<u8>, cmd: u8, sid: u32, data: &[u8]) -> io::Result<(
     Ok(())
 }
 
+const UOT_MAGIC_ADDRESS: &str = "sp.v2.udp-over-tcp.arpa";
+
 impl OutboundDialer for AnyTlsDialer {
+    fn udp(&self) -> Option<&dyn OutboundUdpDialer> {
+        Some(self)
+    }
+
     fn dial_tcp<'a>(&'a self, target: &'a TargetAddr) -> BoxFuture<'a, io::Result<BoxedStream>> {
         Box::pin(async move {
             let raw = self.underlay.dial_tcp(&self.cfg.server).await?;
@@ -325,5 +334,150 @@ impl AsyncWrite for AnyTlsStream {
             Poll::Ready(Ok(())) => Pin::new(&mut self.inner).poll_shutdown(cx),
             other => other,
         }
+    }
+}
+
+impl OutboundUdpDialer for AnyTlsDialer {
+    fn dial_udp(&self) -> BoxFuture<'_, io::Result<Box<dyn UdpPacketSocket>>> {
+        Box::pin(async move {
+            let magic = TargetAddr::Domain(UOT_MAGIC_ADDRESS.to_string(), 0);
+            let stream = self.dial_tcp(&magic).await?;
+            Ok(Box::new(AnyTlsUdpSocket {
+                stream: tokio::sync::Mutex::new(Some(stream)),
+                state: tokio::sync::Mutex::new(None),
+                reader: tokio::sync::Mutex::new(None),
+                writer: tokio::sync::Mutex::new(None),
+                ready: tokio::sync::Notify::new(),
+            }) as Box<dyn UdpPacketSocket>)
+        })
+    }
+}
+
+struct AnyTlsUdpSocket {
+    stream: tokio::sync::Mutex<Option<BoxedStream>>,
+    state: tokio::sync::Mutex<Option<TargetAddr>>,
+    reader: tokio::sync::Mutex<Option<ReadHalf<BoxedStream>>>,
+    writer: tokio::sync::Mutex<Option<WriteHalf<BoxedStream>>>,
+    ready: tokio::sync::Notify,
+}
+
+impl UdpPacketSocket for AnyTlsUdpSocket {
+    fn send_to<'a>(
+        &'a self,
+        payload: &'a [u8],
+        target: &'a TargetAddr,
+    ) -> BoxFuture<'a, io::Result<usize>> {
+        Box::pin(async move {
+            let mut w_guard = self.writer.lock().await;
+            if w_guard.is_none() {
+                let mut stream = self.stream.lock().await.take().ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "AnyTLS UoT stream already consumed")
+                })?;
+                let mut hdr = Vec::with_capacity(64);
+                hdr.push(0x01); // isConnect = true
+                target.write_socks_addr(&mut hdr)?;
+                stream.write_all(&hdr).await?;
+                stream.flush().await?;
+                let (r, w) = tokio::io::split(stream);
+                *self.state.lock().await = Some(target.clone());
+                *self.reader.lock().await = Some(r);
+                *w_guard = Some(w);
+                self.ready.notify_waiters();
+            }
+            let len = u16::try_from(payload.len())
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "UDP payload too large"))?;
+            let mut pkt = Vec::with_capacity(2 + payload.len());
+            pkt.extend_from_slice(&len.to_be_bytes());
+            pkt.extend_from_slice(payload);
+            let w = w_guard.as_mut().expect("writer initialized");
+            w.write_all(&pkt).await?;
+            w.flush().await?;
+            Ok(payload.len())
+        })
+    }
+
+    fn recv_from<'a>(
+        &'a self,
+        buf: &'a mut [u8],
+    ) -> BoxFuture<'a, io::Result<(usize, TargetAddr)>> {
+        Box::pin(async move {
+            loop {
+                {
+                    let mut r_guard = self.reader.lock().await;
+                    if let Some(r) = r_guard.as_mut() {
+                        let mut len_buf = [0u8; 2];
+                        r.read_exact(&mut len_buf).await?;
+                        let len = u16::from_be_bytes(len_buf) as usize;
+                        if len > buf.len() {
+                            let mut discard = vec![0u8; len];
+                            r.read_exact(&mut discard).await?;
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                "receive buffer too small for AnyTLS UoT packet",
+                            ));
+                        }
+                        r.read_exact(&mut buf[..len]).await?;
+                        let peer = self
+                            .state
+                            .lock()
+                            .await
+                            .clone()
+                            .unwrap_or_else(|| TargetAddr::Ip(([0, 0, 0, 0], 0).into()));
+                        return Ok((len, peer));
+                    }
+                }
+                self.ready.notified().await;
+            }
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn anytls_uot_connected_roundtrip() {
+        let (client_io, mut server_io) = tokio::io::duplex(4096);
+        let sock = AnyTlsUdpSocket {
+            stream: tokio::sync::Mutex::new(Some(Box::new(client_io) as BoxedStream)),
+            state: tokio::sync::Mutex::new(None),
+            reader: tokio::sync::Mutex::new(None),
+            writer: tokio::sync::Mutex::new(None),
+            ready: tokio::sync::Notify::new(),
+        };
+        let target = TargetAddr::Ip("1.2.3.4:8443".parse().unwrap());
+
+        let srv = tokio::spawn(async move {
+            let mut hdr = [0u8; 8];
+            server_io.read_exact(&mut hdr).await.unwrap();
+            assert_eq!(hdr[0], 0x01); // isConnect
+            assert_eq!(hdr[1], 0x01); // SOCKS5 IPv4 ATYP
+            assert_eq!(&hdr[2..6], &[1, 2, 3, 4]);
+            assert_eq!(u16::from_be_bytes([hdr[6], hdr[7]]), 8443);
+
+            for expected in [b"hello".as_slice(), b"world-packet".as_slice()] {
+                let mut l = [0u8; 2];
+                server_io.read_exact(&mut l).await.unwrap();
+                let n = u16::from_be_bytes(l) as usize;
+                let mut data = vec![0u8; n];
+                server_io.read_exact(&mut data).await.unwrap();
+                assert_eq!(data, expected);
+                server_io.write_all(&l).await.unwrap();
+                server_io.write_all(&data).await.unwrap();
+            }
+            server_io.flush().await.unwrap();
+        });
+
+        assert_eq!(sock.send_to(b"hello", &target).await.unwrap(), 5);
+        assert_eq!(sock.send_to(b"world-packet", &target).await.unwrap(), 12);
+        let mut buf = [0u8; 64];
+        let (n1, p1) = sock.recv_from(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n1], b"hello");
+        assert_eq!(p1, target);
+        let (n2, p2) = sock.recv_from(&mut buf).await.unwrap();
+        assert_eq!(&buf[..n2], b"world-packet");
+        assert_eq!(p2, target);
+        srv.await.unwrap();
     }
 }

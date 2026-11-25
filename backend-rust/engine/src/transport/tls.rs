@@ -2,7 +2,12 @@
 
 use std::{
     io,
-    sync::{Arc, Once},
+    pin::Pin,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Once,
+    },
+    task::{ready, Context, Poll},
 };
 
 use rustls::{
@@ -10,7 +15,8 @@ use rustls::{
     pki_types::{CertificateDer, ServerName, UnixTime},
     ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
 };
-use tokio_rustls::TlsConnector;
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+use tokio_rustls::{client::TlsStream, TlsConnector};
 
 use crate::dialer::BoxedStream;
 
@@ -106,6 +112,14 @@ pub async fn connect_tls(
     server_host: &str,
     cfg: &TlsConfig,
 ) -> io::Result<BoxedStream> {
+    Ok(Box::new(handshake(stream, server_host, cfg).await?))
+}
+
+async fn handshake<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: S,
+    server_host: &str,
+    cfg: &TlsConfig,
+) -> io::Result<TlsStream<S>> {
     let sni_host = cfg
         .sni
         .as_deref()
@@ -121,9 +135,151 @@ pub async fn connect_tls(
 
     let client_cfg = client_config(cfg);
     let connector = TlsConnector::from(Arc::new(client_cfg));
-    let tls_stream = connector
+    connector
         .connect(server_name, stream)
         .await
-        .map_err(|err| io::Error::new(io::ErrorKind::ConnectionAborted, err))?;
-    Ok(Box::new(tls_stream) as BoxedStream)
+        .map_err(|err| io::Error::new(io::ErrorKind::ConnectionAborted, err))
+}
+
+#[derive(Default)]
+pub(crate) struct SpliceFlags {
+    pub read: AtomicBool,
+    pub write: AtomicBool,
+}
+
+/// Limit each rustls input read to the current TLS record. A raw inner record
+/// can immediately follow the last encrypted Vision frame in the same TCP read.
+struct RecordIo {
+    raw: BoxedStream,
+    header: [u8; 5],
+    header_len: usize,
+    payload_left: usize,
+}
+
+impl AsyncRead for RecordIo {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        out: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.as_mut().get_mut();
+        let header = this.header_len < 5;
+        let limit = if header {
+            5 - this.header_len
+        } else {
+            this.payload_left
+        };
+        let mut part = ReadBuf::new(out.initialize_unfilled_to(limit.min(out.remaining())));
+        ready!(Pin::new(&mut this.raw).poll_read(cx, &mut part))?;
+        let bytes = part.filled();
+        let n = bytes.len();
+        if header {
+            this.header[this.header_len..this.header_len + n].copy_from_slice(bytes);
+            this.header_len += n;
+            if this.header_len == 5 {
+                this.payload_left = u16::from_be_bytes([this.header[3], this.header[4]]) as usize;
+            }
+        } else {
+            this.payload_left -= n;
+        }
+        if this.header_len == 5 && this.payload_left == 0 {
+            this.header_len = 0;
+        }
+        out.advance(n);
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncWrite for RecordIo {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        Pin::new(&mut self.raw).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.raw).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.raw).poll_shutdown(cx)
+    }
+}
+
+struct SpliceTlsStream {
+    tls: TlsStream<RecordIo>,
+    flags: Arc<SpliceFlags>,
+}
+
+pub(crate) async fn connect_tls_spliceable(
+    raw: BoxedStream,
+    host: &str,
+    cfg: &TlsConfig,
+    flags: Arc<SpliceFlags>,
+) -> io::Result<BoxedStream> {
+    let io = RecordIo {
+        raw,
+        header: [0; 5],
+        header_len: 0,
+        payload_left: 0,
+    };
+    Ok(Box::new(SpliceTlsStream {
+        tls: handshake(io, host, cfg).await?,
+        flags,
+    }))
+}
+
+impl AsyncRead for SpliceTlsStream {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        out: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        if !self.flags.read.load(Ordering::Acquire) {
+            return Pin::new(&mut self.tls).poll_read(cx, out);
+        }
+        let (io, conn) = self.tls.get_mut();
+        match conn.reader().into_first_chunk() {
+            Ok(bytes) if !bytes.is_empty() => {
+                let n = bytes.len().min(out.remaining());
+                out.put_slice(&bytes[..n]);
+                std::io::BufRead::consume(&mut conn.reader(), n);
+                return Poll::Ready(Ok(()));
+            }
+            Ok(_) => (),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => (),
+            Err(e) => return Poll::Ready(Err(e)),
+        }
+        Pin::new(&mut io.raw).poll_read(cx, out)
+    }
+}
+
+impl AsyncWrite for SpliceTlsStream {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if self.flags.write.load(Ordering::Acquire) {
+            if self.tls.get_ref().1.wants_write() {
+                ready!(Pin::new(&mut self.tls).poll_flush(cx))?;
+            }
+            return Pin::new(&mut self.tls.get_mut().0.raw).poll_write(cx, buf);
+        }
+        Pin::new(&mut self.tls).poll_write(cx, buf)
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Pin::new(&mut self.tls).poll_flush(cx)
+    }
+
+    fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        if self.flags.write.load(Ordering::Acquire) {
+            ready!(self.as_mut().poll_flush(cx))?;
+            return Pin::new(&mut self.tls.get_mut().0.raw).poll_shutdown(cx);
+        }
+        Pin::new(&mut self.tls).poll_shutdown(cx)
+    }
 }
