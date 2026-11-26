@@ -17,6 +17,12 @@ Future<List<_Group>?> editAppGroups(BuildContext context, List<_Group> current,
           context: context,
           builder: (_) => _GroupEditor(
             group: index == null ? null : draft[index],
+            occupied: {
+              for (var i = 0; i < draft.length; i++)
+                if (i != index)
+                  for (final app in (draft[i]['apps'] as List).cast<String>())
+                    app: draft[i]['name'] as String,
+            },
             nodes: nodes,
             chains: chains,
             android: android,
@@ -81,11 +87,13 @@ Future<List<_Group>?> editAppGroups(BuildContext context, List<_Group> current,
 
 class _GroupEditor extends StatefulWidget {
   final _Group? group;
+  final Map<String, String> occupied;
   final List<String> nodes;
   final Map<String, String>? chains;
   final bool android;
   const _GroupEditor(
       {required this.group,
+      required this.occupied,
       required this.nodes,
       required this.chains,
       required this.android});
@@ -131,6 +139,21 @@ class _GroupEditorState extends State<_GroupEditor> {
   bool invalid(String value) =>
       value.trim().isEmpty || value.contains(RegExp(r'[\x00-\x1f\x7f,*]'));
 
+  String? conflict(String app) {
+    String key(String s) => s.trim().toLowerCase().replaceAll('\\', '/');
+    final a = key(app);
+    for (final other in widget.occupied.entries) {
+      final b = key(other.key);
+      if (a == b ||
+          (!widget.android &&
+              ((!a.contains('/') && b.split('/').last == a) ||
+                  (!b.contains('/') && a.split('/').last == b)))) {
+        return '$app 已属于分组「${other.value}」';
+      }
+    }
+    return null;
+  }
+
   Future<void> pick() async {
     setState(() => pickerError = null);
     try {
@@ -142,7 +165,10 @@ class _GroupEditorState extends State<_GroupEditor> {
         final selected = await showDialog<List<String>>(
           context: context,
           builder: (_) => InstalledGamePicker(
-            apps: rows.map((row) => Map<String, String>.from(row)).toList(),
+            apps: rows
+                .map((row) => Map<String, String>.from(row))
+                .where((row) => conflict(row['package']!) == null)
+                .toList(),
             initial: entries
                 .map((s) => s.trim())
                 .where((s) => s.isNotEmpty)
@@ -154,8 +180,12 @@ class _GroupEditorState extends State<_GroupEditor> {
         final path = await const MethodChannel('smartvpn/lifecycle')
             .invokeMethod<String>('pickGame');
         if (mounted && path != null) {
-          final exe = path.split(RegExp(r'[/\\]')).last;
-          apps.text = [...entries, exe].join('\n');
+          final message = conflict(path);
+          if (message != null) {
+            setState(() => pickerError = message);
+          } else {
+            apps.text = [...entries, path].join('\n');
+          }
         }
       }
     } on PlatformException catch (e) {
@@ -262,12 +292,17 @@ class _GroupEditorState extends State<_GroupEditor> {
                         minLines: 3,
                         maxLines: 6,
                         decoration: InputDecoration(
-                            labelText:
-                                widget.android ? '应用包名（每行一个）' : '进程名（每行一个）'),
+                            labelText: widget.android
+                                ? '应用包名（每行一个）'
+                                : '进程名或完整路径（每行一个）'),
                         validator: (_) {
                           if (entries.isEmpty) return '请至少填写或选择一个应用';
                           if (entries.any(invalid)) {
                             return '每行填写一个应用，不能包含逗号或 *';
+                          }
+                          for (final app in entries) {
+                            final message = conflict(app);
+                            if (message != null) return message;
                           }
                           return null;
                         }),

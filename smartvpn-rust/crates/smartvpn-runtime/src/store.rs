@@ -15,7 +15,7 @@ pub struct Store {
     pub sample: Option<(Instant, u64, u64)>,
 }
 fn defaults() -> Value {
-    json!({"subscriptionUrl":"","connectionMode":if cfg!(target_os="android"){"vpn"}else{"system-proxy"},"domesticWeb":false,"webRTCProtection":false,"dnsProtection":false,"importPolicy":false,"siteRoutes":[],"appGroups":[],"gameBypass":[],"socksPort":0,"mihomoPath":"","wintunPath":""})
+    json!({"subscriptionUrl":"","connectionMode":if cfg!(target_os="android"){"vpn"}else{"system-proxy"},"domesticWeb":false,"webRTCProtection":false,"dnsProtection":false,"importPolicy":false,"siteRoutes":[],"appGroups":[],"socksPort":0,"mihomoPath":"","wintunPath":""})
 }
 pub(crate) fn existing_connection(dir: &Path, flags: rusqlite::OpenFlags) -> Result<Connection> {
     let db = Connection::open_with_flags(dir.join("smartvpn.db"), flags)?;
@@ -85,6 +85,21 @@ impl Store {
                 params![k, v.to_string()],
             )?;
         }
+        let legacy: Option<String> = tx.query_row(
+            "SELECT (SELECT value FROM settings WHERE key='gameBypass')", [], |r| r.get(0)
+        )?;
+        if let Some(legacy) = legacy {
+            let raw: String = tx.query_row("SELECT value FROM settings WHERE key='appGroups'", [], |r| r.get(0))?;
+            let mut groups: Vec<Value> = serde_json::from_str(&raw)?;
+            let ids = groups.iter().map(|g| g["id"].as_str().context("invalid app group id")).collect::<Result<Vec<_>>>()?;
+            if let Some(group) = crate::game_migration::migrated_group(serde_json::from_str(&legacy)?, ids.into_iter()).map_err(anyhow::Error::msg)? {
+                groups.push(group);
+            }
+            let mut groups = crate::config::parse_app_groups(Value::Array(groups))?;
+            crate::config::unique_members(&mut groups, true)?;
+            tx.execute("UPDATE settings SET value=? WHERE key='appGroups'", [serde_json::to_string(&groups)?])?;
+            tx.execute("DELETE FROM settings WHERE key='gameBypass'", [])?;
+        }
         #[cfg(target_os = "android")]
         tx.execute("UPDATE settings SET value=json_quote('vpn') WHERE key='connectionMode' AND value<>json_quote('vpn')", [])?;
         tx.commit()?;
@@ -129,7 +144,9 @@ impl Store {
             );
             let normalized;
             let v = if k == "appGroups" {
-                normalized = serde_json::to_value(crate::config::parse_app_groups(v.clone())?)?;
+                let mut groups = crate::config::parse_app_groups(v.clone())?;
+                crate::config::unique_members(&mut groups, false)?;
+                normalized = serde_json::to_value(groups)?;
                 &normalized
             } else if k == "siteRoutes" {
                 let rules = crate::site_routes::normalize(serde_json::from_value(v.clone())?)
@@ -152,10 +169,6 @@ impl Store {
                     v.as_u64()
                         .is_some_and(|p| p == 0 || (1024..=65535).contains(&p)),
                     "invalid port"
-                ),
-                "gameBypass" => ensure!(
-                    v.as_array().unwrap().iter().all(Value::is_string),
-                    "invalid game list"
                 ),
                 "subscriptionUrl" if v != "" && v != "__merged__" => {
                     let label = crate::subscriptions::source_label(v.as_str().unwrap())?;

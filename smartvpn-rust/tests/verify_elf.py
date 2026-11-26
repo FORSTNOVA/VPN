@@ -27,7 +27,7 @@ for i in range(count):
 assert alignments
 symbols = subprocess.check_output([args.readelf, "--dyn-syms", "--wide", path], text=True)
 exports = set(re.findall(r"FUNC\s+GLOBAL\s+DEFAULT\s+\d+\s+Java_com_smartvpn_client_CoreBridge_(\w+)", symbols))
-assert exports == {"start", "stop", "setTunnel", "configureRustCore", "notifyNetworkChanged", "readGameBypass"}, exports
+assert exports == {"start", "stop", "setTunnel", "configureRustCore", "notifyNetworkChanged"}, exports
 assert not re.search(r"mihomo|crosscall2|_cgo_|runtime\.|_cgoexp_|go:buildid|go\.itab|go\.buildid", symbols, re.I)
 assert not re.search(r"\bUND\s+__(wrap|real)_socket\b", symbols)
 assert not any(marker in data for marker in (b"Go build ID:", b"\xff Go buildinf:", b".gopclntab", b"github.com/metacubex/mihomo"))

@@ -93,20 +93,6 @@ fn string_result(env: &mut JNIEnv, result: Result<String>) -> jstring {
     }
 }
 #[no_mangle]
-pub extern "system" fn Java_com_smartvpn_client_CoreBridge_readGameBypass(
-    mut env: JNIEnv,
-    _: JClass,
-    dir: JString,
-) -> jstring {
-    let result = (|| -> Result<String> {
-        let dir: String = env.get_string(&dir)?.into();
-        let games = smartvpn_runtime::android_game_bypass(std::path::Path::new(&dir))?;
-        Ok(json!({"games": games}).to_string())
-    })();
-    string_result(&mut env, result)
-}
-
-#[no_mangle]
 pub extern "system" fn Java_com_smartvpn_client_CoreBridge_configureRustCore(
     env: JNIEnv,
     _: JClass,

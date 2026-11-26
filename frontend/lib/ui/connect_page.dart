@@ -314,23 +314,6 @@ extension _ConnectPage on _HomePageState {
                       : (value) => unawaited(_setConnectionMode(_connectionMode,
                           dnsProtection: value)),
                 ),
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: const Text('游戏直连名单'),
-                  subtitle: Text(_gameBypass.isEmpty
-                      ? '未添加游戏'
-                      : '已添加 ${_gameBypass.length} 项'),
-                  trailing: const Icon(Icons.edit_outlined),
-                  enabled: !_busy && !_connected,
-                  onTap: () async {
-                    final names = await editGameBypass(
-                        context, _gameBypass, Platform.isAndroid);
-                    if (names != null && mounted) {
-                      await _setConnectionMode(_connectionMode,
-                          gameBypass: names);
-                    }
-                  },
-                ),
               ],
               if (_siteRoutes case final routes?)
                 ListTile(

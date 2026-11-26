@@ -22,12 +22,6 @@ function Set-DirectClient([string]$projectDir) {
 function Set-RustAndroidVpnSettings([string]$projectDir) {
     $file = Join-Path $projectDir 'android/app/src/main/java/com/smartvpn/client/SmartVpnService.java'
     $source = [IO.File]::ReadAllText($file)
-    $start = $source.IndexOf('        java.io.File settings = ')
-    $end = $source.IndexOf('        ParcelFileDescriptor established = builder.establish();')
-    if ($start -lt 0 -or $end -le $start) { throw 'Expected Android VPN builder settings block' }
-    $block = [IO.File]::ReadAllText("$PSScriptRoot/client/android-game-bypass.java.inc")
-    [IO.File]::WriteAllText($file, $source.Substring(0, $start) + $block + $source.Substring($end))
-    $source = [IO.File]::ReadAllText($file)
     $watch = '    private void watchNetworks() {'
     $register = '        NetworkRequest tunnelRequest ='
     $unregister = '        if (manager == null || vpnCallback == null)'

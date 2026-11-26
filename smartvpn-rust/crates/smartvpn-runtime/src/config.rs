@@ -66,6 +66,16 @@ pub(crate) fn parse_app_groups(value: Value) -> Result<Vec<AppGroup>> {
     Ok(groups)
 }
 
+pub(crate) fn unique_members(groups: &mut Vec<AppGroup>, migrate: bool) -> Result<()> {
+    let members: Vec<_> = groups.iter().map(|g| (g.name.as_str(), g.enabled, g.apps.as_slice())).collect();
+    let kept = crate::game_migration::membership(&members, cfg!(windows), migrate).map_err(anyhow::Error::msg)?;
+    if migrate {
+        for (group, apps) in groups.iter_mut().zip(kept) { group.apps = apps; }
+        groups.retain(|g| !g.apps.is_empty());
+    }
+    Ok(())
+}
+
 fn deserialize_groups<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<AppGroup>, D::Error> {
     parse_app_groups(Value::deserialize(d)?).map_err(serde::de::Error::custom)
 }
@@ -88,8 +98,6 @@ pub struct Profile {
     pub app_groups: Vec<AppGroup>,
     #[serde(default, deserialize_with = "crate::site_routes::deserialize")]
     site_routes: Vec<crate::site_routes::SiteRoute>,
-    #[serde(default)]
-    game_bypass: Vec<String>,
     // Names of the catalog nodes supplied separately to TunnelDataPlane::connect.
     #[serde(default)]
     stored_node_names: Vec<String>,
@@ -526,25 +534,9 @@ impl Profile {
                     name
                 }
             };
-            rules.extend(
-                app_group
-                    .apps
-                    .iter()
-                    .map(|app| format!("PROCESS-NAME,{app},{target}")),
-            );
-        }
-        if !android {
-            for game in &self.game_bypass {
-                ensure!(
-                    !game.is_empty() && !game.contains(',') && !game.chars().any(char::is_control),
-                    "invalid game bypass entry"
-                );
-                let kind = if game.contains(['/', '\\']) {
-                    "PROCESS-PATH"
-                } else {
-                    "PROCESS-NAME"
-                };
-                rules.push(format!("{kind},{game},DIRECT"));
+            for app in &app_group.apps {
+                let kind = if !android && app.contains(['/', '\\']) { "PROCESS-PATH" } else { "PROCESS-NAME" };
+                rules.push(format!("{kind},{app},{target}"));
             }
         }
         let allow_direct =

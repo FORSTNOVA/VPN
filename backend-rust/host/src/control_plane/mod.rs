@@ -3,6 +3,8 @@ mod china;
 mod regions;
 mod traffic;
 pub mod nodes;
+#[path = "../../../../shared/game_migration.rs"]
+mod game_migration;
 #[path = "../../../../shared/site_routes.rs"]
 pub mod site_routes;
 pub mod state;
@@ -527,12 +529,6 @@ impl ControlPlane {
         }
         if let Some(v) = obj.get("socksPort").and_then(|v| v.as_u64()) {
             st.persisted.socks_port = v as u16;
-        }
-        if let Some(v) = obj.get("gameBypass").and_then(|v| v.as_array()) {
-            st.persisted.game_bypass = v
-                .iter()
-                .filter_map(|x| x.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned))
-                .collect();
         }
         if let Err(e) = st.save() {
             return text_resp(StatusCode::INTERNAL_SERVER_ERROR, &format!("{e}\n"));
@@ -1495,6 +1491,33 @@ fn json_resp(status: StatusCode, val: Value) -> Response<Full<Bytes>> {
 mod tests {
     use super::*;
     use state::NoopBridge;
+
+    #[test]
+    fn legacy_games_migrate_once_from_both_files() {
+        let dir = std::env::temp_dir().join(format!("smartvpn_game_migration_{}", rand::random::<u64>()));
+        std::fs::create_dir(&dir).unwrap();
+        let group = json!({"id":"legacy-games-direct","name":"manual","apps":["app.b"],"targetType":"reject","enabled":true});
+        let old = json!({"gameBypass":["app.a","app.b"],"appGroups":[group.clone()]});
+        std::fs::write(dir.join("settings.json"), old.to_string()).unwrap();
+        let mut current = serde_json::to_value(state::PersistedState::default()).unwrap();
+        current["gameBypass"] = json!(["app.b","app.c"]);
+        current["appGroups"] = json!([group.clone()]);
+        std::fs::write(dir.join("rust_host_state.json"), current.to_string()).unwrap();
+        let mut first = state::RuntimeState::load(&dir, Arc::new(NoopBridge)).unwrap();
+        let groups = &first.persisted.app_groups;
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].target_type, "reject");
+        assert_ne!(groups[0].id, groups[1].id);
+        assert_eq!(groups[1].apps, ["app.c","app.a"]);
+        assert_eq!(groups[1].target_type, "direct");
+        first.persisted.app_groups.clear();
+        first.save().unwrap();
+        drop(first);
+        let next = state::RuntimeState::load(&dir, Arc::new(NoopBridge)).unwrap();
+        assert!(next.persisted.app_groups.is_empty());
+        drop(next);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[tokio::test]
     async fn control_plane_state_and_app_groups_contract() {

@@ -525,7 +525,7 @@ public class Acceptance extends Instrumentation {
       api("PUT","path-checks",obj("enabled",false,"intervalSec",120,"targets",
           new JSONArray().put(obj("enabled",true,"label","local","url","http://198.51.100.7/path"))));
       post("region/lock",obj("country","US"));
-      api("PUT","settings",obj("gameBypass",new JSONArray().put("com.android.settings").put("com.android.chrome")));
+      api("PUT","settings",obj("appGroups",new JSONArray().put(obj("id","games","name","Games","targetType","direct","enabled",true,"apps",new JSONArray().put("com.android.settings").put("com.android.chrome")))));
       authorizeTunnel(ctx);
       post("connect",null);
       require(get("state").getString("activeNode").equals(exit),"active exit");

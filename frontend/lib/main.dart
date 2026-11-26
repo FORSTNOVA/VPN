@@ -1,5 +1,4 @@
 import 'ui/app_groups_dialog.dart';
-import 'ui/game_bypass_dialog.dart';
 import 'ui/site_routes_dialog.dart';
 import 'ui/startup_tile.dart';
 import 'ui/chain_editor.dart';
@@ -147,7 +146,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   List<Map<String, dynamic>>? _appGroups;
   Map<String, String>? _appGroupChains;
   List<Map<String, dynamic>>? _siteRoutes;
-  List<String> _gameBypass = [];
   bool _domesticWeb = false, _webRTCProtection = false, _dnsProtection = false;
   bool _elevated = false;
   bool _tunAvailable = false;
@@ -754,8 +752,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           [];
     }
     _siteRoutes = (value['siteRoutes'] as List?)?.map((e) => Map<String, dynamic>.from(e as Map)).toList();
-    _gameBypass =
-        (value['gameBypass'] as List?)?.whereType<String>().toList() ?? [];
     _domesticWeb = value['domesticWeb'] as bool? ?? false;
     _webRTCProtection = value['webRTCProtection'] as bool? ?? false;
     _dnsProtection = value['dnsProtection'] as bool? ?? false;
@@ -2123,13 +2119,11 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       {bool? domesticWeb,
       bool? webRTCProtection,
       bool? dnsProtection,
-      List<String>? gameBypass,
       int? socksPort}) async {
     if (mode == _connectionMode &&
         domesticWeb == null &&
         webRTCProtection == null &&
         dnsProtection == null &&
-        gameBypass == null &&
         socksPort == null) {
       return;
     }
@@ -2138,7 +2132,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       if (domesticWeb != null) 'domesticWeb': domesticWeb,
       if (webRTCProtection != null) 'webRTCProtection': webRTCProtection,
       if (dnsProtection != null) 'dnsProtection': dnsProtection,
-      if (gameBypass != null) 'gameBypass': gameBypass,
       if (socksPort != null) 'socksPort': socksPort,
     });
   }

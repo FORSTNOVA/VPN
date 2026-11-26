@@ -67,7 +67,7 @@ void main() {
     await tap(tester, '确定');
     await tap(tester, '保存');
     expect(saved!.last['name'], 'Google');
-    expect(saved!.last['apps'], ['Gemini.exe']);
+    expect(saved!.last['apps'], [r'C:\Programs\Gemini.exe']);
     expect(saved!.last['targetNode'], 'Japan');
     expect(saved!.last['targetType'], 'node');
     expect(saved!.last['enabled'], true);
@@ -122,6 +122,28 @@ void main() {
       'targetType': 'chain',
       'targetChainId': 'chain-42'
     });
+  });
+
+  testWidgets('other groups reserve apps in the picker and manual input',
+      (tester) async {
+    const channel = MethodChannel('smartvpn/host');
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        channel,
+        (call) async => [
+              {'label': '已归组', 'package': 'chrome.exe'},
+              {'label': '可添加', 'package': 'com.available'},
+            ]);
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, null));
+    await open(tester, true, (_) {});
+    await tap(tester, '添加分组');
+    await tap(tester, '选择应用');
+    expect(find.text('已归组'), findsNothing);
+    expect(find.text('可添加'), findsOneWidget);
+    await tap(tester, '取消');
+    await tester.enterText(find.byType(TextFormField).last, 'Chrome.exe');
+    await tap(tester, '确定');
+    expect(find.text('Chrome.exe 已属于分组「浏览器」'), findsOneWidget);
   });
 
   testWidgets('empty apps is rejected by group editor', (tester) async {

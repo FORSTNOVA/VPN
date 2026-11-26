@@ -111,12 +111,6 @@ fn engine_yaml(
             rules.push(format!("PROCESS-NAME,{app},{target}"));
         }
     }
-    for game in &persisted.game_bypass {
-        let g = game.trim();
-        if !g.is_empty() {
-            rules.push(format!("PROCESS-NAME,{g},DIRECT"));
-        }
-    }
     if persisted.import_policy == "enabled" {
         rules.extend(
             super::subs::active_rules(persisted)

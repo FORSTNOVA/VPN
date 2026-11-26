@@ -2,6 +2,8 @@ pub use config::install_chain_members;
 #[cfg(any(target_os = "android", test))]
 mod android_dns;
 mod checks;
+#[path = "../../../../shared/game_migration.rs"]
+mod game_migration;
 #[path = "../../../../shared/site_routes.rs"]
 mod site_routes;
 pub mod config;
@@ -31,19 +33,6 @@ use store::Store;
 use tiny_http::{Header, Request, Response, Server};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-// Android's VpnService shares a process with the runtime. All connections to
-// the WAL database must participate in the same SQLite library's file locks.
-#[cfg(any(target_os = "android", test))]
-pub fn android_game_bypass(dir: &Path) -> Result<Vec<String>> {
-    let db = store::existing_connection(dir, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let value: String = db.query_row(
-        "SELECT value FROM settings WHERE key='gameBypass'",
-        [],
-        |row| row.get(0),
-    )?;
-    Ok(serde_json::from_str(&value)?)
-}
 
 pub fn token() -> Result<String> {
     let mut bytes = [0u8; 32];
@@ -1264,7 +1253,7 @@ fn route<P: TunnelDataPlane>(
                 let catalog = store.active_catalog()?;
                 nodes.extend(group_nodes);
                 let stored_names: Vec<_> = nodes.iter().map(|n| &n["name"]).collect();
-                let profile = json!({"storedNodeNames":stored_names,"appGroups":app_groups,"siteRoutes":settings["siteRoutes"],"gameBypass":settings["gameBypass"],"mixedPort":mixed.local_addr()?.port(),"controllerPort":ctrl.local_addr()?.port(),"proxies":[],"choices":choices,
+                let profile = json!({"storedNodeNames":stored_names,"appGroups":app_groups,"siteRoutes":settings["siteRoutes"],"mixedPort":mixed.local_addr()?.port(),"controllerPort":ctrl.local_addr()?.port(),"proxies":[],"choices":choices,
                     "proxyProviders":{},"ruleProviders":providers,"webRtcProtection":settings["webRTCProtection"],"importPolicy":settings["importPolicy"],"subscriptionRuleProviders":catalog.rule_providers,"subscriptionRules":catalog.rules,"domesticDirect":settings["domesticWeb"],"preventDnsLeaks":settings["dnsProtection"]});
                 drop((mixed, ctrl));
                 #[cfg(target_os = "windows")]
@@ -1594,7 +1583,6 @@ mod tests {
                     .call()?
                     .into_json()?;
                 assert_eq!(doc["activeNode"], "SmartVPNChain");
-                assert!(android_game_bypass(dir.path())?.is_empty());
             }
             for worker in workers {
                 worker.join().unwrap()?;
@@ -1616,21 +1604,18 @@ mod tests {
     }
 
     #[test]
-    fn vpn_builder_reads_committed_game_bypass_during_wal_writes() -> Result<()> {
+    fn legacy_games_migrate_once_with_exact_paths() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let mut store = Store::open(dir.path())?;
-        let tx = store.db.transaction()?;
-        tx.execute(
-            "UPDATE settings SET value=? WHERE key='gameBypass'",
-            [r#"["example.game"]"#],
-        )?;
-        assert!(android_game_bypass(dir.path())?.is_empty());
-        tx.commit()?;
-        assert_eq!(android_game_bypass(dir.path())?, ["example.game"]);
-        store
-            .db
-            .execute("DELETE FROM settings WHERE key='gameBypass'", [])?;
-        assert!(android_game_bypass(dir.path()).is_err());
+        let store = Store::open(dir.path())?;
+        store.db.execute("INSERT INTO settings VALUES('gameBypass',?)", [json!([r"C:\Games\One.exe","one.EXE","one.exe"]).to_string()])?;
+        drop(store);
+        let mut upgraded = Store::open(dir.path())?;
+        let settings = upgraded.settings()?;
+        assert!(settings.get("gameBypass").is_none());
+        assert_eq!(settings["appGroups"][0]["apps"], json!([r"C:\Games\One.exe","one.EXE"]));
+        upgraded.update(&json!({"appGroups":[]}))?;
+        drop(upgraded);
+        assert_eq!(Store::open(dir.path())?.settings()?["appGroups"], json!([]));
         Ok(())
     }
 

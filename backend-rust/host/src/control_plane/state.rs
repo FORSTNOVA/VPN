@@ -251,8 +251,10 @@ pub struct PersistedState {
     pub socks_port: u16,
     #[serde(default, deserialize_with = "super::site_routes::deserialize")]
     pub site_routes: Vec<super::site_routes::SiteRoute>,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     pub game_bypass: Vec<String>,
+    #[serde(default)]
+    games_migrated: bool,
     #[serde(default)]
     pub app_groups: Vec<AppGroup>,
     #[serde(default)]
@@ -307,6 +309,7 @@ impl Default for PersistedState {
             socks_port: 0,
             site_routes: Vec::new(),
             game_bypass: Vec::new(),
+            games_migrated: false,
             app_groups: Vec::new(),
             auto_merge_hours: 0,
             last_merge_at: 0,
@@ -341,6 +344,32 @@ pub struct RuntimeState {
     pub next_event_id: u64,
     pub(super) traffic: super::traffic::Monitor,
     pub traffic_snapshot: Value,
+}
+
+fn migrate_game_groups(home: &Path, persisted: &mut PersistedState) -> Result<(), String> {
+    #[derive(Deserialize)]
+    struct Legacy {
+        #[serde(default, rename = "gameBypass")]
+        games: Option<Vec<String>>,
+    }
+    let mut games = std::mem::take(&mut persisted.game_bypass);
+    match fs::read(home.join("settings.json")) {
+        Ok(bytes) => games.extend(serde_json::from_slice::<Legacy>(&bytes)
+            .map_err(|e| format!("read gameBypass in settings.json: {e}"))?.games.into_iter().flatten()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+        Err(e) => return Err(format!("read settings.json: {e}")),
+    }
+    let ids = persisted.app_groups.iter().map(|g| g.id.as_str());
+    if let Some(group) = super::game_migration::migrated_group(games, ids)? {
+        persisted.app_groups.push(serde_json::from_value(group).map_err(|e| e.to_string())?);
+    }
+    let groups = &mut persisted.app_groups;
+    let members: Vec<_> = groups.iter().map(|g| (g.name.as_str(), g.enabled, g.apps.as_slice())).collect();
+    let kept = super::game_migration::membership(&members, cfg!(windows), true)?;
+    for (g, apps) in groups.iter_mut().zip(kept) { g.apps = apps; }
+    groups.retain(|g| !g.apps.is_empty());
+    persisted.games_migrated = true;
+    Ok(())
 }
 
 impl RuntimeState {
@@ -384,7 +413,11 @@ impl RuntimeState {
             persisted.connection_mode = "vpn".to_owned();
         }
         let next_event_id = persisted.events.iter().map(|e| e.id).max().unwrap_or(0) + 1;
-        Ok(Self {
+        let migrate = !persisted.games_migrated;
+        if migrate {
+            migrate_game_groups(home, &mut persisted)?;
+        }
+        let mut state = Self {
             china: super::china::China::load(home),
             home: home.to_path_buf(),
             bridge,
@@ -403,7 +436,9 @@ impl RuntimeState {
             next_event_id,
             traffic: super::traffic::Monitor::open(home)?,
             traffic_snapshot: json!({"available":false,"reason":"未连接"}),
-        })
+        };
+        if migrate { state.save()?; }
+        Ok(state)
     }
 
     pub fn save(&mut self) -> Result<(), String> {
@@ -544,7 +579,6 @@ impl RuntimeState {
             "appGroups": self.persisted.app_groups,
             "appGroupChains": self.persisted.chains.iter().map(|c| (&c.id, &c.name)).collect::<BTreeMap<_, _>>(),
             "siteRoutes": self.persisted.site_routes,
-            "gameBypass": self.persisted.game_bypass,
             "webRTCProtection": self.persisted.webrtc_protection,
             "dnsProtection": self.persisted.dns_protection,
             "wintunPath": "",
@@ -601,6 +635,8 @@ pub fn validate_app_groups(groups: Vec<AppGroup>, chains: &[ProxyChain]) -> Resu
         g.apps = clean_apps;
         out.push(g);
     }
+    let members: Vec<_> = out.iter().map(|g| (g.name.as_str(), g.enabled, g.apps.as_slice())).collect();
+    super::game_migration::membership(&members, cfg!(windows), false)?;
     Ok(out)
 }
 
@@ -652,7 +688,7 @@ fn migrate_legacy_go_state(
             if let Some(h) = v.get("autoMergeHours").and_then(|x| x.as_u64()) {
                 persisted.auto_merge_hours = h;
             }
-            if persisted.app_groups.is_empty() {
+            if !persisted.games_migrated && persisted.app_groups.is_empty() {
                 if let Some(g) = v.get("appGroups") {
                     if let Ok(groups) = serde_json::from_value::<Vec<AppGroup>>(g.clone()) {
                         persisted.app_groups = groups;

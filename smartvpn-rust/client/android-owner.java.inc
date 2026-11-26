@@ -1,5 +1,4 @@
     static native void notifyNetworkChanged();
-    static native String readGameBypass(String directory);
 
     public static String connectionOwner(String network, String src, int srcPort,
                                          String dst, int dstPort) throws java.net.UnknownHostException {
