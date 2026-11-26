@@ -54,6 +54,7 @@ class _SiteRoutesDialogState extends State<_SiteRoutesDialog> {
   late final rules = [...widget.rules];
   var action = 'direct';
   var subdomains = true;
+  String? editingHost;
   String? error;
 
   @override
@@ -62,7 +63,17 @@ class _SiteRoutesDialogState extends State<_SiteRoutesDialog> {
     super.dispose();
   }
 
-  void addRule() {
+  void editRule(Map<String, dynamic> rule) {
+    setState(() {
+      editingHost = rule['host'] as String;
+      input.text = editingHost!;
+      action = rule['action'] as String;
+      subdomains = rule['includeSubdomains'] as bool;
+      error = null;
+    });
+  }
+
+  void applyRule({bool close = false}) {
     try {
       final host = siteHost(input.text);
       final entry = {
@@ -71,12 +82,24 @@ class _SiteRoutesDialogState extends State<_SiteRoutesDialog> {
         'includeSubdomains':
             subdomains && InternetAddress.tryParse(host) == null,
       };
+      if (editingHost != null &&
+          host != editingHost &&
+          rules.any((rule) => rule['host'] == host)) {
+        setState(() => error = '这个域名已有规则，请修改对应的规则');
+        return;
+      }
       setState(() {
-        rules.removeWhere((r) => r['host'] == host);
-        rules.add(entry);
+        if (editingHost == null) {
+          rules.removeWhere((r) => r['host'] == host);
+          rules.add(entry);
+        } else {
+          rules[rules.indexWhere((r) => r['host'] == editingHost)] = entry;
+        }
+        editingHost = null;
         input.clear();
         error = null;
       });
+      if (close) Navigator.pop(context, rules);
     } on FormatException catch (e) {
       setState(() => error = e.message);
     }
@@ -84,72 +107,86 @@ class _SiteRoutesDialogState extends State<_SiteRoutesDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: const Text('网址分流'),
-    content: SizedBox(
-      width: 460,
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text('同一域名下的所有页面共用规则。外部链接、第三方视频和 CDN 按各自域名匹配。'),
-            TextField(
-              controller: input,
-              keyboardType: TextInputType.url,
-              onChanged: (_) => setState(() => error = null),
-              decoration: InputDecoration(
-                labelText: '网址或域名',
-                hintText: 'https://example.com/page',
-                errorText: error,
-              ),
-            ),
-            const SizedBox(height: 8),
-            SegmentedButton<String>(
-              segments: const [
-                ButtonSegment(value: 'direct', label: Text('直连')),
-                ButtonSegment(value: 'proxy', label: Text('走代理')),
+        title: const Text('网址分流'),
+        content: SizedBox(
+          width: 460,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text('同一域名下的所有页面共用规则。外部链接、第三方视频和 CDN 按各自域名匹配。'),
+                TextField(
+                  controller: input,
+                  keyboardType: TextInputType.url,
+                  onChanged: (_) => setState(() => error = null),
+                  decoration: InputDecoration(
+                    labelText: '网址或域名',
+                    hintText: 'https://example.com/page',
+                    errorText: error,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                SegmentedButton<String>(
+                  segments: const [
+                    ButtonSegment(value: 'direct', label: Text('直连')),
+                    ButtonSegment(value: 'proxy', label: Text('走代理')),
+                  ],
+                  selected: {action},
+                  onSelectionChanged: (s) => setState(() => action = s.single),
+                ),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('包含子域名'),
+                  value: subdomains,
+                  onChanged: (v) => setState(() => subdomains = v!),
+                ),
+                OutlinedButton(
+                  onPressed:
+                      input.text.trim().isEmpty ? null : () => applyRule(),
+                  child: Text(editingHost == null ? '添加或更新' : '应用修改'),
+                ),
+                for (final rule in rules)
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    title: Text(rule['host'] as String),
+                    subtitle: Text(
+                      '${rule['action'] == 'direct' ? '直连' : '走代理'} · ${rule['includeSubdomains'] == true ? '含子域名' : '仅此主机'}',
+                    ),
+                    trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                      IconButton(
+                        tooltip: '修改规则',
+                        icon: const Icon(Icons.edit_outlined),
+                        onPressed: editingHost == null && input.text.isEmpty
+                            ? () => editRule(rule)
+                            : null,
+                      ),
+                      IconButton(
+                        tooltip: '删除规则',
+                        icon: const Icon(Icons.delete_outline),
+                        onPressed: editingHost == null
+                            ? () => setState(() => rules.remove(rule))
+                            : null,
+                      )
+                    ]),
+                  ),
               ],
-              selected: {action},
-              onSelectionChanged: (s) => setState(() => action = s.single),
             ),
-            CheckboxListTile(
-              contentPadding: EdgeInsets.zero,
-              title: const Text('包含子域名'),
-              value: subdomains,
-              onChanged: (v) => setState(() => subdomains = v!),
-            ),
-            OutlinedButton(
-              onPressed: input.text.trim().isEmpty ? null : addRule,
-              child: const Text('添加或更新'),
-            ),
-            for (final rule in rules)
-              ListTile(
-                contentPadding: EdgeInsets.zero,
-                title: Text(rule['host'] as String),
-                subtitle: Text(
-                  '${rule['action'] == 'direct' ? '直连' : '走代理'} · ${rule['includeSubdomains'] == true ? '含子域名' : '仅此主机'}',
-                ),
-                trailing: IconButton(
-                  tooltip: '删除规则',
-                  icon: const Icon(Icons.delete_outline),
-                  onPressed: () => setState(() => rules.remove(rule)),
-                ),
-              ),
-          ],
+          ),
         ),
-      ),
-    ),
-    actions: [
-      TextButton(
-        onPressed: () => Navigator.pop(context),
-        child: const Text('取消'),
-      ),
-      FilledButton(
-        onPressed: input.text.trim().isEmpty
-            ? () => Navigator.pop(context, rules)
-            : null,
-        child: const Text('保存'),
-      ),
-    ],
-  );
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: editingHost != null
+                ? () => applyRule(close: true)
+                : input.text.trim().isEmpty
+                    ? () => Navigator.pop(context, rules)
+                    : null,
+            child: const Text('保存'),
+          ),
+        ],
+      );
 }

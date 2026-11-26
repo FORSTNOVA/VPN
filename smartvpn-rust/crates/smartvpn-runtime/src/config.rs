@@ -580,6 +580,12 @@ impl Profile {
             "default-nameserver":["223.5.5.5","119.29.29.29"],
             "proxy-server-nameserver":["223.5.5.5","119.29.29.29","https://223.5.5.5/dns-query"],
             "nameserver":["https://1.1.1.1/dns-query#SmartVPN","https://8.8.8.8/dns-query#SmartVPN"]});
+        if !android && self.tun && self.prevent_dns_leaks {
+            // Bootstrap node hostnames without sending port-53 requests to the physical NIC.
+            let bootstrap = json!(["https://223.5.5.5/dns-query"]);
+            cfg["dns"]["default-nameserver"] = bootstrap.clone();
+            cfg["dns"]["proxy-server-nameserver"] = bootstrap;
+        }
         if android || self.tun {
             cfg["dns"]["enhanced-mode"] = json!("fake-ip");
             cfg["dns"]["fake-ip-range"] = json!("198.18.0.1/16");
@@ -611,6 +617,11 @@ impl Profile {
                 }
             }
         }
+        for site in &self.site_routes {
+            if let Some((key, upstream)) = site.dns_policy() {
+                cfg["dns"]["nameserver-policy"][key] = json!(upstream);
+            }
+        }
         rules.push("MATCH,SmartVPN".into());
         cfg["proxy-groups"] = json!(groups);
         cfg["rules"] = json!(rules);
@@ -621,6 +632,28 @@ impl Profile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn website_dns_uses_the_route_exit_and_tun_bootstraps_over_https() {
+        let profile: Profile = serde_json::from_value(json!({
+            "tun":true, "mixedPort":12345, "controllerPort":12346, "choices":["exit"], "proxies":[],
+            "proxyProviders":{}, "ruleProviders":{}, "domesticDirect":false,
+            "preventDnsLeaks":true, "siteRoutes":[
+                {"host":"example.com","action":"direct","includeSubdomains":true},
+                {"host":"media.example.com","action":"proxy","includeSubdomains":false},
+                {"host":"192.0.2.42","action":"direct","includeSubdomains":false}
+            ]
+        })).unwrap();
+        let cfg = profile.generate_for("fixture", false).unwrap();
+        let dns = &cfg["dns"];
+        assert_eq!(dns["nameserver-policy"], json!({
+            "+.example.com":"https://223.5.5.5/dns-query#DIRECT",
+            "media.example.com":"https://1.1.1.1/dns-query#SmartVPN"
+        }));
+        assert_eq!(dns["default-nameserver"], json!(["https://223.5.5.5/dns-query"]));
+        assert_eq!(dns["proxy-server-nameserver"], dns["default-nameserver"]);
+        clash_lib::Config::Str(cfg.to_string()).try_parse_strict().unwrap();
+    }
+
     #[test]
     fn connects_reverse_catalog_in_requested_order() {
         let names = ["入口 [A]", "中继 B", "出口 [C]"].map(String::from);

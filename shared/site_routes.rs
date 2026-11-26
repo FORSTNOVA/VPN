@@ -55,6 +55,21 @@ pub fn deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<SiteRou
 }
 
 impl SiteRoute {
+    pub fn dns_policy(&self) -> Option<(String, &'static str)> {
+        if self.host.parse::<IpAddr>().is_ok() {
+            return None;
+        }
+        let key = if self.include_subdomains {
+            format!("+.{}", self.host)
+        } else {
+            self.host.clone()
+        };
+        let upstream = match self.action {
+            Action::Direct => "https://223.5.5.5/dns-query#DIRECT",
+            Action::Proxy => "https://1.1.1.1/dns-query#SmartVPN",
+        };
+        Some((key, upstream))
+    }
     pub fn clash_rule(&self) -> String {
         let target = match self.action {
             Action::Direct => "DIRECT",

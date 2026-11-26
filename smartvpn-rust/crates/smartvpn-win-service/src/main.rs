@@ -1,3 +1,4 @@
+mod dns_guard;
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use clash_lib::{Config, Options};
 use serde_json::{json, Value};
@@ -51,6 +52,7 @@ struct Kernel {
     controller: Controller,
     mixed: u16,
     _wintun: Option<WintunModule>,
+    dns_guard: Option<dns_guard::DnsGuard>,
 }
 struct Windows {
     dir: PathBuf,
@@ -58,7 +60,7 @@ struct Windows {
 }
 // The controller and the TUN runner start independently. Check a DNS A query
 // on the SmartVPN interface before reporting a successful TUN connection.
-fn check_tun_dns() -> Result<()> {
+fn check_tun_dns() -> Result<u32> {
     use std::net::UdpSocket;
     let interface =
         clash_lib::app::net::get_interface_by_name("SmartVPN").context("等待 SmartVPN 网卡")?;
@@ -84,7 +86,7 @@ fn check_tun_dns() -> Result<()> {
             && buf[size - 6..size - 2] == [0, 4, 198, 18],
         "SmartVPN DNS 未返回 fake-ip 地址"
     );
-    Ok(())
+    Ok(interface.index)
 }
 
 impl TunnelDataPlane for Windows {
@@ -127,6 +129,7 @@ impl TunnelDataPlane for Windows {
             },
             mixed: req.config.mixed_port.get(),
             _wintun: wintun,
+            dns_guard: None,
         });
         let ready = (|| -> Result<()> {
             let deadline = Instant::now() + Duration::from_secs(10);
@@ -137,7 +140,12 @@ impl TunnelDataPlane for Windows {
                 }
                 match kernel.controller.request("GET", "/version", &[]) {
                     Ok((200, _)) if req.config.tun => match check_tun_dns() {
-                        Ok(()) => return Ok(()),
+                        Ok(index) => {
+                            if req.config.prevent_dns_leaks {
+                                kernel.dns_guard = Some(dns_guard::DnsGuard::install(index)?);
+                            }
+                            return Ok(());
+                        }
                         Err(err) if Instant::now() >= deadline => {
                             return Err(err.context("Windows TUN 启动失败"))
                         }

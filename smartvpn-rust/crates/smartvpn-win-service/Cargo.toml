@@ -8,6 +8,7 @@ anyhow.workspace = true
 serde_json.workspace = true
 smartvpn-runtime.workspace = true
 clash-lib = { path = "../../vendor/clash-rs/clash-lib", default-features = false, features = ["ring"] }
+windows-sys = { version = "0.61", features = ["Win32_NetworkManagement_WindowsFilteringPlatform", "Win32_NetworkManagement_IpHelper", "Win32_NetworkManagement_Ndis", "Win32_Security", "Win32_System_Rpc"] }
 tokio-util = "0.7"
 
 [[bin]]

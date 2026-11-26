@@ -45,4 +45,46 @@ void main() {
       {'host': 'www.example.org', 'action': 'proxy', 'includeSubdomains': true}
     ]);
   });
+
+  testWidgets('edits a saved host in place and rejects a duplicate',
+      (tester) async {
+    final original = [
+      {
+        'host': 'www.crccmall.com',
+        'action': 'proxy',
+        'includeSubdomains': false
+      },
+      {'host': 'other.example', 'action': 'direct', 'includeSubdomains': false},
+    ];
+    List<Map<String, dynamic>>? saved;
+    await tester.pumpWidget(MaterialApp(
+        home: Builder(
+      builder: (context) => TextButton(
+        onPressed: () async {
+          saved = await editSiteRoutes(context, original);
+        },
+        child: const Text('打开'),
+      ),
+    )));
+    await tester.tap(find.text('打开'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('修改规则').first);
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(find.byType(TextField)).controller!.text,
+        'www.crccmall.com');
+    await tester.enterText(find.byType(TextField), 'other.example');
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+    expect(find.text('这个域名已有规则，请修改对应的规则'), findsOneWidget);
+    await tester.enterText(find.byType(TextField), 'https://crccmall.com/');
+    await tester.tap(find.text('直连'));
+    await tester.tap(find.text('包含子域名'));
+    await tester.tap(find.text('保存'));
+    await tester.pumpAndSettle();
+    expect(saved, [
+      {'host': 'crccmall.com', 'action': 'direct', 'includeSubdomains': true},
+      original.last,
+    ]);
+    expect(original.first['host'], 'www.crccmall.com');
+  });
 }
