@@ -86,6 +86,8 @@ pub struct Profile {
     pub tun: bool,
     #[serde(default, deserialize_with = "deserialize_groups")]
     pub app_groups: Vec<AppGroup>,
+    #[serde(default, deserialize_with = "crate::site_routes::deserialize")]
+    site_routes: Vec<crate::site_routes::SiteRoute>,
     #[serde(default)]
     game_bypass: Vec<String>,
     // Names of the catalog nodes supplied separately to TunnelDataPlane::connect.
@@ -479,6 +481,7 @@ impl Profile {
                 }
             }
         }
+        rules.extend(self.site_routes.iter().map(|r| r.clash_rule()));
         for (kind, networks) in [("IP-CIDR", LAN_V4), ("IP-CIDR6", LAN_V6)] {
             rules.extend(
                 networks

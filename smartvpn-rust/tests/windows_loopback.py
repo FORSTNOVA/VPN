@@ -343,6 +343,23 @@ def main(archive):
         observed.clear()
         assert api("GET","regions",200)["job"]["total"] == 3
         assert api("POST","tun/check",200)["mode"] == "system-proxy"
+        for action in ("proxy", "direct"):
+            routes = [{"host":"127.0.0.1", "action":action, "includeSubdomains":False}]
+            api("PUT","settings",200,{"siteRoutes":routes})
+            assert api("GET","state",200)["siteRoutes"] == routes
+            api("POST","connect",200)
+            mixed = api("GET","status",200)["mixedPort"]
+            observed.clear()
+            with closing(http.client.HTTPConnection("127.0.0.1", mixed, timeout=6)) as client:
+                client.set_tunnel("127.0.0.1", probe.server_port)
+                client.request("GET", "/country")
+                reply = client.getresponse()
+                assert reply.status == 200 and reply.read() == b"US"
+            assert ((exit_port,probe.server_port) in observed) == (action == "proxy"), observed
+            api("POST","disconnect",200)
+        api("PUT","settings",200,{"siteRoutes":[]})
+        observed.clear()
+        print("Website rules sent the same HTTP destination through the chain and directly")
         # Keep domestic refresh local throughout the policy matrix.
         Path(temp,"providers/china-ip.txt").write_text("192.0.2.0/24\n")
         for domestic,dns,rtc in [(False,False,False),(True,False,False),(True,True,True),(False,True,False)]:

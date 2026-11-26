@@ -15,7 +15,7 @@ pub struct Store {
     pub sample: Option<(Instant, u64, u64)>,
 }
 fn defaults() -> Value {
-    json!({"subscriptionUrl":"","connectionMode":if cfg!(target_os="android"){"vpn"}else{"system-proxy"},"domesticWeb":false,"webRTCProtection":false,"dnsProtection":false,"importPolicy":false,"appGroups":[],"gameBypass":[],"socksPort":0,"mihomoPath":"","wintunPath":""})
+    json!({"subscriptionUrl":"","connectionMode":if cfg!(target_os="android"){"vpn"}else{"system-proxy"},"domesticWeb":false,"webRTCProtection":false,"dnsProtection":false,"importPolicy":false,"siteRoutes":[],"appGroups":[],"gameBypass":[],"socksPort":0,"mihomoPath":"","wintunPath":""})
 }
 pub(crate) fn existing_connection(dir: &Path, flags: rusqlite::OpenFlags) -> Result<Connection> {
     let db = Connection::open_with_flags(dir.join("smartvpn.db"), flags)?;
@@ -130,6 +130,11 @@ impl Store {
             let normalized;
             let v = if k == "appGroups" {
                 normalized = serde_json::to_value(crate::config::parse_app_groups(v.clone())?)?;
+                &normalized
+            } else if k == "siteRoutes" {
+                let rules = crate::site_routes::normalize(serde_json::from_value(v.clone())?)
+                    .map_err(anyhow::Error::msg)?;
+                normalized = serde_json::to_value(rules)?;
                 &normalized
             } else {
                 v

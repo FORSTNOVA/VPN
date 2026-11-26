@@ -1,5 +1,6 @@
 import 'ui/app_groups_dialog.dart';
 import 'ui/game_bypass_dialog.dart';
+import 'ui/site_routes_dialog.dart';
 import 'ui/startup_tile.dart';
 import 'ui/chain_editor.dart';
 import 'ui/subscription_policy_page.dart';
@@ -145,6 +146,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String _connectionMode = 'system-proxy';
   List<Map<String, dynamic>>? _appGroups;
   Map<String, String>? _appGroupChains;
+  List<Map<String, dynamic>>? _siteRoutes;
   List<String> _gameBypass = [];
   bool _domesticWeb = false, _webRTCProtection = false, _dnsProtection = false;
   bool _elevated = false;
@@ -751,6 +753,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               .toList() ??
           [];
     }
+    _siteRoutes = (value['siteRoutes'] as List?)?.map((e) => Map<String, dynamic>.from(e as Map)).toList();
     _gameBypass =
         (value['gameBypass'] as List?)?.whereType<String>().toList() ?? [];
     _domesticWeb = value['domesticWeb'] as bool? ?? false;

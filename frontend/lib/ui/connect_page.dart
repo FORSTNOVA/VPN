@@ -332,6 +332,20 @@ extension _ConnectPage on _HomePageState {
                   },
                 ),
               ],
+              if (_siteRoutes case final routes?)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('网址分流'),
+                  subtitle: Text(_connected ? '共 ${routes.length} 条 · 断开连接后可修改' : '共 ${routes.length} 条 · 按域名直连或走当前代理'),
+                  trailing: const Icon(Icons.edit_outlined),
+                  enabled: !_busy && !_connected,
+                  onTap: () async {
+                    final result = await editSiteRoutes(context, routes);
+                    if (result != null && mounted) {
+                      await _updateTunnelSettings({'siteRoutes': result});
+                    }
+                  },
+                ),
               if (_appGroups ?? const [] case final groups)
                 ListTile(
                   contentPadding: EdgeInsets.zero,

@@ -249,6 +249,8 @@ pub struct PersistedState {
     pub strict_privacy: bool,
     #[serde(default)]
     pub socks_port: u16,
+    #[serde(default, deserialize_with = "super::site_routes::deserialize")]
+    pub site_routes: Vec<super::site_routes::SiteRoute>,
     #[serde(default)]
     pub game_bypass: Vec<String>,
     #[serde(default)]
@@ -303,6 +305,7 @@ impl Default for PersistedState {
             dns_protection: true,
             strict_privacy: false,
             socks_port: 0,
+            site_routes: Vec::new(),
             game_bypass: Vec::new(),
             app_groups: Vec::new(),
             auto_merge_hours: 0,
@@ -540,6 +543,7 @@ impl RuntimeState {
             "domesticWeb": self.persisted.domestic_web,
             "appGroups": self.persisted.app_groups,
             "appGroupChains": self.persisted.chains.iter().map(|c| (&c.id, &c.name)).collect::<BTreeMap<_, _>>(),
+            "siteRoutes": self.persisted.site_routes,
             "gameBypass": self.persisted.game_bypass,
             "webRTCProtection": self.persisted.webrtc_protection,
             "dnsProtection": self.persisted.dns_protection,

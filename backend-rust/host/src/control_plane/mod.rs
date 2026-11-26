@@ -3,6 +3,8 @@ mod china;
 mod regions;
 mod traffic;
 pub mod nodes;
+#[path = "../../../../shared/site_routes.rs"]
+pub mod site_routes;
 pub mod state;
 pub mod subs;
 pub mod tunnel;
@@ -469,6 +471,15 @@ impl ControlPlane {
             return text_resp(StatusCode::BAD_REQUEST, "invalid JSON\n");
         };
         let mut st = self.state.lock().await;
+        let site_routes = if let Some(value) = obj.get("siteRoutes") {
+            if st.connected {
+                return text_resp(StatusCode::CONFLICT, "请断开连接后修改网址规则");
+            }
+            match serde_json::from_value(value.clone()).map_err(|e| e.to_string()).and_then(site_routes::normalize) {
+                Ok(rules) => Some(rules),
+                Err(error) => return text_resp(StatusCode::BAD_REQUEST, &error),
+            }
+        } else { None };
         if let Some(groups_val) = obj.get("appGroups") {
             let Ok(groups) = serde_json::from_value::<Vec<AppGroup>>(groups_val.clone()) else {
                 return text_resp(StatusCode::BAD_REQUEST, "invalid appGroups\n");
@@ -483,6 +494,7 @@ impl ControlPlane {
                 Err(msg) => return text_resp(StatusCode::BAD_REQUEST, &format!("{msg}\n")),
             }
         }
+        if let Some(rules) = site_routes { st.persisted.site_routes = rules; }
         if let Some(v) = obj.get("subscriptionUrl").and_then(|v| v.as_str()) {
             st.persisted.subscription_url = v.trim().to_owned();
         }

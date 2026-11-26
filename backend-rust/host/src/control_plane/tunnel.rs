@@ -98,7 +98,7 @@ fn engine_yaml(
             .to_owned();
     }
 
-    let mut rules: Vec<String> = Vec::new();
+    let mut rules: Vec<String> = persisted.site_routes.iter().map(|r| r.clash_rule()).collect();
     for g in persisted.app_groups.iter().filter(|g| g.enabled) {
         let target = match g.target_type.as_str() {
             "direct" => "DIRECT".to_owned(),
@@ -279,6 +279,28 @@ mod tests {
     use super::*;
     use crate::control_plane::state::ProxyChain;
 
+    #[test]
+    fn website_routes_match_host_boundaries_and_child_exceptions() {
+        use smartvpn_engine::rule::{RuleAction, RuleContext, RuleSet};
+        let mut state = PersistedState::default();
+        state.site_routes = super::super::site_routes::normalize(serde_json::from_value(json!([
+            {"host":"EXAMPLE.org","action":"direct","includeSubdomains":true},
+            {"host":"api.example.org","action":"proxy","includeSubdomains":false}
+        ])).unwrap()).unwrap();
+        let proxies = [json!({"name":"exit","type":"socks5","server":"127.0.0.1","port":1080})];
+        state.selected_node = "exit".into();
+        state.domestic_web = false;
+        let yaml = build_engine_yaml(&state, &proxies).unwrap();
+        let doc: Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        let lines: Vec<_> = doc["rules"].as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+        let rules = RuleSet::from_lines(&lines).unwrap();
+        for (domain, direct) in [("example.org",true),("img.example.org",true),
+            ("api.example.org",false),("x.api.example.org",true),
+            ("notexample.org",false),("external.example",false)] {
+            let expected = if direct { RuleAction::Direct } else { RuleAction::Proxy("SmartVPN".into()) };
+            assert_eq!(rules.evaluate(&RuleContext { domain: Some(domain), ..Default::default() }),Some(&expected),"{domain}");
+        }
+    }
     #[test]
     fn saved_hop_policies_drive_global_and_app_rules_after_reload() {
         let mut state = PersistedState::default();

@@ -2,6 +2,8 @@ pub use config::install_chain_members;
 #[cfg(any(target_os = "android", test))]
 mod android_dns;
 mod checks;
+#[path = "../../../../shared/site_routes.rs"]
+mod site_routes;
 pub mod config;
 mod direct;
 mod history;
@@ -1262,7 +1264,7 @@ fn route<P: TunnelDataPlane>(
                 let catalog = store.active_catalog()?;
                 nodes.extend(group_nodes);
                 let stored_names: Vec<_> = nodes.iter().map(|n| &n["name"]).collect();
-                let profile = json!({"storedNodeNames":stored_names,"appGroups":app_groups,"gameBypass":settings["gameBypass"],"mixedPort":mixed.local_addr()?.port(),"controllerPort":ctrl.local_addr()?.port(),"proxies":[],"choices":choices,
+                let profile = json!({"storedNodeNames":stored_names,"appGroups":app_groups,"siteRoutes":settings["siteRoutes"],"gameBypass":settings["gameBypass"],"mixedPort":mixed.local_addr()?.port(),"controllerPort":ctrl.local_addr()?.port(),"proxies":[],"choices":choices,
                     "proxyProviders":{},"ruleProviders":providers,"webRtcProtection":settings["webRTCProtection"],"importPolicy":settings["importPolicy"],"subscriptionRuleProviders":catalog.rule_providers,"subscriptionRules":catalog.rules,"domesticDirect":settings["domesticWeb"],"preventDnsLeaks":settings["dnsProtection"]});
                 drop((mixed, ctrl));
                 #[cfg(target_os = "windows")]
