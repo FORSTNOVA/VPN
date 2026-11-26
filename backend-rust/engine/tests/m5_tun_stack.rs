@@ -141,7 +141,12 @@ async fn tun_dns_hijack_fake_ip_and_tcp_proxy() {
             tls: tls(),
         });
         let mut router = Router::new(
-            RuleSet::from_lines(&["DOMAIN,echo.test,Trojan", "MATCH,REJECT"]).unwrap(),
+            RuleSet::from_lines(&[
+                "IP-CIDR,198.18.0.0/15,REJECT",
+                "DOMAIN,echo.test,Trojan",
+                "MATCH,REJECT",
+            ])
+            .unwrap(),
             HashMap::from([("Trojan".into(), build_dialer(&spec).unwrap())]),
         );
         router.fake_ip_pool = Some(Arc::new(FakeIpPool::default()));
@@ -161,6 +166,42 @@ async fn tun_dns_hijack_fake_ip_and_tcp_proxy() {
     .unwrap();
 }
 struct Owner;
+
+#[tokio::test]
+async fn tun_flushes_first_binary_request_before_waiting_for_more_data() {
+    use smartvpn_engine::dialer::{BoxFuture, BoxedStream, OutboundDialer};
+    use tokio::io::{AsyncWriteExt, BufStream};
+    struct BufferedEcho;
+    impl OutboundDialer for BufferedEcho {
+        fn dial_tcp<'a>(
+            &'a self,
+            _: &'a TargetAddr,
+        ) -> BoxFuture<'a, std::io::Result<BoxedStream>> {
+            Box::pin(async {
+                let (stream, peer) = tokio::io::duplex(4096);
+                tokio::spawn(async move {
+                    let (mut r, mut w) = tokio::io::split(peer);
+                    tokio::io::copy(&mut r, &mut w).await.unwrap();
+                    w.shutdown().await.unwrap();
+                });
+                Ok(Box::new(BufStream::new(stream)) as BoxedStream)
+            })
+        }
+    }
+    timeout(Duration::from_secs(5), async {
+        let outbound: Arc<dyn OutboundDialer> = Arc::new(BufferedEcho);
+        let mut client = Client::new(Router::new(
+            RuleSet::from_lines(&["MATCH,buffered"]).unwrap(),
+            HashMap::from([("buffered".into(), outbound)]),
+        ));
+        let handle = client
+            .connect("192.0.2.12:443".parse().unwrap(), 41000)
+            .await;
+        client.echo(handle, &[0xea; 105]).await;
+    })
+    .await
+    .unwrap();
+}
 impl ProcessResolver for Owner {
     fn resolve(&self, src: SocketAddr, _: SocketAddr, udp: bool) -> Option<String> {
         assert!(!udp);

@@ -210,6 +210,8 @@ async fn relay(flow: Flow, router: &Router, mut stream: DuplexStream) -> io::Res
                 crate::traffic::Meter::open(router, flow.src, flow.dst, false, target, &action)?;
             let mut remote = crate::traffic::MeteredStream(remote, meter);
             remote.write_all(&prefix).await?;
+            // The client may wait for a reply before writing another byte.
+            remote.flush().await?;
             tokio::io::copy_bidirectional(&mut stream, &mut remote).await?;
             Ok(())
         }

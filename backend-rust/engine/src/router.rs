@@ -358,7 +358,7 @@ impl Router {
         let real_ip = ip.filter(|i| !self.fake_ip_pool.as_ref().is_some_and(|p| p.is_fake_ip(*i)));
         let ctx = RuleContext {
             domain: host.as_deref(),
-            ip,
+            ip: real_ip,
             process_name: process_name.as_deref(),
         };
         let candidate = !is_udp
