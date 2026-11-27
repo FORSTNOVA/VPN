@@ -420,7 +420,7 @@ fn prepare_probe<P: TunnelDataPlane>(
     let chain = if backups.is_empty() {
         config::chain_nodes(catalog, &hops)?
     } else {
-        config::compile_chain(&catalog, &hops, &backups, "SmartVPN-Probe")?
+        config::compile_chain(&catalog, &hops, &backups, config::ROUTE_PREFIX)?
     };
     let measured = chrono::Utc::now().timestamp_millis();
     let target = match args.get("url") {
@@ -1212,7 +1212,7 @@ fn route<P: TunnelDataPlane>(
                     nodes = if backups.is_empty() {
                         config::chain_nodes(nodes, &hops)?
                     } else {
-                        config::compile_chain(&nodes, &hops, &backups, "SmartVPN-Route")?
+                        config::compile_chain(&nodes, &hops, &backups, config::ROUTE_PREFIX)?
                     };
                     choices = vec![nodes.last().unwrap()["name"].as_str().unwrap().to_owned()];
                 } else if let Some(name) = selected.as_deref() {

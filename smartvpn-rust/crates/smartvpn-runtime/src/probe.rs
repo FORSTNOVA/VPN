@@ -29,6 +29,15 @@ pub fn with_probe<T>(
     nodes: Vec<Value>,
     test: impl FnOnce(&Controller, &str, u16) -> Result<T>,
 ) -> Result<T> {
+    with_probe_dns(dir, nodes, false, test)
+}
+
+pub fn with_probe_dns<T>(
+    dir: &std::path::Path,
+    nodes: Vec<Value>,
+    protected_dns: bool,
+    test: impl FnOnce(&Controller, &str, u16) -> Result<T>,
+) -> Result<T> {
     let name = nodes.last().unwrap()["name"].as_str().unwrap();
     // Serialize UDP/QUIC probes (hysteria2/tuic/wireguard) so concurrent
     // handshakes do not contend on mobile/NAT UDP sockets.
@@ -49,7 +58,13 @@ pub fn with_probe<T>(
     };
     let mixed = std::net::TcpListener::bind(("127.0.0.1", 0))?;
     let port = mixed.local_addr()?.port();
-    let cfg = crate::config::probe_config(&nodes, port, listener.local_addr()?, &controller.secret);
+    let cfg = crate::config::probe_config_with_dns(
+        &nodes,
+        port,
+        listener.local_addr()?,
+        &controller.secret,
+        protected_dns,
+    );
     let config = Config::Str(cfg.to_string()).try_parse_strict()?;
     let work = tempfile::tempdir_in(dir)?;
     drop((listener, mixed));

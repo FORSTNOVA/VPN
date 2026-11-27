@@ -50,10 +50,18 @@ impl Drop for WintunModule {
 struct Kernel {
     worker: thread::JoinHandle<clash_lib::Result<()>>,
     controller: Controller,
+    members: Vec<Value>,
     mixed: u16,
     _wintun: Option<WintunModule>,
     dns_guard: Option<dns_guard::DnsGuard>,
 }
+impl Kernel {
+    fn controller_for_probe(&self, nodes: &[Value]) -> Option<&Controller> {
+        (!self.worker.is_finished() && nodes.iter().all(|node| self.members.contains(node)))
+            .then_some(&self.controller)
+    }
+}
+
 struct Windows {
     dir: PathBuf,
     kernel: Option<Kernel>,
@@ -128,6 +136,13 @@ impl TunnelDataPlane for Windows {
                 secret,
             },
             mixed: req.config.mixed_port.get(),
+            members: config["proxies"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .chain(config["proxy-groups"].as_array().unwrap())
+                .cloned()
+                .collect(),
             _wintun: wintun,
             dns_guard: None,
         });
@@ -183,7 +198,7 @@ impl TunnelDataPlane for Windows {
     fn disconnect(&mut self) -> Result<()> {
         if let Some(k) = self.kernel.take() {
             // The main scaffold registers its shutdown token after building its
-            // runtime. Latency probes use independent scaffold instances.
+            // runtime.
             while !clash_lib::shutdown() && !k.worker.is_finished() {
                 thread::sleep(Duration::from_millis(10));
             }
@@ -204,9 +219,23 @@ impl TunnelDataPlane for Windows {
         Ok(())
     }
     fn probe_job(&self, nodes: Vec<Value>, url: String) -> Result<smartvpn_runtime::ProbeJob> {
+        if let Some(controller) = self
+            .kernel
+            .as_ref()
+            .and_then(|k| k.controller_for_probe(&nodes))
+        {
+            let controller = controller.clone();
+            let exit = nodes.last().unwrap()["name"].as_str().unwrap().to_owned();
+            return Ok(Box::new(move || controller.delay(&exit, &url)));
+        }
         let dir = self.dir.clone();
+        // Temporary instances share clash-lib's pre-TUN outbound interface.
+        // WFP blocks physical DNS on ports 53 and 853 while the guard is installed.
+        let protected_dns = self.kernel.as_ref().is_some_and(|k| k.dns_guard.is_some());
         Ok(Box::new(move || {
-            smartvpn_runtime::probe::with_probe(&dir, nodes, |c, name, _| c.delay(name, &url))
+            smartvpn_runtime::probe::with_probe_dns(&dir, nodes, protected_dns, |c, name, _| {
+                c.delay(name, &url)
+            })
         }))
     }
     fn region(&self, nodes: Vec<Value>) -> Result<Value> {
@@ -237,4 +266,86 @@ fn main() -> Result<()> {
     println!("{}", serde_json::to_string(&runtime.bootstrap)?);
     io::stdout().flush()?;
     runtime.wait()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn running_controller_requires_every_compiled_member_to_match() {
+        let entry = json!({"name":"entry","type":"socks5","server":"host","port":1080});
+        let exit = json!({"name":"exit","type":"socks5","server":"other","port":1080,"dialer-proxy":"entry"});
+        let backup = json!({"name":"backup","type":"socks5","server":"third","port":1080,"dialer-proxy":"entry"});
+        let group = json!({"name":"policy","type":"fallback","proxies":["exit","backup"]});
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (stop, wait) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            use std::io::{BufRead, BufReader};
+            for name in ["entry", "exit", "policy"] {
+                let (mut socket, _) = listener.accept().unwrap();
+                let mut headers = BufReader::new(&socket).lines().map(io::Result::unwrap);
+                assert!(headers
+                    .next()
+                    .unwrap()
+                    .starts_with(&format!("GET /proxies/{name}/delay?")));
+                assert!(headers.any(|line| line.is_empty()));
+                let body = r#"{"overall":23,"delay":17}"#;
+                write!(
+                    socket,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+            wait.recv().unwrap();
+            Ok(())
+        });
+        let plane = Windows {
+            dir: PathBuf::new(),
+            kernel: Some(Kernel {
+                worker,
+                controller: Controller {
+                    port,
+                    secret: "fixture".into(),
+                },
+                members: vec![entry.clone(), exit.clone(), backup.clone(), group.clone()],
+                mixed: 12346,
+                _wintun: None,
+                dns_guard: None,
+            }),
+        };
+        for nodes in [
+            vec![entry.clone()],
+            vec![entry.clone(), exit.clone()],
+            vec![entry.clone(), exit.clone(), backup.clone(), group.clone()],
+        ] {
+            let job = plane
+                .probe_job(nodes, "https://example.test/".into())
+                .unwrap();
+            assert_eq!(job().unwrap(), (23, 17));
+        }
+        let kernel = plane.kernel.unwrap();
+        let mut standalone = exit.clone();
+        standalone.as_object_mut().unwrap().remove("dialer-proxy");
+        assert!(kernel.controller_for_probe(&[standalone]).is_none());
+        let mut edited = entry.clone();
+        edited["port"] = json!(1081);
+        assert!(kernel
+            .controller_for_probe(&[edited, exit.clone()])
+            .is_none());
+        let mut changed_policy = group;
+        changed_policy["proxies"] = json!(["backup", "exit"]);
+        assert!(kernel
+            .controller_for_probe(&[entry.clone(), exit, backup, changed_policy])
+            .is_none());
+
+        stop.send(()).unwrap();
+        while !kernel.worker.is_finished() {
+            thread::yield_now();
+        }
+        assert!(kernel.controller_for_probe(&[entry]).is_none());
+        kernel.worker.join().unwrap().unwrap();
+    }
 }

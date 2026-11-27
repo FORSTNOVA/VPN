@@ -128,12 +128,25 @@ pub struct SocksNode {
     dialer_proxy: Option<String>,
 }
 
+const BOOTSTRAP_DOH: &str = "https://223.5.5.5/dns-query";
+pub(crate) const ROUTE_PREFIX: &str = "SmartVPN-Route";
+
 /// The exit is the only selectable member. Each hop dials through its predecessor.
 pub fn probe_config(
     nodes: &[Value],
     mixed: u16,
     controller: std::net::SocketAddr,
     secret: &str,
+) -> Value {
+    probe_config_with_dns(nodes, mixed, controller, secret, false)
+}
+
+pub(crate) fn probe_config_with_dns(
+    nodes: &[Value],
+    mixed: u16,
+    controller: std::net::SocketAddr,
+    secret: &str,
+    protected_dns: bool,
 ) -> Value {
     let exit = nodes.last().unwrap()["name"].as_str().unwrap();
     let mut config = json!({
@@ -143,6 +156,11 @@ pub fn probe_config(
                "nameserver":["223.5.5.5","119.29.29.29"]},
         "proxies":[],"proxy-groups":[],"rules":[format!("MATCH,{exit}")]
     });
+    if protected_dns {
+        for key in ["default-nameserver", "proxy-server-nameserver", "nameserver"] {
+            config["dns"][key] = json!([BOOTSTRAP_DOH]);
+        }
+    }
     install_chain_members(&mut config, nodes);
     config
 }
@@ -574,7 +592,7 @@ impl Profile {
             "nameserver":["https://1.1.1.1/dns-query#SmartVPN","https://8.8.8.8/dns-query#SmartVPN"]});
         if !android && self.tun && self.prevent_dns_leaks {
             // Bootstrap node hostnames without sending port-53 requests to the physical NIC.
-            let bootstrap = json!(["https://223.5.5.5/dns-query"]);
+            let bootstrap = json!([BOOTSTRAP_DOH]);
             cfg["dns"]["default-nameserver"] = bootstrap.clone();
             cfg["dns"]["proxy-server-nameserver"] = bootstrap;
         }
@@ -624,6 +642,18 @@ impl Profile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn protected_temporary_probe_uses_https_for_all_dns() {
+        let node = json!({"name":"entry","type":"socks5","server":"host","port":1080});
+        let cfg = probe_config_with_dns(
+            &[node], 12345, "127.0.0.1:12346".parse().unwrap(), "test", true,
+        );
+        for key in ["default-nameserver", "proxy-server-nameserver", "nameserver"] {
+            assert_eq!(cfg["dns"][key], json!(["https://223.5.5.5/dns-query"]));
+        }
+        clash_lib::Config::Str(cfg.to_string()).try_parse_strict().unwrap();
+    }
+
     #[test]
     fn website_dns_uses_the_route_exit_and_tun_bootstraps_over_https() {
         let profile: Profile = serde_json::from_value(json!({

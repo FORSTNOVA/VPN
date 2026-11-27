@@ -244,7 +244,7 @@ impl Store {
         let p: Profile = serde_json::from_value(doc.clone())?;
         ensure!(!p.name.trim().is_empty(), "empty chain name");
         self.validate_hops(&p.hops)?;
-        crate::config::compile_chain(&self.configs()?, &p.hops, &p.backups, "SmartVPN-Route")?;
+        crate::config::compile_chain(&self.configs()?, &p.hops, &p.backups, crate::config::ROUTE_PREFIX)?;
         let chain = self.chain()?;
         let tx = self
             .db

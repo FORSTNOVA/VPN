@@ -9,6 +9,7 @@ Set-Item "env:CC_$key" "$bin/${target}26-clang.cmd"
 Set-Item "env:CXX_$key" "$bin/${target}26-clang++.cmd"
 Set-Item "env:AR_$key" "$bin/llvm-ar.exe"
 Set-Item "env:CARGO_TARGET_${cargoKey}_RUSTFLAGS" '--cfg tokio_unstable -C link-arg=-Wl,-z,max-page-size=16384 -C link-arg=-Wl,--wrap=socket'
+$env:CARGO_ENCODED_RUSTFLAGS = (@($env:CARGO_ENCODED_RUSTFLAGS -split [char]31 | Where-Object { $_ }) + @('-C', 'link-arg=-Wl,-z,max-page-size=16384', '-C', 'link-arg=-Wl,--wrap=socket')) -join [char]31
 $env:RUSTC_BOOTSTRAP = '1'
 cargo build --target-dir "$env:CARGO_TARGET_DIR" --locked --manifest-path "$PSScriptRoot/Cargo.toml" -p smartvpn-android-jni --target $target --release
 Check-Exit 'Android release'

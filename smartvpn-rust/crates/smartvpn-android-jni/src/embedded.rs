@@ -45,6 +45,12 @@ struct Instance {
     members: Vec<Value>,
     policy: Value,
 }
+impl Instance {
+    fn controller_for_probe(&self, nodes: &[Value]) -> Option<&Controller> {
+        (!self.worker.is_finished() && nodes.iter().all(|node| self.members.contains(node)))
+            .then_some(&self.controller)
+    }
+}
 pub(super) struct Android {
     bridge: Arc<Bridge>,
     dir: String,
@@ -118,7 +124,10 @@ impl TunnelDataPlane for Android {
             "dnsHijack":config["tun"]["dns-hijack"],
             "quicRules":config["rules"].as_array().unwrap().iter().filter_map(Value::as_str).filter(|r|r.starts_with("AND,((NETWORK,UDP),(DST-PORT,443)") && r.ends_with(",REJECT")).collect::<Vec<_>>()});
         // Parse before spawning, including the Android-only TUN fields.
-        let members = config["proxies"].as_array().unwrap().clone();
+        let mut members = config["proxies"].as_array().unwrap().clone();
+        if let Some(groups) = config["proxy-groups"].as_array() {
+            members.extend(groups.iter().cloned());
+        }
         let config = Config::Str(config.to_string()).try_parse_strict()?;
         clash_lib::android_tun::OWNER_RESOLVER.get_or_init(|| {
             Box::new(|protocol, src, dst| {
@@ -252,12 +261,17 @@ impl TunnelDataPlane for Android {
     }
     fn probe_job(&self, nodes: Vec<Value>, url: String) -> Result<smartvpn_runtime::ProbeJob> {
         let measure = move |c: &Controller, name: &str| c.delay(name, &url);
-        if let ([node], Some(i)) = (nodes.as_slice(), self.instance.as_ref()) {
-            if i.members.contains(node) {
-                let c = i.controller.clone();
-                let name = node["name"].as_str().unwrap().to_owned();
-                return Ok(Box::new(move || measure(&c, &name)));
-            }
+        if let Some(c) = self
+            .instance
+            .as_ref()
+            .and_then(|i| i.controller_for_probe(&nodes))
+        {
+            let c = c.clone();
+            let name = nodes.last().context("empty probe chain")?["name"]
+                .as_str()
+                .context("missing probe target name")?
+                .to_owned();
+            return Ok(Box::new(move || measure(&c, &name)));
         }
         let dir = self.dir.clone();
         Ok(Box::new(move || {
