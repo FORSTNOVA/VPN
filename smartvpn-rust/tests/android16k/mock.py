@@ -160,7 +160,7 @@ class Proxy(socketserver.StreamRequestHandler):
                 data = b"192.0.2.99"
             elif b"/__down?" in line:
                 count = int(urllib.parse.parse_qs(urllib.parse.urlsplit(line.split()[1]).query)[b"bytes"][0])
-                assert count == 10_000_000
+                assert count == 5_000_000
                 data = bytes(count)
             else:
                 data = b"OK"

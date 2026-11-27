@@ -259,6 +259,19 @@ impl TunnelDataPlane for Android {
             .to_str()?
             .to_owned())
     }
+    fn speed_job(&self, nodes: Vec<Value>, mb: u64) -> Result<smartvpn_runtime::SpeedJob> {
+        let candidate = self
+            .instance
+            .as_ref()
+            .and_then(|k| k.controller_for_probe(&nodes).map(|c| (c.clone(), k.mixed)));
+        Ok(smartvpn_runtime::probe::speed_job(
+            std::path::PathBuf::from(&self.dir),
+            nodes,
+            mb,
+            candidate,
+            false,
+        ))
+    }
     fn probe_job(&self, nodes: Vec<Value>, url: String) -> Result<smartvpn_runtime::ProbeJob> {
         let measure = move |c: &Controller, name: &str| c.delay(name, &url);
         if let Some(c) = self

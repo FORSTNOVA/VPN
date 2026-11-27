@@ -106,39 +106,127 @@ pub fn diagnose(c: &Controller, status: PlaneStatus, dir: &std::path::Path) -> R
     )
 }
 
-pub fn speed(dir: &std::path::Path, port: u16, mb: u64) -> Result<Value> {
-    use std::io::{self, Read};
-    ensure!(matches!(mb, 10 | 30 | 100), "invalid speed test size");
+const SPEED_WINDOW: Duration = Duration::from_secs(10);
+
+pub fn download_speed(dir: &std::path::Path, port: u16, mb: u64) -> Result<Value> {
     let agent = through_mixed(port)?;
     let origin = endpoint(dir, "speed-origin.txt", "https://speed.cloudflare.com")?;
     let origin = origin.trim_end_matches('/');
-    let down = mb * 1_000_000;
-    let up = down / 3;
+    download(&agent, origin, mb, SPEED_WINDOW)
+}
+
+fn download(agent: &ureq::Agent, origin: &str, mb: u64, window: Duration) -> Result<Value> {
+    use std::io::Read;
+    ensure!(matches!(mb, 10 | 30 | 100), "invalid speed test size");
+    let quota = mb * 1_000_000 / 2;
+    let url = format!("{origin}/__down?bytes={quota}");
     let start = Instant::now();
-    let resp = agent
-        .get(&format!("{origin}/__down?bytes={down}"))
-        .call()
-        .map_err(crate::http::error)?;
-    let downloaded = io::copy(&mut resp.into_reader().take(down + 1), &mut io::sink())?;
-    ensure!(downloaded == down, "incomplete speed test download");
-    let down_time = start.elapsed();
-    let start = Instant::now();
-    agent
-        .post(&format!("{origin}/__up"))
-        .set("Content-Length", &up.to_string())
-        .send(io::repeat(0).take(up))
-        .map_err(crate::http::error)?;
-    let up_time = start.elapsed();
+    let deadline = start + window;
+    let stream = || {
+        let mut received = 0;
+        let result = (|| -> Result<()> {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .context("download deadline")?;
+            let mut reader = agent
+                .get(&url)
+                .timeout(remaining)
+                .call()
+                .map_err(crate::http::error)?
+                .into_reader()
+                .take(quota);
+            let mut buf = [0; 32768];
+            while Instant::now() < deadline {
+                let count = reader.read(&mut buf)?;
+                if count == 0 {
+                    break;
+                }
+                received += count as u64;
+            }
+            Ok(())
+        })();
+        (received, result)
+    };
+    let [(a, first), (b, second)] = std::thread::scope(|scope| {
+        let other = scope.spawn(stream);
+        [stream(), other.join().unwrap()]
+    });
+    let bytes = a + b;
+    if bytes == 0 {
+        first.and(second).context("no download data")?;
+        anyhow::bail!("empty speed test download");
+    }
+    let elapsed = start.elapsed();
     Ok(
-        json!({"speed":{"target":"Cloudflare","megaBytes":mb,"downBytes":down,"upBytes":up,
-        "downMbps":8.0*down as f64/1e6/down_time.as_secs_f64(),"upMbps":8.0*up as f64/1e6/up_time.as_secs_f64(),
-        "downMs":down_time.as_millis(),"upMs":up_time.as_millis()}}),
+        json!({"target":"Cloudflare","megaBytes":mb,"downBytes":bytes,
+        "downMbps":8.0 * bytes as f64 / 1e6 / elapsed.as_secs_f64(),"downMs":elapsed.as_millis()}),
     )
+}
+
+pub fn speed(dir: &std::path::Path, port: u16, mb: u64) -> Result<Value> {
+    use std::io::{self, Read};
+    let origin = endpoint(dir, "speed-origin.txt", "https://speed.cloudflare.com")?;
+    let origin = origin.trim_end_matches('/');
+    let agent = through_mixed(port)?;
+    let mut sample = download(&agent, origin, mb, SPEED_WINDOW)?;
+    let up = mb * 1_000_000 / 3;
+    let start = Instant::now();
+    let result = agent
+        .post(&format!("{origin}/__up"))
+        .timeout(SPEED_WINDOW)
+        .set("Content-Length", &up.to_string())
+        .send(io::repeat(0).take(up));
+    let up_time = start.elapsed();
+    let confirmed = match result {
+        Ok(_) => up,
+        Err(e) => {
+            sample["error"] = json!(format!("上传测速失败: {}", crate::http::error(e)));
+            0
+        }
+    };
+    sample["upBytes"] = json!(confirmed);
+    sample["upMs"] = json!(up_time.as_millis());
+    sample["upMbps"] = json!(8.0 * confirmed as f64 / 1e6 / up_time.as_secs_f64());
+    Ok(json!({"speed":sample}))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn partial_window_counts_both_streams() -> Result<()> {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+        let url = format!("http://{}", listener.local_addr()?);
+        let server = std::thread::spawn(move || -> Result<()> {
+            let mut held = Vec::new();
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept()?;
+                let mut lines = BufReader::new(&socket).lines();
+                assert!(lines
+                    .next()
+                    .unwrap()?
+                    .starts_with("GET /__down?bytes=5000000 "));
+                for line in lines {
+                    if line?.is_empty() {
+                        break;
+                    }
+                }
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 5000000\r\n\r\n12345")?;
+                held.push(socket);
+            }
+            std::thread::sleep(Duration::from_secs(1));
+            Ok(())
+        });
+        let sample = download(&crate::http::agent(), &url, 10, Duration::from_millis(400))?;
+        assert_eq!(sample["downBytes"], 10);
+        let ms = sample["downMs"].as_u64().unwrap();
+        assert!((390..950).contains(&ms), "{ms} ms");
+        let bits = sample["downMbps"].as_f64().unwrap() * 1000.0 * ms as f64;
+        assert!((bits - 80.0).abs() < 1.0);
+        server.join().unwrap()
+    }
+
     #[test]
     fn controller_delay_preserves_reason() {
         let server = tiny_http::Server::http("127.0.0.1:0").unwrap();

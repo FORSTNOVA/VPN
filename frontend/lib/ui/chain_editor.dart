@@ -10,6 +10,7 @@ class ChainEditor extends StatefulWidget {
   final Map<String, List<String>>? initialBackups;
   final bool tunnelActive;
   final ProbeBook book;
+  final SpeedBook speeds;
   final Future<void> Function(
       String name, List<String> hops, Map<String, List<String>> backups) save;
 
@@ -23,6 +24,7 @@ class ChainEditor extends StatefulWidget {
     this.initialBackups,
     this.tunnelActive = false,
     required this.book,
+    required this.speeds,
     required this.save,
   });
 
@@ -164,8 +166,9 @@ class _ChainEditorState extends State<ChainEditor> {
           nodeGroups: widget.nodeGroups,
           nodeTransports: widget.nodeTransports),
     );
-    if (mounted && selected != null)
+    if (mounted && selected != null) {
       setState(() => (_backups[primary] ??= []).add(selected));
+    }
   }
 
   Future<void> _handleSave() async {
@@ -388,6 +391,8 @@ class _ChainEditorState extends State<ChainEditor> {
                     book: _pathBook,
                     hops: _hops.sublist(0, index + 1),
                     title: index == _hops.length - 1 ? '测整链' : '测前置路径'),
+              if (index == _hops.length - 1)
+                PathSpeedButton(book: widget.speeds, hops: _hops, backups: _backups),
             ]),
             if (widget.initialBackups != null) ...[
               for (final backup in _backups[hopName] ?? <String>[])

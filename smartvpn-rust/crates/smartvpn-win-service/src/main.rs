@@ -218,6 +218,19 @@ impl TunnelDataPlane for Windows {
         }
         Ok(())
     }
+    fn speed_job(&self, nodes: Vec<Value>, mb: u64) -> Result<smartvpn_runtime::SpeedJob> {
+        let candidate = self
+            .kernel
+            .as_ref()
+            .and_then(|k| k.controller_for_probe(&nodes).map(|c| (c.clone(), k.mixed)));
+        Ok(smartvpn_runtime::probe::speed_job(
+            std::path::PathBuf::from(&self.dir),
+            nodes,
+            mb,
+            candidate,
+            self.kernel.as_ref().is_some_and(|k| k.dns_guard.is_some()),
+        ))
+    }
     fn probe_job(&self, nodes: Vec<Value>, url: String) -> Result<smartvpn_runtime::ProbeJob> {
         if let Some(controller) = self
             .kernel
@@ -271,6 +284,110 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn speed_job_reuses_only_the_active_exit() -> Result<()> {
+        use std::io::{BufRead, BufReader, Read};
+        use std::net::{TcpListener, TcpStream};
+        fn headers(socket: &TcpStream) -> Result<String> {
+            let mut lines = BufReader::new(socket).lines();
+            let first = lines.next().context("missing request")??;
+            for line in lines {
+                if line?.is_empty() {
+                    break;
+                }
+            }
+            Ok(first)
+        }
+        fn mock_proxy(
+            body: &'static str,
+            socks: bool,
+        ) -> Result<(u16, thread::JoinHandle<Result<()>>)> {
+            let listener = TcpListener::bind(("127.0.0.1", 0))?;
+            let port = listener.local_addr()?.port();
+            Ok((
+                port,
+                thread::spawn(move || {
+                    for _ in 0..2 {
+                        let (mut socket, _) = listener.accept()?;
+                        socket.set_read_timeout(Some(Duration::from_secs(3)))?;
+                        if socks {
+                            let mut hello = [0; 2];
+                            socket.read_exact(&mut hello)?;
+                            assert_eq!(hello[0], 5);
+                            socket.read_exact(&mut vec![0; hello[1] as usize])?;
+                            socket.write_all(&[5, 0])?;
+                            let mut connect = [0; 10];
+                            socket.read_exact(&mut connect)?;
+                            assert_eq!(connect, [5, 1, 0, 1, 192, 0, 2, 1, 0, 80]);
+                            socket.write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 0])?;
+                            assert!(headers(&socket)?.starts_with("GET /__down?bytes=5000000 "));
+                        } else {
+                            let request = headers(&socket)?;
+                            assert!(
+                                request.starts_with("GET http://192.0.2.1/__down?bytes=5000000 "),
+                                "{request}"
+                            );
+                        }
+                        write!(socket,"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",body.len())?;
+                    }
+                    Ok(())
+                }),
+            ))
+        }
+        let dir = tempfile::tempdir()?;
+        std::fs::write(dir.path().join("speed-origin.txt"), "http://192.0.2.1")?;
+        let (mixed, active) = mock_proxy("active", false)?;
+        let (other_port, other) = mock_proxy("temporary", true)?;
+        let listener = TcpListener::bind(("127.0.0.1", 0))?;
+        let controller = Controller {
+            port: listener.local_addr()?.port(),
+            secret: "fixture".into(),
+        };
+        let (stop, wait) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            for _ in 0..2 {
+                for body in [
+                    r#"{"all":["active","other"],"now":"active"}"#,
+                    r#"{"type":"Http"}"#,
+                ] {
+                    let (mut socket, _) = listener.accept().unwrap();
+                    headers(&socket).unwrap();
+                    write!(
+                        socket,
+                        "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .unwrap();
+                }
+            }
+            wait.recv().unwrap();
+            Ok(())
+        });
+        let nodes = ["active", "other"].map(
+            |name| json!({"name":name,"type":"socks5","server":"127.0.0.1","port":other_port}),
+        );
+        let plane = Windows {
+            dir: dir.path().into(),
+            kernel: Some(Kernel {
+                worker,
+                controller,
+                mixed,
+                members: nodes.to_vec(),
+                _wintun: None,
+                dns_guard: None,
+            }),
+        };
+        for (node, bytes) in nodes.into_iter().zip([12, 18]) {
+            let sample = plane.speed_job(vec![node], 10)?()?;
+            assert_eq!(sample["downBytes"], bytes);
+        }
+        active.join().unwrap()?;
+        other.join().unwrap()?;
+        stop.send(())?;
+        plane.kernel.unwrap().worker.join().unwrap().unwrap();
+        Ok(())
+    }
 
     #[test]
     fn running_controller_requires_every_compiled_member_to_match() {

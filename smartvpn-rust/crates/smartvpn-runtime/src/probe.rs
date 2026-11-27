@@ -24,6 +24,25 @@ pub fn is_udp_serialized_node(node: &Value) -> bool {
         .eq_ignore_ascii_case("udp")
 }
 
+pub fn speed_job(
+    dir: std::path::PathBuf,
+    nodes: Vec<Value>,
+    mb: u64,
+    candidate: Option<(Controller, u16)>,
+    protected_dns: bool,
+) -> crate::SpeedJob {
+    Box::new(move || {
+        if let Some((controller, port)) = candidate {
+            if nodes.last().unwrap()["name"] == controller.active_leaf()? {
+                return crate::download_speed(&dir, port, mb);
+            }
+        }
+        with_probe_dns(&dir, nodes, protected_dns, |_, _, port| {
+            crate::download_speed(&dir, port, mb)
+        })
+    })
+}
+
 pub fn with_probe<T>(
     dir: &std::path::Path,
     nodes: Vec<Value>,

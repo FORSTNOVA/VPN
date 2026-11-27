@@ -3,7 +3,6 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smartvpn_windows/main.dart';
-import 'package:smartvpn_windows/models.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -52,6 +51,7 @@ void main() {
   });
   for (final size in [
     const Size(390, 844),
+    const Size(411, 890),
     const Size(800, 900),
     const Size(1440, 900)
   ]) {

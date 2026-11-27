@@ -5695,6 +5695,7 @@ dependencies = [
  "clash-lib",
  "serde_json",
  "smartvpn-runtime",
+ "tempfile",
  "tokio-util",
  "windows-sys 0.61.2",
 ]

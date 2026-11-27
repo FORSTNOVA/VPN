@@ -19,9 +19,10 @@ class _PolicyPageState extends State<SubscriptionPolicyPage> {
       await widget.toggle(next);
       if (mounted) setState(() => enabled = next);
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text(e.toString())));
+      }
     } finally {
       if (mounted) setState(() => saving = false);
     }
@@ -103,7 +104,7 @@ class _PolicyPageState extends State<SubscriptionPolicyPage> {
               ListView.builder(
                   itemCount: rules.length + 1,
                   itemBuilder: (_, i) {
-                    if (i == 0)
+                    if (i == 0) {
                       return SwitchListTile(
                           value: enabled,
                           onChanged: saving ||
@@ -115,6 +116,7 @@ class _PolicyPageState extends State<SubscriptionPolicyPage> {
                           subtitle: Text(widget.data['running'] == true
                               ? '断开后可修改，下次连接生效'
                               : '可用 $supported 条。关闭时沿用默认分流，纯代理组使用当前出口。本机保护策略优先。'));
+                    }
                     final r = rules[i - 1];
                     return ListTile(
                         dense: true,

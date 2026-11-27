@@ -2,6 +2,7 @@ pub use config::install_chain_members;
 #[cfg(any(target_os = "android", test))]
 mod android_dns;
 mod checks;
+pub use checks::download_speed;
 #[path = "../../../../shared/game_migration.rs"]
 mod game_migration;
 #[path = "../../../../shared/site_routes.rs"]
@@ -41,6 +42,7 @@ pub fn token() -> Result<String> {
 }
 
 pub type ProbeJob = Box<dyn FnOnce() -> Result<(u64, u64)> + Send>;
+pub type SpeedJob = Box<dyn FnOnce() -> Result<Value> + Send>;
 
 pub trait TunnelDataPlane: Send {
     fn status(&mut self) -> Result<PlaneStatus>;
@@ -54,6 +56,9 @@ pub trait TunnelDataPlane: Send {
         anyhow::bail!("region probe unavailable")
     }
 
+    fn speed_job(&self, _nodes: Vec<Value>, _mb: u64) -> Result<SpeedJob> {
+        anyhow::bail!("speed test unavailable")
+    }
     fn probe_job(&self, _nodes: Vec<Value>, _url: String) -> Result<ProbeJob> {
         anyhow::bail!("probe unavailable")
     }
@@ -284,7 +289,10 @@ impl Runtime {
                 };
 
                 if req.method().as_str() == "POST"
-                    && req.url().split('?').next() == Some("/api/nodes/chain/probe")
+                    && matches!(
+                        req.url().split('?').next(),
+                        Some("/api/nodes/chain/probe" | "/api/nodes/chain/speed")
+                    )
                     && req
                         .headers()
                         .iter()
@@ -292,7 +300,7 @@ impl Runtime {
                 {
                     let task = prepare_probe(&mut req, &store, &plane);
                     match task {
-                        Ok(job) => match pending.try_send((req, Box::new(job))) {
+                        Ok(job) => match pending.try_send((req, job)) {
                             Ok(()) => (),
                             Err(std::sync::mpsc::TrySendError::Full((req, _))) => {
                                 *http_responses.entry(429).or_default() += 1;
@@ -402,7 +410,7 @@ fn prepare_probe<P: TunnelDataPlane>(
     req: &mut Request,
     store: &Store,
     plane: &Mutex<P>,
-) -> Result<impl FnOnce() -> Result<Vec<u8>> + Send + 'static> {
+) -> Result<Box<dyn FnOnce() -> Result<Vec<u8>> + Send>> {
     let mut bytes = Vec::new();
     req.as_reader()
         .take(1024 * 1024 + 1)
@@ -423,13 +431,33 @@ fn prepare_probe<P: TunnelDataPlane>(
         config::compile_chain(&catalog, &hops, &backups, config::ROUTE_PREFIX)?
     };
     let measured = chrono::Utc::now().timestamp_millis();
+    if req.url().split('?').next() == Some("/api/nodes/chain/speed") {
+        let mb = match args.get("megaBytes") {
+            None => 10,
+            Some(size) => size
+                .as_u64()
+                .filter(|n| matches!(n, 10 | 30 | 100))
+                .context("invalid speed test size")?,
+        };
+        let job = plane.lock().unwrap().speed_job(chain, mb)?;
+        return Ok(Box::new(move || {
+            let mut row = match job() {
+                Ok(sample) => sample,
+                Err(e) => json!({"error":http::redact(&format!("{e:#}"))}),
+            };
+            row["hops"] = json!(hops);
+            row["backups"] = json!(backups);
+            row["measured"] = json!(chrono::Utc::now().timestamp_millis());
+            Ok(serde_json::to_vec(&row)?)
+        }));
+    }
     let target = match args.get("url") {
         Some(url) => store::web_url(url.as_str().context("invalid probe URL")?)?.to_string(),
         None => checks::target(&store.dir)?,
     };
     let job = plane.lock().unwrap().probe_job(chain, target.clone())?;
     let db = store::existing_connection(&store.dir, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-    Ok(move || {
+    Ok(Box::new(move || {
         let result = job();
         let key = if backups.is_empty() {
             json!(hops)
@@ -446,7 +474,7 @@ fn prepare_probe<P: TunnelDataPlane>(
         }
         db.execute("INSERT OR REPLACE INTO probe_results(name,latency_ms,error,timestamp,report) VALUES(?,?,?,?,?)",rusqlite::params![serde_json::to_vec(&key)?,row["delay"].as_i64(),row["error"].as_str(),measured/1000,row.to_string()])?;
         Ok(serde_json::to_vec(&row)?)
-    })
+    }))
 }
 fn check_chain_region(
     plane: &impl TunnelDataPlane,
@@ -1461,6 +1489,13 @@ mod tests {
         fn probe_job(&self, _: Vec<Value>, _: String) -> Result<ProbeJob> {
             Ok(Box::new(|| Ok((5, 2))))
         }
+        fn speed_job(&self, chain: Vec<Value>, mb: u64) -> Result<SpeedJob> {
+            Ok(Box::new(move || {
+                ensure!(mb == 10, "fixture download failed");
+                assert_eq!(chain.len(), 1);
+                Ok(json!({"downBytes":250000,"downMs":1000,"downMbps":2.0,"target":"Cloudflare"}))
+            }))
+        }
     }
 
     #[test]
@@ -1536,6 +1571,48 @@ mod tests {
             }
         }
         mock.join().unwrap();
+        runtime.stop()
+    }
+
+    #[test]
+    fn path_speed_route_reports_measurements_and_failures() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        Store::open(dir.path())?
+            .add_node(&json!({"name":"hop","uri":"socks5://localhost:12345"}))?;
+        let plane = OnlinePlane(Controller {
+            port: 0,
+            secret: String::new(),
+        });
+        let runtime = Runtime::start(Arc::new(Mutex::new(plane)), dir.path())?;
+        let request = http::agent()
+            .post(&format!(
+                "http://{}/api/nodes/chain/speed",
+                runtime.bootstrap.address
+            ))
+            .set(
+                "Authorization",
+                &format!("Bearer {}", runtime.bootstrap.token),
+            );
+        let row: Value = request
+            .clone()
+            .send_json(json!({"hops":["hop"]}))?
+            .into_json()?;
+        assert_eq!(row["downMbps"], 2.0);
+        assert_eq!(row["downBytes"], 250000);
+        assert_eq!(row["downMs"], 1000);
+        assert_eq!(row["target"], "Cloudflare");
+        assert_eq!(row["hops"], json!(["hop"]));
+        assert_eq!(row["backups"], json!({}));
+        assert!(row["measured"].is_i64());
+        let failed: Value = request
+            .clone()
+            .send_json(json!({"hops":["hop"],"megaBytes":30}))?
+            .into_json()?;
+        assert_eq!(failed["error"], "fixture download failed");
+        assert!(matches!(
+            request.send_json(json!({"hops":["hop"],"megaBytes":5})),
+            Err(ureq::Error::Status(400, _))
+        ));
         runtime.stop()
     }
 
@@ -1842,6 +1919,7 @@ mod tests {
             ("GET", "latency"),
             ("POST", "diagnose"),
             ("POST", "nodes/chain/probe"),
+            ("POST", "nodes/chain/speed"),
             ("GET", "events"),
             ("GET", "path-checks"),
             ("PUT", "health/params"),

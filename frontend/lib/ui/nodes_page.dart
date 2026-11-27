@@ -20,7 +20,9 @@ extension _NodesPage on _HomePageState {
       if (_nodeGrouping == NodeGrouping.source &&
           groups.length > 1 &&
           _nodeQuery.trim().isEmpty &&
-          !_expandedSources.contains(group.label)) continue;
+          !_expandedSources.contains(group.label)) {
+        continue;
+      }
       for (final node in group.nodes) {
         items.add(_NodeListItem.entry(node));
       }
@@ -169,8 +171,9 @@ extension _NodesPage on _HomePageState {
                                   _nodeQuery.trim().isEmpty
                               ? InkWell(
                                   onTap: () => _refresh(() {
-                                        if (!_expandedSources.remove(label))
+                                        if (!_expandedSources.remove(label)) {
                                           _expandedSources.add(label);
+                                        }
                                       }),
                                   child: Row(children: [
                                     Icon(_expandedSources.contains(label)
@@ -271,9 +274,10 @@ extension _NodesPage on _HomePageState {
                     body: {'importPolicy': enabled});
               })));
     } catch (e) {
-      if (mounted)
+      if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(SnackBar(content: Text(e.toString())));
+      }
     }
   }
 
@@ -328,8 +332,10 @@ extension _NodesPage on _HomePageState {
         (region != null && region.country.isNotEmpty) ? region.country : '—';
     final narrow = MediaQuery.sizeOf(context).width < Tokens.mobileBreakpoint;
 
-    final latencyLabel =
-        PathProbeButton(book: _probes, hops: [node.name], title: '测单节点');
+    final measurements = Wrap(children: [
+      PathProbeButton(book: _probes, hops: [node.name], title: '测单节点'),
+      PathSpeedButton(book: _speeds, hops: [node.name]),
+    ]);
 
     final updated = health?.updatedAt;
     final hasPatrol = updated != null && updated.year > 1;
@@ -441,7 +447,7 @@ extension _NodesPage on _HomePageState {
                   Wrap(
                       crossAxisAlignment: WrapCrossAlignment.center,
                       children: [
-                        latencyLabel,
+                        measurements,
                         const SizedBox(width: 8),
                         healthBadge,
                         if (active || selected) ...[
@@ -457,7 +463,7 @@ extension _NodesPage on _HomePageState {
           if (!narrow) ...[
             const SizedBox(width: 12),
             if (deleteButton != null) deleteButton,
-            latencyLabel,
+            Flexible(child: measurements),
             const SizedBox(width: 10),
             SizedBox(
               width: 120,

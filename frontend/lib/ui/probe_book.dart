@@ -119,6 +119,90 @@ class ProbeBook extends ChangeNotifier {
   }
 }
 
+typedef PathBackups = Map<String, List<String>>;
+
+class SpeedBook extends ChangeNotifier {
+  SpeedBook(this.send);
+  final Future<Map<String, dynamic>> Function(List<String>, PathBackups) send;
+  final _results = <String, Map<String, dynamic>>{};
+  final _pending = <String>{};
+
+  String key(List<String> hops, PathBackups backups) => jsonEncode([
+        hops,
+        {
+          for (final hop in hops)
+            if (backups.containsKey(hop)) hop: backups[hop]
+        }
+      ]);
+
+  String? label(String path) {
+    if (_pending.contains(path)) return '测速中';
+    final row = _results[path];
+    if (row == null) return null;
+    if (row['error'] != null) return '未通过';
+    return '${(row['downMbps'] as num).toStringAsFixed(1)} Mbps';
+  }
+
+  String detail(String path) {
+    final row = _results[path];
+    if (row == null) return '通过此路径下载测速';
+    return row['error'] as String? ??
+        '${row["target"]} · ${row["downBytes"]} 字节 · ${row["downMs"]} ms';
+  }
+
+  Future<void> run(List<String> hops, PathBackups backups) async {
+    final path = key(hops, backups);
+    if (!_pending.add(path)) return;
+    notifyListeners();
+    try {
+      final row = await send(List.of(hops), {
+        for (final hop in hops)
+          if (backups.containsKey(hop)) hop: List.of(backups[hop]!)
+      });
+      if (row['error'] == null &&
+          !(row['downMbps'] is num &&
+              row['downBytes'] is int &&
+              row['downMs'] is int &&
+              row['target'] is String)) {
+        throw const FormatException('下行测速结果缺少测量数据');
+      }
+      _results[path] = row;
+    } catch (e) {
+      _results[path] = {'error': e.toString()};
+    } finally {
+      _pending.remove(path);
+      notifyListeners();
+    }
+  }
+}
+
+class PathSpeedButton extends StatelessWidget {
+  const PathSpeedButton(
+      {super.key,
+      required this.book,
+      required this.hops,
+      this.backups = const {}});
+  final SpeedBook book;
+  final List<String> hops;
+  final PathBackups backups;
+
+  @override
+  Widget build(BuildContext context) => ListenableBuilder(
+        listenable: book,
+        builder: (_, __) {
+          final path = book.key(hops, backups);
+          return Tooltip(
+              message: book.detail(path),
+              child: TextButton(
+                onPressed: hops.isEmpty || book._pending.contains(path)
+                    ? null
+                    : () => book.run(hops, backups),
+                child: Text(book.label(path) ?? '测带宽'),
+              ));
+        },
+      );
+}
+
 class PathProbeButton extends StatelessWidget {
   const PathProbeButton(
       {super.key, required this.book, required this.hops, required this.title});

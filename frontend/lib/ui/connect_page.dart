@@ -52,10 +52,14 @@ extension _ConnectPage on _HomePageState {
     }
   }
 
-  Widget _connectPage() => ListenableBuilder(listenable: _probes, builder: (_, __) => _overview());
+  PathBackups get _homeSpeedBackups =>
+      _chainEnabled ? (_chainBackups?[_chainName] ?? {}) : {};
+
+  Widget _connectPage() => ListenableBuilder(listenable: Listenable.merge([_probes, _speeds]), builder: (_, __) => _overview());
 
   Widget _overview() {
     final hops = _homeProbeHops;
+    final speedPath = _speeds.key(hops, _homeSpeedBackups);
     final tunMode = _connectionMode == 'tun';
     final hasNoNodes = _nodes.isEmpty && _savedSubscriptions.isEmpty;
 
@@ -85,6 +89,9 @@ extension _ConnectPage on _HomePageState {
               ipv4Error: _diagnose?.egress.error ?? '')
         ),
         ('真连接延迟', _probes.label(hops) ?? '未测'),
+        ('下行带宽', _speeds.label(speedPath) ??
+            (_connectedSpeedPath == speedPath && _speed != null
+                ? speedLabel(_speed!.downMbps) : '未测')),
         ('锁定地区', _lockedRegion.isEmpty ? '未锁定' : _lockedRegion),
         ('候选节点', '$_poolSize'),
       ],
@@ -93,7 +100,10 @@ extension _ConnectPage on _HomePageState {
       connected: _connected,
       busy: _busy,
       port: _port,
-      probe: hops.isEmpty ? const Tooltip(message: '选择具体节点或连接后可测当前路径', child: TextButton(onPressed: null, child: Text('测试真连接延迟'))) : PathProbeButton(book: _probes.forBackups(_chainBackups?[_chainName] ?? {}), hops: hops, title: '测试真连接延迟'),
+      probe: Wrap(children: [
+        hops.isEmpty ? const Tooltip(message: '选择具体节点或连接后可测当前路径', child: TextButton(onPressed: null, child: Text('测试真连接延迟'))) : PathProbeButton(book: _probes.forBackups(_homeSpeedBackups), hops: hops, title: '测试真连接延迟'),
+        PathSpeedButton(book: _speeds, hops: hops, backups: _homeSpeedBackups),
+      ]),
       onToggle: _toggleConnection,
       statusDetail: protectionStateDetail(
         connected: _connected,

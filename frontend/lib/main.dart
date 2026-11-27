@@ -165,6 +165,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   NodeGrouping _nodeGrouping = NodeGrouping.source;
  final _expandedSources=<String>{};
   String _nodeQuery = '';
+  late final _speeds = SpeedBook((hops, backups) => _request('POST',
+      '/api/nodes/chain/speed', body: {'hops': hops, 'megaBytes': 10, 'backups': backups}));
+  String? _connectedSpeedPath;
   late final _probes = ProbeBook((hops) =>
       _request('POST', '/api/nodes/chain/probe', body: {'hops': hops}), sendPolicy: (hops, backups) => _request('POST', '/api/nodes/chain/probe', body: {'hops':hops,'backups':backups}));
   int _probeDone = 0, _probeTotal = 0;
@@ -274,7 +277,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<void> _shutdownDetachedService() async {
     try {
       if (Platform.isAndroid &&
-          await _host.invokeMethod<bool>('systemOwnsVpn') == true) return;
+          await _host.invokeMethod<bool>('systemOwnsVpn') == true) {
+        return;
+      }
       await _request('POST', '/api/shutdown');
     } catch (_) {
       // The platform channel or the service may already have detached.
@@ -1150,6 +1155,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               initialBackups: _chainBackups == null ? null : _chainBackups![original] ?? {},
                               initialName: original ?? '',
                               book: _probes,
+                              speeds: _speeds,
                               save: (name, hops, backups) async {
                                 await _request(
                                     'PUT', '/api/nodes/chain/profile', body: {
@@ -1176,9 +1182,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   await _loadState();
                   if (context.mounted) refresh(() {});
                 } catch (e) {
-                  if (context.mounted)
+                  if (context.mounted) {
                     ScaffoldMessenger.of(context)
                         .showSnackBar(SnackBar(content: Text(e.toString())));
+                  }
                 }
               }
 
@@ -1205,9 +1212,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                   await _loadState();
                   if (context.mounted) refresh(() {});
                 } catch (e) {
-                  if (context.mounted)
+                  if (context.mounted) {
                     ScaffoldMessenger.of(context)
                         .showSnackBar(SnackBar(content: Text(e.toString())));
+                  }
                 }
               }
 
@@ -1246,10 +1254,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                                           ? primary
                                           : '$primary（备用：${backups.join('、')}）';
                                     }).join(' → ')),
-                                    PathProbeButton(
+                                    Wrap(children: [
+                                      PathProbeButton(
                                         book: _probes.forBackups(_chainBackups?[entry.key] ?? {}),
                                         hops: entry.value,
                                         title: '测整链'),
+                                      PathSpeedButton(
+                                        book: _speeds,
+                                        hops: entry.value,
+                                        backups: _chainBackups?[entry.key] ?? {},
+                                      ),
+                                    ]),
                                     Wrap(children: [
                                       TextButton(
                                           onPressed: () => edit(entry.key),
@@ -1384,6 +1399,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   /// Measures throughput through the node in use. The size the user picked is the
   /// download allowance; the upload is a third of it.
   Future<void> _runSpeedTest() async {
+    final path = _speeds.key(_homeProbeHops, _homeSpeedBackups);
     setState(() {
       _speedRunning = true;
       _error = null;
@@ -1394,7 +1410,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           body: {'megaBytes': _speedMegaBytes});
       if (!mounted) return;
       final speed = value['speed'] as Map<String, dynamic>? ?? const {};
-      setState(() => _speed = SpeedTestResult.fromJson(speed));
+      setState(() {
+        _speed = SpeedTestResult.fromJson(speed);
+        _connectedSpeedPath = path;
+      });
     } catch (e) {
       if (mounted) {
         setState(() => _error = e.toString().replaceFirst('Exception: ', ''));

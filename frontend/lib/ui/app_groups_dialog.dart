@@ -5,7 +5,7 @@ import 'installed_game_picker.dart';
 
 typedef _Group = Map<String, dynamic>;
 
-Future<List<_Group>?> editAppGroups(BuildContext context, List<_Group> current,
+Future<List<Map<String, dynamic>>?> editAppGroups(BuildContext context, List<Map<String, dynamic>> current,
     List<String> nodes, bool android,
     {Map<String, String>? chains}) {
   final draft = [...current];
@@ -233,7 +233,7 @@ class _GroupEditorState extends State<_GroupEditor> {
                         validator: (v) =>
                             invalid(v!) ? '请输入有效名称，不能包含逗号、换行或 *' : null),
                     DropdownButtonFormField<String>(
-                        value: type,
+                        initialValue: type,
                         decoration: const InputDecoration(labelText: '路由目标'),
                         items: [
                           const DropdownMenuItem(
@@ -250,7 +250,7 @@ class _GroupEditorState extends State<_GroupEditor> {
                     if (type == 'node')
                       DropdownButtonFormField<String>(
                           isExpanded: true,
-                          value: widget.nodes.contains(node) ? node : null,
+                          initialValue: widget.nodes.contains(node) ? node : null,
                           decoration: const InputDecoration(labelText: '目标节点'),
                           hint: Text(node != null
                               ? '节点已不可用：$node'
@@ -268,7 +268,7 @@ class _GroupEditorState extends State<_GroupEditor> {
                     if (widget.chains case final chains? when type == 'chain')
                       DropdownButtonFormField<String>(
                           isExpanded: true,
-                          value: chains.containsKey(chainId) ? chainId : null,
+                          initialValue: chains.containsKey(chainId) ? chainId : null,
                           decoration: const InputDecoration(labelText: '目标代理链'),
                           hint: Text(
                               chainId != null && !chains.containsKey(chainId)

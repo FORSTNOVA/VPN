@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:smartvpn_windows/ui/chain_editor.dart';
@@ -5,6 +6,47 @@ import 'package:smartvpn_windows/ui/chain_editor.dart';
 import 'package:smartvpn_windows/ui/probe_book.dart';
 
 void main() {
+  testWidgets('chain bandwidth measures the edited path at phone width',
+      (tester) async {
+    await tester.binding.setSurfaceSize(const Size(411, 1000));
+    addTearDown(() => tester.binding.setSurfaceSize(null));
+    final response = Completer<Map<String, dynamic>>();
+    final speeds = SpeedBook((hops, backups) {
+      expect(hops, ['entry', 'exit']);
+      expect(backups, {
+        'exit': ['spare']
+      });
+      return response.future;
+    });
+    await tester.pumpWidget(MaterialApp(
+        home: ChainEditor(
+      available: const ['entry', 'exit', 'spare'],
+      initialHops: const ['entry', 'exit'],
+      initialName: 'chain',
+      initialBackups: const {
+        'exit': ['spare']
+      },
+      book: ProbeBook((_) => throw StateError('unexpected latency test')),
+      speeds: speeds,
+      save: (_, __, ___) async {},
+    )));
+    final button = find.text('测带宽');
+    await tester.ensureVisible(button);
+    await tester.tap(button);
+    await tester.pump();
+    expect(find.text('测速中'), findsOneWidget);
+    response.complete({
+      'target': 'Cloudflare',
+      'downBytes': 125000,
+      'downMs': 1000,
+      'downMbps': 1.0
+    });
+    await tester.pumpAndSettle();
+    expect(find.text('1.0 Mbps'), findsOneWidget);
+    expect(find.byTooltip('Cloudflare · 125000 字节 · 1000 ms'), findsOneWidget);
+    expect(speeds.label(speeds.key(['entry', 'exit'], {})), isNull);
+    expect(tester.takeException(), isNull);
+  });
   testWidgets('test candidate through entry before selecting and saving',
       (tester) async {
     List<String>? tested, saved;
@@ -13,6 +55,8 @@ void main() {
             available: const ['entry', 'exit'],
             initialHops: const ['entry'],
             initialName: 'test',
+            speeds:
+                SpeedBook((_, __) => throw StateError('unexpected speed test')),
             book: ProbeBook((prefix) async {
               tested = prefix;
               return {
@@ -49,6 +93,7 @@ void main() {
       initialHops: const ['entry', 'exit'],
       initialName: 'chain',
       initialBackups: const {},
+      speeds: SpeedBook((_, __) => throw StateError('unexpected speed test')),
       book: ProbeBook((_) => throw StateError('unexpected probe')),
       save: (_, hops, backups) async {
         order = hops;
@@ -90,6 +135,7 @@ void main() {
         'Osaka': 'East',
         'Kyoto': 'East'
       },
+      speeds: SpeedBook((_, __) => throw StateError('unexpected speed test')),
       book: ProbeBook((_) => throw StateError('Unexpected probe')),
       save: (_, __, ___) async {},
     )));
