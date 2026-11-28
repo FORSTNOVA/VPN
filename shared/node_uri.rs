@@ -216,7 +216,8 @@ pub(crate) fn ss_plugin(n: &mut Value, spec: &str) -> Result<()> {
 
 pub fn parse(uri: &str, label: Option<&str>) -> Result<Value> {
     let (scheme, rest) = uri.split_once("://").context("missing URI scheme")?;
-    let scheme = match scheme {
+    let normalized_scheme = scheme.to_ascii_lowercase();
+    let scheme = match normalized_scheme.as_str() {
         "hy2" => "hysteria2",
         "socks" => "socks5",
         s => s,

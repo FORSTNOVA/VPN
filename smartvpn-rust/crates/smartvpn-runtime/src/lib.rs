@@ -16,6 +16,7 @@ mod monitor;
 pub mod probe;
 mod regions;
 pub use regions::region;
+#[path = "../../../../shared/node_uri.rs"]
 mod node;
 mod store;
 mod subscriptions;

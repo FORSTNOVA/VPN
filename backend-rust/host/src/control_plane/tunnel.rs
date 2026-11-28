@@ -204,6 +204,8 @@ pub fn start_tun(state: &mut RuntimeState) -> Result<(), String> {
     if handle <= 0 {
         return Err(format!("pure-Rust TUN engine start failed (code {handle})"));
     }
+    state.probe_nodes = proxies;
+    state.probe_chain = state.active_chain().cloned();
     state.tun_handle = Some(handle);
     let router = smartvpn_engine::ffi::tun_router(handle).map_err(|e| e.to_string())?;
     state.traffic.attach(router.traffic.clone());
@@ -219,6 +221,8 @@ pub fn start_tun(state: &mut RuntimeState) -> Result<(), String> {
 }
 
 pub fn stop_tun(state: &mut RuntimeState) -> Result<(), String> {
+    state.probe_nodes.clear();
+    state.probe_chain = None;
     state.china.active = false;
     if let Some(handle) = state.tun_handle.take() {
         let rc = smartvpn_engine::ffi::smartvpn_engine_tun_stop_v1(handle);

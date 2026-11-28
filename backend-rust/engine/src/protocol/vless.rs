@@ -48,6 +48,19 @@ pub enum VlessNetwork {
     Grpc(GrpcConfig),
 }
 
+impl VlessNetwork {
+    pub(crate) async fn wrap(&self, stream: BoxedStream, host: &str) -> io::Result<BoxedStream> {
+        Ok(match self {
+            VlessNetwork::Tcp => stream,
+            VlessNetwork::Ws(ws) => connect_ws(stream, host, ws).await?,
+            VlessNetwork::WsHeaders(ws, headers) => {
+                crate::transport::ws::connect_ws_headers(stream, host, ws, headers).await?
+            }
+            VlessNetwork::Grpc(grpc) => connect_grpc(stream, host, grpc).await?,
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct VlessConfig {
     pub server: TargetAddr,
@@ -136,14 +149,7 @@ impl VlessDialer {
                 connect_reality_with_splice(raw, reality, splice.clone()).await?
             }
         };
-        let mut transport = match &cfg.network {
-            VlessNetwork::Tcp => sec_stream,
-            VlessNetwork::Ws(ws) => connect_ws(sec_stream, &host, ws).await?,
-            VlessNetwork::WsHeaders(ws, headers) => {
-                crate::transport::ws::connect_ws_headers(sec_stream, &host, ws, headers).await?
-            }
-            VlessNetwork::Grpc(grpc) => connect_grpc(sec_stream, &host, grpc).await?,
-        };
+        let mut transport = cfg.network.wrap(sec_stream, &host).await?;
 
         let mut addons = Vec::new();
         if is_vision {

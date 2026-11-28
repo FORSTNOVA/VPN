@@ -1,4 +1,6 @@
 mod checks;
+#[path = "../../../../shared/node_uri.rs"]
+mod node_uri;
 mod china;
 mod regions;
 mod traffic;
@@ -307,7 +309,8 @@ impl ControlPlane {
             (Method::DELETE, "/api/nodes/chain/profile") => {
                 self.handle_delete_chain_profile(&query, &body).await
             }
-            (Method::POST, "/api/nodes/chain/probe") => self.handle_probe_chain(&body).await,
+            (Method::POST, "/api/nodes/chain/probe") => self.handle_probe_chain(&body, false).await,
+            (Method::POST, "/api/nodes/chain/speed") => self.handle_probe_chain(&body, true).await,
             (Method::GET, "/api/nodes/probes") => {
                 let st = self.state.lock().await;
                 let results: Vec<Value> = st.chain_probes.values().cloned().collect();
@@ -672,14 +675,11 @@ impl ControlPlane {
             return text_resp(StatusCode::BAD_REQUEST, "invalid JSON\n");
         };
         let uri = val.get("uri").and_then(|u| u.as_str()).unwrap_or("").trim();
-        let Some(mut proxy) = subs::parse_proxy_uri(uri) else {
-            return text_resp(StatusCode::BAD_REQUEST, "unsupported node URI\n");
+        let label = val.get("name").and_then(Value::as_str).map(str::trim);
+        let proxy = match node_uri::parse(uri, label.filter(|s| !s.is_empty())) {
+            Ok(proxy) => proxy,
+            Err(e) => return text_resp(StatusCode::BAD_REQUEST, &format!("invalid node URI: {e}")),
         };
-        if let Some(name) = val.get("name").and_then(|n| n.as_str()).filter(|s| !s.trim().is_empty()) {
-            if let Some(obj) = proxy.as_object_mut() {
-                obj.insert("name".into(), json!(name.trim()));
-            }
-        }
         let final_name = proxy
             .get("name")
             .and_then(|n| n.as_str())
@@ -838,15 +838,14 @@ impl ControlPlane {
         json_resp(StatusCode::OK, json!({"ok": true}))
     }
 
-    async fn handle_probe_chain(&self, body: &[u8]) -> Response<Full<Bytes>> {
+    async fn handle_probe_chain(&self, body: &[u8], bandwidth: bool) -> Response<Full<Bytes>> {
         let Ok(val) = serde_json::from_slice::<Value>(body) else {
             return text_resp(StatusCode::BAD_REQUEST, "invalid JSON\n");
         };
-        let hops: Vec<String> = val
-            .get("hops")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect())
-            .unwrap_or_default();
+        let hops: Vec<String> = match serde_json::from_value(val["hops"].clone()) {
+            Ok(hops) => hops,
+            Err(_) => return text_resp(StatusCode::BAD_REQUEST, "expected node names in hops"),
+        };
         let backups: std::collections::BTreeMap<String, Vec<String>> = match val.get("backups") {
             None => Default::default(),
             Some(raw) => match serde_json::from_value(raw.clone()) {
@@ -854,14 +853,29 @@ impl ControlPlane {
                 Err(_) => return text_resp(StatusCode::BAD_REQUEST, "invalid hop backups"),
             }
         };
-        let (proxies, protect) = {
-            let st = self.state.lock().await;
-            (st.all_proxy_values(), st.active_protect_hook())
+        let router = {
+            let state = self.state.lock().await;
+            nodes::path_router(&state, &hops, &backups)
         };
+        if bandwidth {
+            let Some(mb @ (10 | 30 | 100)) = val["megaBytes"].as_u64() else {
+                return text_resp(StatusCode::BAD_REQUEST, "expected megaBytes of 10, 30 or 100");
+            };
+            let router = match router { Ok(router) => router, Err(e) => return text_resp(StatusCode::BAD_REQUEST, &e) };
+            let mut sample = match checks::download(&router, mb as usize).await {
+                Ok(sample) => sample,
+                Err(e) => return text_resp(StatusCode::BAD_GATEWAY, &e.to_string()),
+            };
+            sample["hops"] = json!(hops);
+            sample["backups"] = json!(backups);
+            sample["measured"] = json!(chrono::Utc::now().timestamp_millis());
+            return json_resp(StatusCode::OK, sample);
+        }
         let key = if backups.is_empty() { hops.join(" → ") } else { json!([hops,backups]).to_string() };
         let measured = chrono::Utc::now().timestamp_millis();
         let timeout_ms = if hops.len() > 1 { 12000 } else { 6000 };
-        match nodes::probe_chain_latency(&backups, &proxies, &hops, protect, timeout_ms).await {
+        let sample = match router { Ok(router) => nodes::measure(&router, timeout_ms).await, Err(error) => Err(error) };
+        match sample {
             Ok((first_ms, steady_ms)) => {
                 let mut st = self.state.lock().await;
                 if hops.len() == 1 {
@@ -963,8 +977,7 @@ impl ControlPlane {
             .or_else(|| val.get("name"))
             .and_then(|n| n.as_str())
             .filter(|s| !s.trim().is_empty())
-            .map(|s| s.trim().to_owned())
-            .unwrap_or_else(|| url.split("://").nth(1).unwrap_or(&url).split('/').next().unwrap_or("sub").to_owned());
+            .map(str::trim);
         let protect = self.state.lock().await.active_protect_hook();
         let ((proxies, rules), user_info) = match subs::fetch_subscription_text(&url, protect).await
         {
@@ -977,6 +990,13 @@ impl ControlPlane {
                 }
             }
             Err(e) => return text_resp(StatusCode::BAD_GATEWAY, &format!("{e}\n")),
+        };
+        let label = match label {
+            Some(name) => name.to_owned(),
+            None => match url::Url::parse(&url) {
+                Ok(link) if matches!(link.scheme(), "http" | "https") => link.host_str().unwrap().to_owned(),
+                _ => proxies[0]["name"].as_str().unwrap().to_owned(),
+            },
         };
         let now = chrono::Utc::now().timestamp();
         let id = format!("sub-{}", chrono::Utc::now().timestamp_millis());

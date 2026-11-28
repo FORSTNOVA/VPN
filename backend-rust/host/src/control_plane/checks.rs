@@ -27,6 +27,17 @@ pub(super) async fn request(
     limit: usize,
     capture: bool,
 ) -> Result<(usize, Vec<u8>), CheckError> {
+    request_counted(router, url, upload, limit, capture, &mut 0).await
+}
+
+async fn request_counted(
+    router: &Router,
+    url: &str,
+    upload: Option<Bytes>,
+    limit: usize,
+    capture: bool,
+    received: &mut usize,
+) -> Result<(usize, Vec<u8>), CheckError> {
     tokio::time::timeout(Duration::from_secs(90), async {
         let uri: hyper::Uri = url.parse()?;
         let tls = match uri.scheme_str() {
@@ -95,6 +106,7 @@ pub(super) async fn request(
                 if count > limit {
                     return Err(io::Error::other("response exceeds size limit").into());
                 }
+                *received = count;
                 if capture {
                     data.extend_from_slice(&chunk);
                 }
@@ -105,38 +117,57 @@ pub(super) async fn request(
     .await?
 }
 
-pub(super) async fn speed(router: &Router, mb: usize) -> Result<Value, CheckError> {
-    let down = mb * 1_000_000;
-    let up = down / 3;
+pub(super) async fn download(router: &Router, mb: usize) -> Result<Value, CheckError> {
+    let quota = mb * 500_000;
+    let url = format!("https://speed.cloudflare.com/__down?bytes={quota}");
     let start = Instant::now();
-    let (downloaded, _) = request(
-        router,
-        &format!("https://speed.cloudflare.com/__down?bytes={down}"),
-        None,
-        down,
-        false,
-    )
-    .await?;
-    if downloaded != down {
-        return Err(io::Error::other("incomplete speed test download").into());
+    let (mut a, mut b) = (0, 0);
+    let streams = async {
+        tokio::try_join!(
+            request_counted(router, &url, None, quota, false, &mut a),
+            request_counted(router, &url, None, quota, false, &mut b)
+        )
+    };
+    let result = tokio::time::timeout(Duration::from_secs(10), streams).await;
+    let bytes = a + b;
+    match result {
+        Ok(streams) => {
+            streams?;
+        }
+        Err(timeout) if bytes == 0 => return Err(timeout.into()),
+        Err(_) => return Ok(download_sample(mb, bytes, start.elapsed())),
     }
-    let down_time = start.elapsed();
-    let payload = Bytes::from(vec![0; up]);
+    if bytes == 0 {
+        return Err(io::Error::other("empty speed test download").into());
+    }
+    Ok(download_sample(mb, bytes, start.elapsed()))
+}
+
+fn download_sample(mb: usize, bytes: usize, elapsed: Duration) -> Value {
+    json!({"target":"Cloudflare","megaBytes":mb,"downBytes":bytes,
+        "downMbps":8.0 * bytes as f64 / 1e6 / elapsed.as_secs_f64(),"downMs":elapsed.as_millis()})
+}
+
+pub(super) async fn speed(router: &Router, mb: usize) -> Result<Value, CheckError> {
+    let mut sample = download(router, mb).await?;
+    let up = mb * 1_000_000 / 3;
     let start = Instant::now();
-    request(
-        router,
-        "https://speed.cloudflare.com/__up",
-        Some(payload),
-        65536,
-        false,
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        request(
+            router,
+            "https://speed.cloudflare.com/__up",
+            Some(Bytes::from(vec![0; up])),
+            65536,
+            false,
+        ),
     )
-    .await?;
-    let up_time = start.elapsed();
-    Ok(
-        json!({"speed":{"target":"Cloudflare","megaBytes":mb,"downBytes":down,"upBytes":up,
-        "downMbps":8.0*down as f64/1e6/down_time.as_secs_f64(),"upMbps":8.0*up as f64/1e6/up_time.as_secs_f64(),
-        "downMs":down_time.as_millis(),"upMs":up_time.as_millis()}}),
-    )
+    .await??;
+    let elapsed = start.elapsed();
+    sample["upBytes"] = json!(up);
+    sample["upMs"] = json!(elapsed.as_millis());
+    sample["upMbps"] = json!(8.0 * up as f64 / 1e6 / elapsed.as_secs_f64());
+    Ok(json!({"speed":sample}))
 }
 
 pub(super) async fn site(router: &Router, name: &str, url: &str) -> Value {

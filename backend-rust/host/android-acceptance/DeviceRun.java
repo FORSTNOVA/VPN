@@ -17,6 +17,8 @@ public final class DeviceRun extends Instrumentation {
     private boolean requireReadHost;
     private boolean requireWriteHost;
     private boolean testLiveMerge;
+    private String nodeLink;
+    private String nodeType;
     private String storeStep;
     private String storeFixture;
     private String distributionBackend;
@@ -28,6 +30,8 @@ public final class DeviceRun extends Instrumentation {
             requireWriteHost = "1".equals(args.getString("writeHost"));
             testLiveMerge = "1".equals(args.getString("liveMerge"));
             requireReadHost = "1".equals(args.getString("readHost"));
+            nodeLink = args.getString("nodeLink64");
+            nodeType = args.getString("nodeType");
             storeStep = args.getString("storeStep");
             storeFixture = args.getString("storeFixture");
             distributionBackend = args.getString("distributionBackend");
@@ -100,13 +104,13 @@ public final class DeviceRun extends Instrumentation {
     }
     private void peer(Fixture node, String action) throws Exception {
         String nonce = UUID.randomUUID().toString();
-        node.nonce = nonce;
+        if (node != null) node.nonce = nonce;
         // A previous peer may have logged its result just before finish() ran.
         // Give each challenge its own task so Android always invokes onCreate.
         String started = shell("am start -f 0x18000000 -n com.smartvpn.acceptance/.Peer --es nonce " + nonce
             + " --ez " + action + " true");
         check(started.contains("Starting: Intent") && !started.contains("Error") && !started.contains("not started"), started);
-        for (int n = 0; n < 60; n++) {
+        for (int n = 0; n < 150; n++) {
             String log = shell("logcat -d -s SmartVPNPeer:I");
             if (log.contains(nonce + " PASS"))
                 return;
@@ -115,6 +119,33 @@ public final class DeviceRun extends Instrumentation {
             Thread.sleep(200);
         }
         throw new IOException("peer timed out");
+    }
+    // Run only on a disposable Android Studio AVD with the paired protocol fixture.
+    private void checkNodeLink() throws Exception {
+        check("vmess".equals(nodeType) || "tuic".equals(nodeType), "invalid test protocol");
+        String uri = new String(android.util.Base64.decode(nodeLink, android.util.Base64.URL_SAFE), StandardCharsets.UTF_8);
+        api("PUT", "settings", new JSONObject().put("subscriptionUrl", uri));
+        org.json.JSONArray nodes = api("POST", "nodes/fetch", null).getJSONArray("nodes");
+        String expected = "AVD-" + ("vmess".equals(nodeType) ? "VMess" : "TUIC");
+        boolean imported = false;
+        for (int i = 0; i < nodes.length(); i++) {
+            JSONObject node = nodes.getJSONObject(i);
+            if (expected.equals(node.getString("name")) && nodeType.equals(node.getString("type"))) imported = true;
+        }
+        check(imported, "single node missing after fetch");
+        api("PUT", "nodes/select", new JSONObject().put("name", expected));
+        check(VpnService.prepare(app) == null, "emulator VPN consent required");
+        app.startForegroundService(vpn().setAction("com.smartvpn.client.START"));
+        for (int i = 0; i < 100 && api("GET", "tun", null).getString("interface").isEmpty(); i++) Thread.sleep(100);
+        api("POST", "connect", null);
+        try {
+            JSONObject state = api("GET", "state", null);
+            check(state.getBoolean("connected") && expected.equals(state.getString("selectedNode")), "wrong active node");
+            peer(null, "packetTest");
+            report(expected + " imported; active VPN; TCP 32768 and UDP 1024 bytes verified in both directions");
+        } finally {
+            api("POST", "disconnect", null);
+        }
     }
     private boolean workerRunning(String name) throws IOException {
         File[] tasks = new File("/proc/self/task").listFiles();
@@ -212,7 +243,7 @@ public final class DeviceRun extends Instrumentation {
         Bundle result = new Bundle();
         boolean passed = false, added = false;
         String subscriptionId = null;
-        try (Fixture node = storeStep == null ? new Fixture() : null) {
+        try (Fixture node = storeStep == null && nodeLink == null ? new Fixture() : null) {
             app = getTargetContext();
             if ("profile-history".equals(storeStep)) {
                 // Populate one deterministic row in the previous APK's closed database.
@@ -235,6 +266,11 @@ public final class DeviceRun extends Instrumentation {
                     (String) bridge.getMethod("startConfigured", Context.class).invoke(null, app));
             }
             check(bootstrap.has("port"), "bootstrap failed: " + bootstrap.optString("error"));
+            if (nodeLink != null) {
+                checkNodeLink();
+                passed = true;
+                return;
+            }
             if (distributionBackend != null) {
                 boolean rust = "rust".equals(distributionBackend);
                 String maps = read(new FileInputStream("/proc/self/maps"));

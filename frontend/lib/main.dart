@@ -1049,9 +1049,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         final appliedFormat = value['appliedFormat'] as String? ?? '';
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-              content: Text(appliedFormat == 'cla=1'
-                  ? '已按 Clash 格式获取节点；Windows 系统代理保持关闭'
-                  : '节点已获取；Windows 系统代理保持关闭')),
+              content: Text(appliedFormat == 'cla=1' ? '已按 Clash 格式获取节点' : '节点已获取')),
         );
       }
     } catch (e) {

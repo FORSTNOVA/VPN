@@ -71,6 +71,38 @@ struct Proxy {
     rename_all_fields = "kebab-case"
 )]
 enum Protocol {
+    Vmess {
+        uuid: String,
+        cipher: Option<String>,
+        #[serde(default)]
+        alter_id: u16,
+        #[serde(default)]
+        tls: bool,
+        network: Option<String>,
+        #[serde(default)]
+        ws_opts: Ws,
+        #[serde(default)]
+        grpc_opts: Grpc,
+        #[serde(default)]
+        alpn: Vec<String>,
+    },
+    Tuic {
+        uuid: String,
+        password: String,
+        alpn: Option<Vec<String>>,
+        congestion_controller: Option<String>,
+        udp_relay_mode: Option<String>,
+        #[serde(default)]
+        disable_sni: bool,
+        #[serde(default)]
+        reduce_rtt: bool,
+        heartbeat_interval: Option<u64>,
+        request_timeout: Option<u64>,
+    },
+    Socks5 {
+        username: Option<String>,
+        password: Option<String>,
+    },
     Ss {
         cipher: String,
         password: String,
@@ -196,6 +228,45 @@ fn ports(value: Option<Quantity>) -> io::Result<Vec<u16>> {
     }
     Ok(result)
 }
+fn stream_transport(
+    network: Option<String>,
+    ws_opts: Ws,
+    grpc_opts: Grpc,
+) -> io::Result<VlessNetwork> {
+    Ok(match network.as_deref().unwrap_or("tcp") {
+        "tcp" => VlessNetwork::Tcp,
+        "ws" => {
+            let mut ws = WsConfig::default();
+            if let Some(path) = ws_opts.path {
+                if !path.starts_with('/') {
+                    return Err(invalid("ws path must start with /"));
+                }
+                ws.path = path;
+            }
+            let mut headers = http::HeaderMap::new();
+            for (key, value) in ws_opts.headers {
+                let key = http::header::HeaderName::try_from(key).map_err(io::Error::other)?;
+                let header = http::HeaderValue::from_str(&value).map_err(io::Error::other)?;
+                if key == http::header::HOST {
+                    ws.host = Some(value);
+                } else {
+                    headers.insert(key, header);
+                }
+            }
+            VlessNetwork::WsHeaders(ws, headers)
+        }
+        "grpc" => {
+            let mut grpc = GrpcConfig::default();
+            if let Some(name) = grpc_opts.grpc_service_name {
+                grpc.service_name = name;
+            }
+            grpc.authority = grpc_opts.authority;
+            VlessNetwork::Grpc(grpc)
+        }
+        other => return Err(invalid(format!("unsupported stream transport {other}"))),
+    })
+}
+
 impl Proxy {
     fn into_spec(self) -> io::Result<NodeSpec> {
         if self.server.is_empty() || self.port == 0 {
@@ -211,6 +282,89 @@ impl Proxy {
             ..Default::default()
         };
         Ok(match self.protocol {
+            Protocol::Vmess {
+                uuid,
+                cipher,
+                alter_id,
+                tls: enabled,
+                network,
+                ws_opts,
+                grpc_opts,
+                alpn,
+            } => {
+                use marmo_proto::{vless::Uuid, vmess::Security};
+                if alter_id != 0 {
+                    return Err(invalid("VMess AEAD requires alterId 0"));
+                }
+                let security = match cipher.as_deref().unwrap_or("auto") {
+                    "auto" | "aes-128-gcm" => Security::Aes128Gcm,
+                    "chacha20-poly1305" => Security::ChaCha20Poly1305,
+                    _ => return Err(invalid("unsupported VMess body cipher")),
+                };
+                tls.alpn = alpn.into_iter().map(String::into_bytes).collect();
+                if tls.alpn.is_empty() && network.as_deref() == Some("grpc") {
+                    tls.alpn.push(b"h2".to_vec());
+                }
+                NodeSpec::Vmess(crate::protocol::vmess::Config {
+                    server,
+                    uuid: Uuid::parse(&uuid).map_err(io::Error::other)?,
+                    security,
+                    tls: enabled.then_some(tls),
+                    network: stream_transport(network, ws_opts, grpc_opts)?,
+                })
+            }
+            Protocol::Tuic {
+                uuid,
+                password,
+                alpn,
+                congestion_controller,
+                udp_relay_mode,
+                disable_sni,
+                reduce_rtt,
+                heartbeat_interval,
+                request_timeout,
+            } => {
+                use wind_tuic::quinn::UdpRelayMode;
+                tls.alpn = alpn
+                    .unwrap_or_else(|| vec!["h3".into()])
+                    .into_iter()
+                    .map(String::into_bytes)
+                    .collect();
+                let relay = match udp_relay_mode.as_deref().unwrap_or("native") {
+                    "native" => UdpRelayMode::Native,
+                    "quic" => UdpRelayMode::Quic,
+                    _ => return Err(invalid("invalid TUIC UDP relay mode")),
+                };
+                let heartbeat = Duration::from_millis(heartbeat_interval.unwrap_or(10000));
+                let timeout = Duration::from_millis(request_timeout.unwrap_or(10000));
+                if heartbeat.is_zero() || timeout.is_zero() || password.is_empty() {
+                    return Err(invalid("invalid TUIC timeout or empty password"));
+                }
+                NodeSpec::Tuic(crate::protocol::tuic::Config {
+                    server,
+                    uuid: uuid::Uuid::parse_str(&uuid).map_err(io::Error::other)?,
+                    password,
+                    tls,
+                    relay,
+                    congestion: congestion_controller
+                        .as_deref()
+                        .unwrap_or("bbr")
+                        .parse()
+                        .map_err(invalid)?,
+                    disable_sni,
+                    reduce_rtt,
+                    heartbeat,
+                    timeout,
+                })
+            }
+            Protocol::Socks5 { username, password } => {
+                let credentials = match (username, password) {
+                    (None, None) => None,
+                    (Some(user), Some(pass)) => Some((user, pass)),
+                    _ => return Err(invalid("SOCKS5 needs both username and password")),
+                };
+                NodeSpec::Socks5(server, credentials)
+            }
             Protocol::Ss { cipher, password } => NodeSpec::Shadowsocks(ShadowsocksConfig {
                 server,
                 cipher: ShadowsocksCipher::from_str(&cipher)?,
@@ -279,40 +433,7 @@ impl Proxy {
                     None if enabled => VlessSecurity::Tls(tls),
                     None => VlessSecurity::None,
                 };
-                let network = match network.as_deref().unwrap_or("tcp") {
-                    "tcp" => VlessNetwork::Tcp,
-                    "ws" => {
-                        let mut ws = WsConfig::default();
-                        if let Some(path) = ws_opts.path {
-                            if !path.starts_with('/') {
-                                return Err(invalid("ws path must start with /"));
-                            }
-                            ws.path = path;
-                        }
-                        let mut headers = http::HeaderMap::new();
-                        for (key, value) in ws_opts.headers {
-                            let key = http::header::HeaderName::try_from(key)
-                                .map_err(io::Error::other)?;
-                            let header =
-                                http::HeaderValue::from_str(&value).map_err(io::Error::other)?;
-                            if key == http::header::HOST {
-                                ws.host = Some(value);
-                            } else {
-                                headers.insert(key, header);
-                            }
-                        }
-                        VlessNetwork::WsHeaders(ws, headers)
-                    }
-                    "grpc" => {
-                        let mut grpc = GrpcConfig::default();
-                        if let Some(name) = grpc_opts.grpc_service_name {
-                            grpc.service_name = name;
-                        }
-                        grpc.authority = grpc_opts.authority;
-                        VlessNetwork::Grpc(grpc)
-                    }
-                    other => return Err(invalid(format!("unsupported VLESS network {other}"))),
-                };
+                let network = stream_transport(network, ws_opts, grpc_opts)?;
                 if flow
                     .as_deref()
                     .is_some_and(|f| !matches!(f, "" | "xtls-rprx-vision"))

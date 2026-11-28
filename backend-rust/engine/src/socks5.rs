@@ -1,5 +1,65 @@
+use crate::dialer::{BoxFuture, BoxedStream, OutboundDialer, TargetAddr};
 use std::io::{self, Read, Write};
 use std::net::IpAddr;
+use std::sync::Arc;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+pub struct SocksOutbound {
+    pub server: TargetAddr,
+    pub credentials: Option<(String, String)>,
+    pub underlay: Arc<dyn OutboundDialer>,
+}
+
+impl OutboundDialer for SocksOutbound {
+    fn dial_tcp<'a>(&'a self, target: &'a TargetAddr) -> BoxFuture<'a, io::Result<BoxedStream>> {
+        Box::pin(async move {
+            let mut stream = self.underlay.dial_tcp(&self.server).await?;
+            let method = if self.credentials.is_some() { 2 } else { 0 };
+            async_exchange(&mut stream, &[5, 1, method], [5, method]).await?;
+            if let Some((user, password)) = &self.credentials {
+                let mut auth = vec![1];
+                append_field(&mut auth, user.as_bytes())?;
+                append_field(&mut auth, password.as_bytes())?;
+                async_exchange(&mut stream, &auth, [1, 0]).await?;
+            }
+            let mut request = vec![5, 1, 0];
+            target.write_socks_addr(&mut request)?;
+            stream.write_all(&request).await?;
+            stream.flush().await?;
+            let mut header = [0; 3];
+            stream.read_exact(&mut header).await?;
+            if header[0] != 5 || header[2] != 0 {
+                return Err(invalid_reply());
+            }
+            if header[1] != 0 {
+                return Err(io::Error::other(format!(
+                    "SOCKS5 CONNECT failed with reply {}",
+                    header[1]
+                )));
+            }
+            TargetAddr::read_socks_addr(&mut stream).await?;
+            Ok(stream)
+        })
+    }
+}
+
+async fn async_exchange(
+    stream: &mut BoxedStream,
+    request: &[u8],
+    expected: [u8; 2],
+) -> io::Result<()> {
+    stream.write_all(request).await?;
+    stream.flush().await?;
+    let mut reply = [0; 2];
+    stream.read_exact(&mut reply).await?;
+    if reply != expected {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "SOCKS5 authentication rejected",
+        ));
+    }
+    Ok(())
+}
 
 /// Negotiate CONNECT on an already connected upstream stream. The caller owns
 /// the socket, its timeouts, and its lifecycle. Leave all tunnel data unread.

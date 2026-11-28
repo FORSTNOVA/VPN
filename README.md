@@ -1,6 +1,6 @@
 # SmartVPN (Windows & Android)
 
-跨平台智能分流代理客户端，采用共享 Flutter 控制台界面（响应式适配手机 / 平板 / 桌面），提供 **v0.4.x 纯 Rust + `clash-rs`（Apache-2.0）轻量化预览轨道** 与 **v0.3.x / v0.2.x Mihomo 稳定轨道**。
+SmartVPN 是面向 Windows 和 Android 的智能分流代理客户端，两端共用 Flutter 界面。Android ARM64 预发布版 `v0.5.4-dev.7` 已在 Android Studio 模拟器验证 VMess AEAD（WebSocket）和 TUIC v5（QUIC）单节点链接的导入、连接及 TCP、UDP 双向传输。
 
 详细变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -8,14 +8,28 @@
 
 ## 下载
 
-### 最新纯 Rust 预览版（推荐尝鲜 · 零 Go / 零 Mihomo · 体积减半）
+### 当前预发布包
+
+- [Windows x64 纯 Rust 便携版 v0.4.0-alpha.21](https://github.com/FORSTNOVA/VPN/releases/download/v0.5.4-dev.5/SmartVPN-0.4.0-alpha.21-rust-pure-windows-x64.zip)
+- [Android ARM64 v0.5.4-dev.7](https://github.com/FORSTNOVA/VPN/releases/download/v0.5.4-dev.7/SmartVPN-0.5.4-dev.7-release-arm64-v8a.apk) · [发布说明与 SHA-256](https://github.com/FORSTNOVA/VPN/releases/tag/v0.5.4-dev.7)
+- [Android ARM64 纯 Rust 预览版 v0.4.0-alpha.21](https://github.com/FORSTNOVA/VPN/releases/download/v0.5.4-dev.5/SmartVPN-0.4.0-alpha.21-rust-pure-arm64-v8a.apk)（已有手机安装后启动闪退的反馈）
+
+### v0.5.3 · Android Rust 预发布版（2026-11-25）
+
+国内加速使用可更新的 IPv4/IPv6 地址列表，按目的 IP 对 TCP 连接分流。应用分组指定的节点或代理链优先。开启 DNS 保护时，名单内的国内域名使用国内加密 DNS，其余域名经当前代理解析。代理链每一跳可设置备用节点，前台通知随隧道状态更新。真机验证中，国内网站可经 Wi-Fi 直连，境外 HTTPS 仍偶发连接重置。
+
+- [下载 Android ARM64 APK（17.6 MiB）](https://github.com/FORSTNOVA/VPN/releases/download/v0.5.3/SmartVPN-0.5.3-release-arm64-v8a.apk) · [查看 v0.5.3 发布说明](https://github.com/FORSTNOVA/VPN/releases/tag/v0.5.3)
+- SHA-256：`ca45b64a58a770c177aaf45fa0174a777bd3d42baf508a0d06b3566edf473ea3`
+
+### v0.4.0-alpha.5 · 纯 Rust + `clash-rs` 预览版（Windows / Android）
+
 - **Windows x64 便携 ZIP**：[SmartVPN-0.4.0-alpha.5-rust-pure-windows-x64.zip](https://github.com/FORSTNOVA/VPN/releases/download/v0.4.0-alpha.5/SmartVPN-0.4.0-alpha.5-rust-pure-windows-x64.zip)（~27 MiB）
 - **Android ARM64 APK**：[SmartVPN-0.4.0-alpha.5-rust-pure-arm64-v8a.apk](https://github.com/FORSTNOVA/VPN/releases/download/v0.4.0-alpha.5/SmartVPN-0.4.0-alpha.5-rust-pure-arm64-v8a.apk)（~16.7 MiB，支持 Android 16 KB 页对齐）
 - **发布说明与 SHA-256 校验**：[v0.4.0-alpha.5 Release](https://github.com/FORSTNOVA/VPN/releases/tag/v0.4.0-alpha.5)
 
 ### 传统 Mihomo 轨道
 - **v0.3.0-dev.3（预发布）**：[Release 与校验](https://github.com/FORSTNOVA/VPN/releases/tag/v0.3.0-dev.3)（Windows 便携包 / Android APK）
-- **v0.2.19（最新稳定版）**：[Release 与校验](https://github.com/FORSTNOVA/VPN/releases/tag/v0.2.19)
+- **v0.2.19（稳定版）**：[Release 与校验](https://github.com/FORSTNOVA/VPN/releases/tag/v0.2.19)
 
 ---
 

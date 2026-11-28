@@ -21,11 +21,14 @@ use std::{
 pub enum NodeSpec {
     Direct,
     Reject,
+    Socks5(TargetAddr, Option<(String, String)>),
     Tested(crate::proxy_group::ProbeConfig, Vec<NodeSpec>),
     Shadowsocks(ShadowsocksConfig),
     Trojan(TrojanConfig),
     AnyTls(AnyTlsConfig),
     Vless(VlessConfig),
+    Vmess(crate::protocol::vmess::Config),
+    Tuic(crate::protocol::tuic::Config),
     Hysteria2(Hysteria2Config),
     Chain(Vec<NodeSpec>),
     OrderedFailover {
@@ -78,11 +81,19 @@ fn extend(spec: &NodeSpec, underlay: Option<Dialer>) -> io::Result<Option<Dialer
             ))
         }
         NodeSpec::Direct => return Ok(underlay),
+        NodeSpec::Socks5(server, credentials) => Arc::new(crate::socks5::SocksOutbound {
+            server: server.clone(), credentials: credentials.clone(), underlay: under_tcp(),
+        }),
         NodeSpec::Shadowsocks(c) => {
             Arc::new(ShadowsocksDialer::with_underlay(c.clone(), under_tcp()))
         }
         NodeSpec::Trojan(c) => Arc::new(TrojanDialer::with_underlay(c.clone(), under_tcp())),
         NodeSpec::AnyTls(c) => Arc::new(AnyTlsDialer::with_underlay(c.clone(), under_tcp())),
+        NodeSpec::Vmess(c) => Arc::new(crate::protocol::vmess::Dialer::new(c.clone(), under_tcp())),
+        NodeSpec::Tuic(c) => {
+            if underlay.is_some() { return Err(io::Error::new(io::ErrorKind::Unsupported, "TUIC must be the first hop")); }
+            Arc::new(crate::protocol::tuic::Dialer::new(c.clone()))
+        }
         NodeSpec::Vless(c) => Arc::new(VlessDialer::with_underlay(c.clone(), under_tcp())),
         NodeSpec::Hysteria2(c) => match underlay {
             Some(u) => {

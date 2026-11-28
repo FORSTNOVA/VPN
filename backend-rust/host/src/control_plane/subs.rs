@@ -4,7 +4,7 @@ use http_body_util::{BodyExt, Empty, Limited};
 use hyper::{body::Bytes, Request};
 use hyper_util::rt::TokioIo;
 use serde_json::{json, Value};
-use std::{collections::HashMap, net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 use tokio::time::timeout;
 use tokio_rustls::{
     rustls::{pki_types::ServerName, ClientConfig, RootCertStore},
@@ -45,6 +45,12 @@ pub async fn fetch_subscription_text(
     url: &str,
     protect: Option<smartvpn_engine::dialer::SocketProtectHook>,
 ) -> Result<(String, Option<QuotaInfo>), String> {
+    let url = url.trim();
+    let scheme = url.split_once("://").ok_or("missing source URI scheme")?.0;
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        // Node URIs carry their own configuration and have no remote quota header.
+        return Ok((url.to_owned(), None));
+    }
     let (bytes, quota) = fetch_bytes(url, protect, 16 << 20, false).await?;
     Ok((String::from_utf8_lossy(&bytes).into_owned(), quota))
 }
@@ -354,181 +360,15 @@ pub fn parse_proxies_from_payload(payload: &str) -> Result<Vec<Value>, String> {
     let mut out = Vec::new();
     for line in decoded.lines() {
         let line = line.trim();
-        if line.is_empty() {
+        if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some(proxy) = parse_proxy_uri(line) {
-            out.push(proxy);
-        }
+        out.push(super::node_uri::parse(line, None).map_err(|e| format!("invalid node URI: {e}"))?);
     }
     if out.is_empty() {
         return Err("no supported proxy nodes found in subscription".to_owned());
     }
     Ok(out)
-}
-
-pub fn parse_proxy_uri(uri: &str) -> Option<Value> {
-    let (scheme, rest) = uri.split_once("://")?;
-    let (main, fragment) = rest.split_once('#').unwrap_or((rest, ""));
-    let raw_name = percent_decode(fragment);
-    match scheme.to_ascii_lowercase().as_str() {
-        "vless" | "trojan" | "anytls" => {
-            let (creds, host_q) = main.split_once('@')?;
-            let (host_port, query) = host_q.split_once('?').unwrap_or((host_q, ""));
-            let (server, port) = split_host_port(host_port)?;
-            let params = parse_query(query);
-            let name = if raw_name.is_empty() {
-                format!("{scheme}-{server}:{port}")
-            } else {
-                raw_name
-            };
-            let mut map = serde_json::Map::new();
-            map.insert("name".into(), json!(name));
-            map.insert("type".into(), json!(scheme.to_ascii_lowercase()));
-            map.insert("server".into(), json!(server));
-            map.insert("port".into(), json!(port));
-            if scheme.eq_ignore_ascii_case("vless") {
-                map.insert("uuid".into(), json!(creds));
-            } else {
-                map.insert("password".into(), json!(creds));
-            }
-            if let Some(sni) = params.get("sni").or_else(|| params.get("peer")) {
-                if !sni.is_empty() {
-                    map.insert("servername".into(), json!(sni));
-                    map.insert("sni".into(), json!(sni));
-                }
-            }
-            if params
-                .get("allowInsecure")
-                .is_some_and(|v| v == "1" || v == "true")
-            {
-                map.insert("skip-cert-verify".into(), json!(true));
-            }
-            if params
-                .get("security")
-                .is_some_and(|v| v == "tls" || v == "reality")
-            {
-                map.insert("tls".into(), json!(true));
-            }
-            if let Some(pbk) = params.get("pbk") {
-                map.insert(
-                    "reality-opts".into(),
-                    json!({
-                        "public-key": pbk,
-                        "short-id": params.get("sid").cloned().unwrap_or_default()
-                    }),
-                );
-            }
-            if let Some(net) = params.get("type") {
-                map.insert("network".into(), json!(net));
-                if net == "ws" {
-                    let mut ws = serde_json::Map::new();
-                    if let Some(p) = params.get("path") {
-                        ws.insert("path".into(), json!(p));
-                    }
-                    if let Some(h) = params.get("host") {
-                        ws.insert("headers".into(), json!({"Host": h}));
-                    }
-                    map.insert("ws-opts".into(), Value::Object(ws));
-                } else if net == "grpc" {
-                    if let Some(sn) = params.get("serviceName") {
-                        map.insert("grpc-opts".into(), json!({"grpc-service-name": sn}));
-                    }
-                }
-            }
-            Some(Value::Object(map))
-        }
-        "hysteria2" | "hy2" => {
-            let (password, host_q) = main.split_once('@')?;
-            let (host_port, query) = host_q.split_once('?').unwrap_or((host_q, ""));
-            let (server, port) = split_host_port(host_port)?;
-            let params = parse_query(query);
-            let name = if raw_name.is_empty() {
-                format!("hy2-{server}:{port}")
-            } else {
-                raw_name
-            };
-            let mut map = serde_json::Map::new();
-            map.insert("name".into(), json!(name));
-            map.insert("type".into(), json!("hysteria2"));
-            map.insert("server".into(), json!(server));
-            map.insert("port".into(), json!(port));
-            map.insert("password".into(), json!(password));
-            if let Some(sni) = params.get("sni") {
-                map.insert("sni".into(), json!(sni));
-            }
-            if params
-                .get("insecure")
-                .is_some_and(|v| v == "1" || v == "true")
-            {
-                map.insert("skip-cert-verify".into(), json!(true));
-            }
-            Some(Value::Object(map))
-        }
-        "ss" => {
-            let (creds, host_q) = main.split_once('@')?;
-            let host_port = host_q.split('?').next().unwrap_or(host_q);
-            let (server, port) = split_host_port(host_port)?;
-            let decoded_creds = base64::engine::general_purpose::STANDARD
-                .decode(creds)
-                .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(creds))
-                .ok()
-                .and_then(|b| String::from_utf8(b).ok())
-                .unwrap_or_else(|| creds.to_owned());
-            let (cipher, password) = decoded_creds.split_once(':')?;
-            let name = if raw_name.is_empty() {
-                format!("ss-{server}:{port}")
-            } else {
-                raw_name
-            };
-            Some(json!({
-                "name": name,
-                "type": "ss",
-                "server": server,
-                "port": port,
-                "cipher": cipher,
-                "password": password,
-            }))
-        }
-        _ => None,
-    }
-}
-
-fn split_host_port(s: &str) -> Option<(String, u16)> {
-    if let Some(rest) = s.strip_prefix('[') {
-        let (h, p) = rest.split_once("]:")?;
-        return Some((h.to_owned(), p.parse().ok()?));
-    }
-    let (h, p) = s.rsplit_once(':')?;
-    Some((h.to_owned(), p.parse().ok()?))
-}
-
-fn parse_query(q: &str) -> HashMap<String, String> {
-    let mut map = HashMap::new();
-    for pair in q.split('&') {
-        if let Some((k, v)) = pair.split_once('=') {
-            map.insert(percent_decode(k), percent_decode(v));
-        }
-    }
-    map
-}
-
-fn percent_decode(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(val) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(val);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
 }
 
 pub fn merge_enabled_subscriptions(subs: &[SavedSubscription]) -> Vec<Value> {
@@ -558,6 +398,18 @@ pub fn merge_enabled_subscriptions(subs: &[SavedSubscription]) -> Vec<Value> {
 mod rule_tests {
     use super::{applied_rule, parse_catalog};
     use crate::control_plane::state::PersistedState;
+
+    #[tokio::test]
+    async fn inline_node_source_needs_no_network() {
+        let uri = "hy2://test@127.0.0.1:1?sni=test.invalid#fixture";
+        let (text, quota) = super::fetch_subscription_text(uri, None).await.unwrap();
+        let (nodes, rules) = parse_catalog(&text).unwrap();
+        assert!(quota.is_none() && rules.is_empty());
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0]["name"], "fixture");
+        assert_eq!(nodes[0]["type"], "hysteria2");
+        assert!(parse_catalog("vless://").is_err());
+    }
 
     #[test]
     fn validates_rule_list_and_applies_supported_policies() {
