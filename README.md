@@ -8,11 +8,11 @@
 
 ## 下载
 
-### Android ARM64 预发布版 v0.5.4-dev.8
+### Windows x64 / Android ARM64 预发布版 v0.5.4-dev.8
 
-[下载 Android ARM64 APK](https://github.com/FORSTNOVA/VPN/releases/download/v0.5.4-dev.8/SmartVPN-0.5.4-dev.8-release-arm64-v8a.apk) · [发布说明与 SHA-256](https://github.com/FORSTNOVA/VPN/releases/tag/v0.5.4-dev.8)
+[下载 Windows x64 便携 ZIP](https://github.com/FORSTNOVA/VPN/releases/download/v0.5.4-dev.8/SmartVPN-0.5.4-dev.8-rust-pure-windows-x64.zip) · [下载 Android ARM64 APK](https://github.com/FORSTNOVA/VPN/releases/download/v0.5.4-dev.8/SmartVPN-0.5.4-dev.8-release-arm64-v8a.apk) · [发布说明与 SHA-256](https://github.com/FORSTNOVA/VPN/releases/tag/v0.5.4-dev.8)
 
-支持按节点开启 TCP 多路复用（Yamux）或 QUIC 长连接保活。模拟器验证了六条并发 TCP 连接及空闲 40 秒后的会话复用。
+支持按节点开启 TCP 多路复用（Yamux）或 QUIC 长连接保活。Windows 便携包和 Android 模拟器均验证了六条并发 TCP 连接及空闲 40 秒后的会话复用。
 
 ### v0.4.0-alpha.5 纯 Rust 预览版
 - **Windows x64 便携 ZIP**：[SmartVPN-0.4.0-alpha.5-rust-pure-windows-x64.zip](https://github.com/FORSTNOVA/VPN/releases/download/v0.4.0-alpha.5/SmartVPN-0.4.0-alpha.5-rust-pure-windows-x64.zip)（~27 MiB）
