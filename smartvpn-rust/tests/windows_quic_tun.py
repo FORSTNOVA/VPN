@@ -99,10 +99,30 @@ def exchange(dest, port, tun):
 
 
 class EchoUDP(asyncio.DatagramProtocol):
+    def __init__(self):
+        self.probes = []
+
     def connection_made(self, transport):
         self.transport=transport
     def datagram_received(self, data, addr):
+        if len(data) == 1024 and data.startswith(b"SVP1"):
+            self.probes.append((data[4], data[5]))
         self.transport.sendto(bytes(b^90 for b in data),addr)
+
+
+def probe_udp_round(dest, port, round_id):
+    with socket.socket(type=socket.SOCK_DGRAM) as udp:
+        udp.settimeout(1.5)
+        udp.connect((dest, port))
+        for seq in range(20):
+            body = b"SVP1" + bytes((round_id, seq)) + secrets.token_bytes(1018)
+            udp.send(body)
+            try:
+                reply = udp.recv(2048)
+            except TimeoutError as err:
+                raise RuntimeError(f"UDP timeout at round {round_id}, sequence {seq}") from err
+            if reply != bytes(b ^ 90 for b in body):
+                raise ValueError(f"Incorrect UDP response at round {round_id}, sequence {seq}")
 
 
 async def echo(reader,writer):
@@ -121,13 +141,14 @@ async def run(args):
     cases=setup(folder,args.tun)
     with ExitStack() as stack, (folder/"kernel.log").open("wb") as logs:
         async with AsyncExitStack() as astack:
+            echoes = {}
             for proto,dest,port,peer in cases:
                 case=folder/proto
                 log=stack.enter_context((case/"server.log").open("wb"))
                 proc=subprocess.Popen([args.sing_box,"run","-c",str(case/"server.json")],stdout=log,stderr=log)
                 stack.callback(stop_process,proc)
                 await astack.enter_async_context(await asyncio.start_server(echo,LOOP,port))
-                transport,_=await asyncio.get_running_loop().create_datagram_endpoint(EchoUDP,local_addr=(LOOP,port))
+                transport,echoes[proto]=await asyncio.get_running_loop().create_datagram_endpoint(EchoUDP,local_addr=(LOOP,port))
                 stack.callback(transport.close)
             if args.tun:
                 # The parent can stay unprivileged. Elevate only the dedicated kernel with two /32 routes.
@@ -156,6 +177,13 @@ async def run(args):
                     raise TimeoutError("kernel route/listener did not start")
                 for proto,dest,port,peer in cases:
                     result=await asyncio.to_thread(exchange,dest,port,args.tun)
+                    if args.tun and proto == "hysteria2":
+                        for round_id in range(1, 6):
+                            await asyncio.to_thread(probe_udp_round, dest, port, round_id)
+                            if echoes[proto].probes != [(round_id, seq) for seq in range(20)]:
+                                raise AssertionError(f"Unexpected echo sequence: {echoes[proto].probes}")
+                            echoes[proto].probes.clear()
+                            print(f"{proto} Wintun round {round_id}: 20 sent, 20 echoed, 20 verified (1024 bytes)", flush=True)
                     evidence=(folder/proto/"server.log").read_text(encoding="utf8")
                     for event in (f"inbound/socks[exit]: inbound packet connection to {peer}:{port-1}",
                                   f"inbound/{proto}[entry]: inbound connection to {dest}:{port}",

@@ -35,6 +35,7 @@ public final class Peer extends Activity {
             for (int sample=0; sample<samples; sample++) {
                 request = new byte[1024];
                 rng.nextBytes(request);
+                java.nio.ByteBuffer.wrap(request).putInt(0x53565039).putInt(sample);
                 socket.send(new DatagramPacket(request, request.length));
                 byte[] response = new byte[request.length+1];
                 DatagramPacket reply = new DatagramPacket(response,response.length);
@@ -50,7 +51,7 @@ public final class Peer extends Activity {
             }
         }
         android.util.Log.i("SmartVPNPeer", "verified UDP replies " + verified + "/" + samples);
-        if (verified == 0) throw new IOException("no verified UDP replies out of "+samples);
+        if (verified != samples) throw new IOException("verified UDP replies " + verified + "/" + samples);
     }
     private static void streamBatch(int count) throws Exception {
         java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(count);
@@ -103,7 +104,7 @@ public final class Peer extends Activity {
                         Thread.sleep(40000);
                         streamBatch(1);
                     } else if (getIntent().getBooleanExtra("packetTest", false) || getIntent().getBooleanExtra("chainPacketTest", false)) {
-                        checkPackets(getIntent().getBooleanExtra("chainPacketTest", false) ? 5 : 1);
+                        checkPackets(getIntent().getBooleanExtra("chainPacketTest", false) ? 20 : 1);
                     } else {
                         String nonce = getIntent().getStringExtra("nonce");
                         try (Socket s = new Socket()) {

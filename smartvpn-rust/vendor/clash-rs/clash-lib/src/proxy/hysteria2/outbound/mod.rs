@@ -322,8 +322,11 @@ impl Handler {
     ) -> anyhow::Result<(H3ClientGuard, CcRx, bool)> {
         let h3_conn = H3QuinnConnection::new(conn.clone());
 
-        let (driver, mut sender) =
-            h3::client::builder().build::<_, _, Bytes>(h3_conn).await?;
+        // UDP uses raw QUIC DATAGRAMs. Keep HTTP/3 from claiming those frames.
+        let (driver, mut sender) = h3::client::builder()
+            .enable_datagram(false)
+            .build::<_, _, Bytes>(h3_conn)
+            .await?;
 
         let req = http::Request::post("https://hysteria/auth")
             .header("Hysteria-Auth", passwd)

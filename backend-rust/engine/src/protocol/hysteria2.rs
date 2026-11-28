@@ -256,7 +256,9 @@ impl Hysteria2Dialer {
             .map_err(io::Error::other)?;
         let (mut driver, mut auth) = h3::client::builder()
             .send_grease(false)
-            .enable_datagram(true)
+            // Hysteria UDP uses raw QUIC DATAGRAMs. Advertising HTTP/3
+            // datagrams lets the peer's HTTP/3 driver consume them instead.
+            .enable_datagram(false)
             .build(h3_quinn::Connection::new(conn.clone()))
             .await
             .map_err(io::Error::other)?;
