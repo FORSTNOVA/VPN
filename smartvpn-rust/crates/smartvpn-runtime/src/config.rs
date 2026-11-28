@@ -165,6 +165,15 @@ pub(crate) fn probe_config_with_dns(
     config
 }
 
+fn validate_chained_transport(node: &Value, index: usize) -> Result<()> {
+    ensure!(
+        index == 0 || !matches!(node["type"].as_str(), Some("hysteria2" | "tuic")),
+        "Windows supports {} only as the first hop: {}",
+        node["type"], node["name"]
+    );
+    Ok(())
+}
+
 pub(crate) fn chain_nodes(mut catalog: Vec<Value>, hops: &[String]) -> Result<Vec<Value>> {
     ensure!((1..=8).contains(&hops.len()), "expected 1 to 8 hops");
     let mut chain = Vec::with_capacity(hops.len());
@@ -174,6 +183,7 @@ pub(crate) fn chain_nodes(mut catalog: Vec<Value>, hops: &[String]) -> Result<Ve
             .position(|node| node["name"] == *name)
             .with_context(|| format!("unknown or repeated hop: {name}"))?;
         let mut node = catalog.swap_remove(position);
+        validate_chained_transport(&node, index)?;
         let fields = node.as_object_mut().unwrap();
         fields.remove("smartvpn-source");
         fields.remove("dialer-proxy");
@@ -186,6 +196,28 @@ pub(crate) fn chain_nodes(mut catalog: Vec<Value>, hops: &[String]) -> Result<Ve
 }
 
 pub(crate) type Backups = BTreeMap<String, Vec<String>>;
+
+pub(crate) type Sessions = BTreeMap<String, String>;
+pub(crate) fn apply_sessions(catalog: &mut [Value], sessions: &Sessions) -> Result<()> {
+    for proxy in catalog {
+        let name = proxy["name"].as_str().context("node is missing its name")?;
+        let Some(mode) = sessions.get(name) else { continue };
+        match (proxy["type"].as_str(), mode.as_str()) {
+            (Some("vmess" | "vless" | "ss" | "trojan"), "mux") => proxy["smartvpn-mux"] = json!(true),
+            (Some("hysteria2"), "keepalive") => proxy["keep-alive-interval"] = json!(5),
+            (Some("tuic"), "keepalive") => {
+                // Keep the heartbeat below the Windows TUIC transport's idle deadline.
+                let interval = match proxy.get("heartbeat-interval") {
+                    Some(v) => v.as_u64().filter(|n| *n > 0).context("invalid TUIC heartbeat")?.min(3000),
+                    None => 3000,
+                };
+                proxy["heartbeat-interval"] = json!(interval);
+            }
+            _ => anyhow::bail!("unsupported session option {mode} for {name}"),
+        }
+    }
+    Ok(())
+}
 
 pub(crate) fn compile_chain(
     catalog: &[Value],
@@ -212,6 +244,7 @@ pub(crate) fn compile_chain(
             let Some(found) = catalog.iter().find(|p| p["name"] == name.as_str()) else {
                 continue;
             };
+            validate_chained_transport(found, index)?;
             let mut proxy = found.clone();
             let alias = format!("{prefix}-{index}-{candidate}");
             ensure!(

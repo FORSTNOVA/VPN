@@ -23,6 +23,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 use self::utils::RemoteConnector;
 
+pub(crate) mod sing_mux;
 pub mod direct;
 pub mod reject;
 

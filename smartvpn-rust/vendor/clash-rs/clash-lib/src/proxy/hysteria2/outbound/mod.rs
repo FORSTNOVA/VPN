@@ -58,6 +58,7 @@ pub enum Obfs {
 
 #[derive(Clone)]
 pub struct HystOption {
+    pub keep_alive_interval: u64,
     pub name: String,
     pub addr: SocksAddr,
     pub ports: Option<PortGenerator>,
@@ -155,7 +156,7 @@ impl Handler {
         transport.max_idle_timeout(Some(
             Self::DEFAULT_MAX_IDLE_TIMEOUT.try_into().unwrap(),
         ));
-        transport.keep_alive_interval(Some(std::time::Duration::from_secs(10)));
+        transport.keep_alive_interval(Some(std::time::Duration::from_secs(opts.keep_alive_interval)));
 
         let quic_config: QuicClientConfig = tls_config.try_into().unwrap();
         let mut client_config = ClientConfig::new(Arc::new(quic_config));
@@ -776,6 +777,7 @@ mod tests {
         );
 
         let opts = HystOption {
+            keep_alive_interval: 10,
             name: "test-hysteria".to_owned(),
             sni: "example.org".to_owned().into(),
             addr: (ip, port).into(),

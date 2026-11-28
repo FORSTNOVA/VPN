@@ -22,7 +22,7 @@ from pathlib import Path
 from zipfile import ZipFile
 
 ROOT = Path(__file__).resolve().parents[1]
-VERSION = (ROOT / "VERSION").read_text().strip().split("+")[0]
+VERSION = (ROOT / "WINDOWS_VERSION").read_text().strip().split("+")[0]
 SCRATCH = Path(tempfile.gettempdir())
 
 

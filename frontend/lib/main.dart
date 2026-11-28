@@ -1152,7 +1152,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               initialHops: _chains[original] ?? [],
                               tunnelActive: Platform.isWindows && _kernelRunning &&
                                   _connectionMode != 'system-proxy',
-                              sessionTypes: Platform.isAndroid && _chainSessions != null ? {for (final n in _nodes) n.name: n.type.toLowerCase()} : const {},
+                              sessionTypes: _chainSessions != null ? {for (final n in _nodes) n.name: n.type.toLowerCase()} : const {},
                               initialSessions: _chainSessions?[original] ?? const {},
                               initialBackups: _chainBackups == null ? null : _chainBackups![original] ?? {},
                               initialName: original ?? '',

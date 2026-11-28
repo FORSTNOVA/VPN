@@ -22,14 +22,14 @@ LOOP = "127.0.0.1"
 FRONT, BACK, EXIT, ECHO = 38679, 38680, 38681, 18061
 
 
-def configure(folder, protocol, second_hop):
+def configure(folder, protocol, second_hop, host):
     password, user = str(uuid.uuid4()), str(uuid.uuid4())
     entry = dict(type=protocol, tag="entry", listen=LOOP, listen_port=BACK)
-    peer = f"10.0.2.2:{FRONT}"
+    peer = f"{host}:{FRONT}"
     if protocol in ("vmess","vless"):
         entry.update(users=[dict(uuid=user)], multiplex=dict(enabled=True),
                      transport=dict(type="ws", path="/mux"))
-        share = dict(v="2", ps="session-entry", add="10.0.2.2", port=str(FRONT),
+        share = dict(v="2", ps="session-entry", add=host, port=str(FRONT),
                      id=user, aid="0", scy="auto", net="ws", path="/mux", tls="")
         if protocol == "vmess":
             uri = "vmess://" + base64.b64encode(json.dumps(share).encode()).decode()
@@ -69,7 +69,7 @@ def configure(folder, protocol, second_hop):
             dict(action="reject")]))
     if second_hop:
         config["route"]["rules"] = [
-            dict(inbound="exit", ip_cidr="10.0.2.2/32", port=FRONT, action="route", outbound="local", override_address=LOOP),
+            dict(inbound="exit", ip_cidr=f"{host}/32", port=FRONT, action="route", outbound="local", override_address=LOOP),
             dict(inbound="entry", ip_cidr="198.51.100.61/32", port=ECHO, action="route", outbound="local", override_address=LOOP),
             dict(action="reject")]
     (folder/"server.json").write_text(json.dumps(config))
@@ -84,8 +84,8 @@ async def command(*args):
     return output
 
 
-async def run(args, folder):
-    uri = configure(folder, args.protocol, args.second_hop)
+async def run(args, folder, traffic=None):
+    uri = configure(folder, args.protocol, args.second_hop, "10.0.2.2" if traffic is None else LOOP)
     handshakes = []
     samples = []
     idle_wakeups = []
@@ -195,15 +195,20 @@ async def run(args, folder):
                 await asyncio.sleep(1)
                 if server.returncode is not None:
                     raise RuntimeError((folder/"server.log").read_text())
-                adb = [args.adb, "-s", args.serial, "shell"]
-                device = await command(*adb, "getprop", "ro.kernel.qemu")
-                if device.strip() != "1":
-                    raise RuntimeError("Expected an Android Studio AVD")
-                output = await command(*adb, "am", "instrument", "-w", "-r", "-e", "sessionMode", args.mode,
-                    "-e", "secondHop", str(args.second_hop).lower(), "-e", "nodeLink64", base64.urlsafe_b64encode(uri.encode()).decode(), "com.smartvpn.acceptance/.DeviceRun")
-                print(output, flush=True)
+                if traffic is None:
+                    adb = [args.adb, "-s", args.serial, "shell"]
+                    device = await command(*adb, "getprop", "ro.kernel.qemu")
+                    if device.strip() != "1":
+                        raise RuntimeError("Expected an Android Studio AVD")
+                    output = await command(*adb, "am", "instrument", "-w", "-r", "-e", "sessionMode", args.mode,
+                        "-e", "secondHop", str(args.second_hop).lower(), "-e", "nodeLink64", base64.urlsafe_b64encode(uri.encode()).decode(), "com.smartvpn.acceptance/.DeviceRun")
+                    print(output, flush=True)
+                    if "INSTRUMENTATION_CODE: -1" not in output:
+                        raise RuntimeError("Instrumentation failed")
+                else:
+                    await traffic(uri)
                 print(json.dumps(dict(protocol=args.protocol,mode=args.mode,hop=2 if args.second_hop else 1,handshakes=handshakes,echoes=samples,idle_wakeups=idle_wakeups)),flush=True)
-                if "INSTRUMENTATION_CODE: -1" not in output or len(samples) != 7 or samples[6]["time"] - samples[5]["time"] < 39:
+                if len(samples) != 7 or samples[6]["time"] - samples[5]["time"] < 39:
                     raise RuntimeError("Missing instrumentation or idle traffic proof")
                 if args.mode in ("mux","keepalive") and len(handshakes) != 1:
                     raise RuntimeError("Expected one reusable connection")

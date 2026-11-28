@@ -161,6 +161,8 @@ impl Display for OutboundProxyProtocol {
 #[derive(serde::Serialize, serde::Deserialize, Debug, Default, Clone)]
 #[serde(rename_all = "kebab-case")]
 pub struct CommonConfigOptions {
+    #[serde(default)]
+    pub smartvpn_mux: bool,
     pub name: String,
     pub server: String,
     pub port: u16,
@@ -541,6 +543,7 @@ pub struct Totp {
 #[derive(Clone, serde::Serialize, serde::Deserialize, Debug, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct OutboundHysteria2 {
+    pub keep_alive_interval: Option<u64>,
     pub name: String,
     pub server: String,
     pub port: u16,

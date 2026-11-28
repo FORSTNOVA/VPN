@@ -1,0 +1,11 @@
+[package]
+name = "smartvpn-sing-mux"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+futures-util = "0.3"
+tokio = { version = "1", features = ["io-util", "rt", "sync"] }
+tokio-util = { version = "0.7", features = ["compat", "io"] }
+yamux = "0.13"

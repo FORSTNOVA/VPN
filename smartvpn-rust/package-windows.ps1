@@ -16,7 +16,9 @@ foreach ($folder in 'assets','lib','windows'){
     Copy-Tree "$repo/frontend/$folder" "$project/$folder" @('/XD','ephemeral')
 }
 Copy-Item "$repo/frontend/pubspec.yaml","$repo/frontend/pubspec.lock","$repo/frontend/.metadata" $project
-$buildVersion=(Get-Content "$PSScriptRoot/VERSION").Trim()
+$version=(Get-Content "$PSScriptRoot/WINDOWS_VERSION").Trim()
+$buildVersion=([regex]::Match([IO.File]::ReadAllText("$repo/frontend/pubspec.yaml"),'(?m)^version: ([^\r\n]+)').Groups[1].Value).Trim()
+if ($buildVersion.Split('+')[0] -ne $version) { throw 'Windows runtime and shared frontend versions differ' }
 $manifest="$project/pubspec.yaml"
 $spec=[IO.File]::ReadAllText($manifest)
 if ([regex]::Matches($spec,'(?m)^version: [^\r\n]+').Count -ne 1) { throw 'Expected one Flutter package version' }
@@ -43,7 +45,6 @@ New-Item -ItemType Directory "$stage/LICENSES" | Out-Null
 Copy-Item "$PSScriptRoot/vendor/clash-rs/LICENSE" "$stage/LICENSES/Apache-2.0-clash-rs.txt"
 New-Item -ItemType File "$stage/portable.txt" | Out-Null
 Set-Content "$stage/README-rust-pure.txt" 'Extract the entire ZIP and run smartvpn_windows.exe. Local settings are stored in SmartVPN-data/smartvpn.db. The service listens on loopback and starts its embedded clash-rs kernel on connect. Run the client as administrator to use Windows TUN mode with the bundled x64 wintun.dll.'
-$version=(Get-Content "$PSScriptRoot/VERSION").Split('+')[0]
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip="$($stage.FullName).zip"
 [IO.Compression.ZipFile]::CreateFromDirectory($stage.FullName,$zip)

@@ -1,6 +1,6 @@
 # SmartVPN (Windows & Android)
 
-SmartVPN 是面向 Windows 和 Android 的智能分流代理客户端，两端共用 Flutter 界面。Android ARM64 预发布版 `v0.5.4-dev.8` 支持在代理链中按节点开启 TCP 多路复用（Yamux）或 QUIC 长连接保活。
+SmartVPN 是面向 Windows 和 Android 的智能分流代理客户端，两端共用 Flutter 界面。Windows x64 和 Android ARM64 的 `v0.5.4-dev.8` 预发布版均支持在代理链中按节点开启 TCP 多路复用（Yamux）或 QUIC 长连接保活。Windows 的 Hysteria2 和 TUIC 节点可用作第一跳。
 
 详细变更记录见 [CHANGELOG.md](CHANGELOG.md)。
 
@@ -10,7 +10,7 @@ SmartVPN 是面向 Windows 和 Android 的智能分流代理客户端，两端�
 
 ### 当前预发布包
 
-- [Windows x64 纯 Rust 便携版 v0.4.0-alpha.21](https://github.com/FORSTNOVA/VPN/releases/download/v0.5.4-dev.5/SmartVPN-0.4.0-alpha.21-rust-pure-windows-x64.zip)
+- [Windows x64 纯 Rust 便携版 v0.5.4-dev.8](https://github.com/FORSTNOVA/VPN/releases/download/v0.5.4-dev.8/SmartVPN-0.5.4-dev.8-rust-pure-windows-x64.zip)
 - [Android ARM64 v0.5.4-dev.8](https://github.com/FORSTNOVA/VPN/releases/download/v0.5.4-dev.8/SmartVPN-0.5.4-dev.8-release-arm64-v8a.apk) · [发布说明与 SHA-256](https://github.com/FORSTNOVA/VPN/releases/tag/v0.5.4-dev.8)
 - [Android ARM64 纯 Rust 预览版 v0.4.0-alpha.21](https://github.com/FORSTNOVA/VPN/releases/download/v0.5.4-dev.5/SmartVPN-0.4.0-alpha.21-rust-pure-arm64-v8a.apk)（已有手机安装后启动闪退的反馈）
 

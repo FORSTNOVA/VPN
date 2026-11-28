@@ -34,6 +34,9 @@ use std::{
 use store::Store;
 use tiny_http::{Header, Request, Response, Server};
 
+#[cfg(windows)]
+pub const VERSION: &str = include_str!("../../../WINDOWS_VERSION").trim_ascii();
+#[cfg(not(windows))]
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub fn token() -> Result<String> {
@@ -425,7 +428,15 @@ fn prepare_probe<P: TunnelDataPlane>(
         .map(serde_json::from_value)
         .transpose()?
         .unwrap_or_default();
-    let catalog = store.configs()?;
+    let mut catalog = store.configs()?;
+    let active = store.chain()?;
+    if active["hops"] == args["hops"] {
+        if let Some(name) = active["name"].as_str() {
+            if store.profile_backups(name)? == backups {
+                config::apply_sessions(&mut catalog, &store.profile_sessions(name)?)?;
+            }
+        }
+    }
     let chain = if backups.is_empty() {
         config::chain_nodes(catalog, &hops)?
     } else {
@@ -487,7 +498,8 @@ fn check_chain_region(
     let mut backups = store.profile_backups(chain["name"].as_str().unwrap_or(""))?;
     let last = hops.last().context("chain has no exit")?.clone();
     let exits = std::iter::once(last.clone()).chain(backups.remove(&last).into_iter().flatten());
-    let catalog = store.configs()?;
+    let mut catalog = store.configs()?;
+    config::apply_sessions(&mut catalog, &store.profile_sessions(chain["name"].as_str().unwrap_or(""))?)?;
     for exit in exits {
         *hops.last_mut().unwrap() = exit;
         let nodes = if backups.is_empty() {
@@ -1197,8 +1209,10 @@ fn route<P: TunnelDataPlane>(
                                 .context("unknown application chain")?;
                         let backups =
                             serde_json::from_value(profiles["chainBackups"][&id].clone())?;
+                        let mut catalog = nodes.clone();
+                        config::apply_sessions(&mut catalog, &store.profile_sessions(&id)?)?;
                         let members = config::compile_chain(
-                            &nodes,
+                            &catalog,
                             &hops,
                             &backups,
                             &format!("SmartVPN-AppChain-{}", app_exits.len()),
@@ -1228,17 +1242,20 @@ fn route<P: TunnelDataPlane>(
                         })
                         .map(|g| g["targetNode"].as_str().unwrap())
                         .collect();
+                    let backups = store.profile_backups(chain["name"].as_str().unwrap_or(""))?;
+                    let sessions = store.profile_sessions(chain["name"].as_str().unwrap_or(""))?;
+                    let aliases = !backups.is_empty() || !sessions.is_empty();
                     group_nodes.extend(
                         nodes
                             .iter()
                             .filter(|n| {
                                 let name = n["name"].as_str().unwrap();
-                                targets.contains(name) && !hops.iter().any(|h| h == name)
+                                targets.contains(name) && (aliases || !hops.iter().any(|h| h == name))
                             })
                             .cloned(),
                     );
-                    let backups = store.profile_backups(chain["name"].as_str().unwrap_or(""))?;
-                    nodes = if backups.is_empty() {
+                    config::apply_sessions(&mut nodes, &sessions)?;
+                    nodes = if backups.is_empty() && sessions.is_empty() {
                         config::chain_nodes(nodes, &hops)?
                     } else {
                         config::compile_chain(&nodes, &hops, &backups, config::ROUTE_PREFIX)?

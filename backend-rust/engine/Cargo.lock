@@ -2263,6 +2263,7 @@ dependencies = [
  "serde_yaml_ng",
  "sha1",
  "sha2",
+ "smartvpn-sing-mux",
  "smoltcp",
  "socket2",
  "tokio",
@@ -2275,6 +2276,15 @@ dependencies = [
  "wind-tuic",
  "windows-sys 0.61.2",
  "x25519-dalek",
+]
+
+[[package]]
+name = "smartvpn-sing-mux"
+version = "0.1.0"
+dependencies = [
+ "futures-util",
+ "tokio",
+ "tokio-util",
  "yamux",
 ]
 

@@ -27,6 +27,7 @@ use crate::{
 /// allows a proxy to get a connection to a remote server
 #[async_trait]
 pub trait RemoteConnector: Send + Sync + Debug {
+    fn is_direct(&self) -> bool { false }
     async fn connect_stream(
         &self,
         resolver: ThreadSafeDNSResolver,
@@ -64,6 +65,7 @@ fn global_direct_connector() -> Arc<dyn RemoteConnector> {
 
 #[async_trait]
 impl RemoteConnector for DirectConnector {
+    fn is_direct(&self) -> bool { true }
     async fn connect_stream(
         &self,
         resolver: ThreadSafeDNSResolver,
@@ -193,10 +195,11 @@ impl RemoteConnector for ProxyConnector {
             port
         );
 
-        let s = self
-            .proxy
-            .connect_stream_with_connector(&sess, resolver, self.connector.as_ref())
-            .await?;
+        let s = if self.connector.is_direct() && matches!(self.proxy.proto(), crate::proxy::OutboundType::Hysteria2 | crate::proxy::OutboundType::Tuic) {
+            self.proxy.connect_stream(&sess,resolver).await?
+        } else {
+            self.proxy.connect_stream_with_connector(&sess,resolver,self.connector.as_ref()).await?
+        };
 
         let stream = InstrumentedStreamWrapper::new(s);
         // Standalone probe dials do not install traffic tracking.
@@ -222,14 +225,11 @@ impl RemoteConnector for ProxyConnector {
             so_mark,
             ..Default::default()
         };
-        let s = self
-            .proxy
-            .connect_datagram_with_connector(
-                &sess,
-                resolver,
-                self.connector.as_ref(),
-            )
-            .await?;
+        let s = if self.connector.is_direct() && matches!(self.proxy.proto(), crate::proxy::OutboundType::Hysteria2 | crate::proxy::OutboundType::Tuic) {
+            self.proxy.connect_datagram(&sess,resolver).await?
+        } else {
+            self.proxy.connect_datagram_with_connector(&sess,resolver,self.connector.as_ref()).await?
+        };
 
         let stream = InstrumentedDatagramWrapper::new(s);
         // Standalone probe dials do not install traffic tracking.

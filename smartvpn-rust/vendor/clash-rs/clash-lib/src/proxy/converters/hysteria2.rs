@@ -129,6 +129,7 @@ impl TryFrom<OutboundHysteria2> for Handler {
         };
         let hop_interval = value.hop_interval.map(std::time::Duration::from_secs);
         let opts = HystOption {
+            keep_alive_interval: value.keep_alive_interval.unwrap_or(10),
             name: value.name,
             sni: value.sni.or(addr.domain().map(|s| s.to_owned())),
             addr,

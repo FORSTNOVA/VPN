@@ -79,6 +79,9 @@ impl Store {
                 [],
             )?;
         }
+        if !tx.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('chain_profiles') WHERE name='sessions')", [], |r| r.get::<_,bool>(0))? {
+            tx.execute("ALTER TABLE chain_profiles ADD COLUMN sessions TEXT NOT NULL DEFAULT '{}'", [])?;
+        }
         for (k, v) in defaults().as_object().unwrap() {
             tx.execute(
                 "INSERT OR IGNORE INTO settings VALUES(?,?)",
@@ -224,6 +227,10 @@ impl Store {
         }
         Ok(())
     }
+    pub fn profile_sessions(&self, name: &str) -> Result<crate::config::Sessions> {
+        let raw: String = self.db.query_row("SELECT coalesce((SELECT sessions FROM chain_profiles WHERE name=?),'{}')", [name], |r| r.get(0))?;
+        Ok(serde_json::from_str(&raw)?)
+    }
     pub fn profile_backups(&self, name: &str) -> Result<crate::config::Backups> {
         let doc: String = self.db.query_row(
             "SELECT coalesce((SELECT backups FROM chain_profiles WHERE name=?),'{}')",
@@ -240,10 +247,14 @@ impl Store {
             hops: Vec<String>,
             #[serde(default)]
             backups: crate::config::Backups,
+            #[serde(default)]
+            sessions: crate::config::Sessions,
         }
         let p: Profile = serde_json::from_value(doc.clone())?;
         ensure!(!p.name.trim().is_empty(), "empty chain name");
         self.validate_hops(&p.hops)?;
+        ensure!(p.sessions.keys().all(|n| p.hops.contains(n) || p.backups.values().flatten().any(|b| b == n)), "session option outside chain");
+        crate::config::apply_sessions(&mut self.configs()?, &p.sessions)?;
         crate::config::compile_chain(&self.configs()?, &p.hops, &p.backups, crate::config::ROUTE_PREFIX)?;
         let chain = self.chain()?;
         let tx = self
@@ -265,11 +276,11 @@ impl Store {
             }
         }
         tx.execute(
-            "INSERT INTO chain_profiles(name,hops,backups) VALUES(?,?,?)",
+            "INSERT INTO chain_profiles(name,hops,backups,sessions) VALUES(?,?,?,?)",
             params![
                 p.name,
                 serde_json::to_string(&p.hops)?,
-                serde_json::to_string(&p.backups)?
+                serde_json::to_string(&p.backups)?, serde_json::to_string(&p.sessions)?
             ],
         )?;
         tx.commit()?;
@@ -341,11 +352,11 @@ impl Store {
             [],
             |r| r.get(0),
         )?;
-        let (backups,names):(String,String)=self.db.query_row("SELECT json_group_object(name,json(backups)),json_group_object(name,name) FROM chain_profiles",[],|r|Ok((r.get(0)?,r.get(1)?)))?;
+        let (backups,names,sessions):(String,String,String)=self.db.query_row("SELECT json_group_object(name,json(backups)),json_group_object(name,name),json_group_object(name,json(sessions)) FROM chain_profiles",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
         let active_label:Option<String>=self.db.query_row("SELECT (SELECT name FROM subscriptions WHERE url=(SELECT json_extract(value,'$') FROM settings WHERE key='subscriptionUrl'))",[],|r|r.get(0))?;
         let nodes=self.configs()?.into_iter().map(|n|json!({"name":n["name"],"type":n["type"],"network":n["network"],"tls":n["tls"],"sourceLabel":if manual.contains(&n["name"]){Some("手动节点")}else{n["smartvpn-source"].as_str().or(active_label.as_deref())},"manual":manual.contains(&n["name"]),"selected":n["name"].as_str()==selected.as_deref()})).collect::<Vec<_>>();
         Ok(
-            json!({"nodes":nodes,"selectedNode":selected,"selectionMode":"manual","chain":chain,"chains":serde_json::from_str::<Value>(&profiles)?,"chainBackups":serde_json::from_str::<Value>(&backups)?,"appGroupChains":serde_json::from_str::<Value>(&names)?}),
+            json!({"nodes":nodes,"selectedNode":selected,"selectionMode":"manual","chain":chain,"chains":serde_json::from_str::<Value>(&profiles)?,"chainSessions":serde_json::from_str::<Value>(&sessions)?,"chainBackups":serde_json::from_str::<Value>(&backups)?,"appGroupChains":serde_json::from_str::<Value>(&names)?}),
         )
     }
     pub fn manual_nodes(&self) -> Result<Vec<Value>> {

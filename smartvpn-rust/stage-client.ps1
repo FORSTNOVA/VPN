@@ -13,11 +13,7 @@ function Set-DirectClient([string]$projectDir) {
     # Parentheses terminate the cascade assignment before the timeout setter.
     $direct = "final client = HttpClient()..findProxy = ((_) => 'DIRECT')..connectionTimeout"
     $source = $source.Replace($pattern,$direct)
-    $anchor = [regex]'TextButton\(\s+onPressed: \(\) => edit\(entry\.key\),'
-    $match = $anchor.Matches($source)
-    if ($match.Count -ne 1) { throw 'Expected chain edit action' }
-    $delete = [IO.File]::ReadAllText("$PSScriptRoot/client/chain-delete.dart.inc")
-    [IO.File]::WriteAllText($file, $source.Insert($source.IndexOf($match[0].Value), $delete))
+    [IO.File]::WriteAllText($file, $source)
 }
 function Set-RustAndroidVpnSettings([string]$projectDir) {
     $file = Join-Path $projectDir 'android/app/src/main/java/com/smartvpn/client/SmartVpnService.java'

@@ -355,10 +355,11 @@ impl OutboundManager {
                 }
                 #[cfg(feature = "shadowsocks")]
                 OutboundProxyProtocol::Ss(s) => {
+                    let mux = s.common_opts.smartvpn_mux;
                     let name = s.common_opts.name.clone();
                     s.try_into()
                         .map(|x: shadowsocks::outbound::Handler| {
-                            Arc::new(x) as AnyOutboundHandler
+                            crate::proxy::sing_mux::wrap(Arc::new(x), mux)
                         })
                         .inspect_err(|e| {
                             error!(
@@ -389,27 +390,30 @@ impl OutboundManager {
                         .ok()
                 }
                 OutboundProxyProtocol::Vmess(v) => {
+                    let mux = v.common_opts.smartvpn_mux;
                     let name = v.common_opts.name.clone();
                     v.try_into()
-                        .map(|x: vmess::Handler| Arc::new(x) as AnyOutboundHandler)
+                        .map(|x: vmess::Handler| crate::proxy::sing_mux::wrap(Arc::new(x), mux))
                         .inspect_err(|e| {
                             error!("failed to load vmess outbound {}: {}", name, e);
                         })
                         .ok()
                 }
                 OutboundProxyProtocol::Vless(v) => {
+                    let mux = v.common_opts.smartvpn_mux;
                     let name = v.common_opts.name.clone();
                     v.try_into()
-                        .map(|x: vless::Handler| Arc::new(x) as AnyOutboundHandler)
+                        .map(|x: vless::Handler| crate::proxy::sing_mux::wrap(Arc::new(x), mux))
                         .inspect_err(|e| {
                             error!("failed to load vless outbound {}: {}", name, e);
                         })
                         .ok()
                 }
                 OutboundProxyProtocol::Trojan(v) => {
+                    let mux = v.common_opts.smartvpn_mux;
                     let name = v.common_opts.name.clone();
                     v.try_into()
-                        .map(|x: trojan::Handler| Arc::new(x) as _)
+                        .map(|x: trojan::Handler| crate::proxy::sing_mux::wrap(Arc::new(x), mux))
                         .inspect_err(|e| {
                             error!("failed to load trojan outbound {}: {}", name, e);
                         })
