@@ -8,7 +8,13 @@
 
 ## 下载
 
-### 最新纯 Rust 预览版（推荐尝鲜 · 零 Go / 零 Mihomo · 体积减半）
+### Android ARM64 预发布版 v0.5.4-dev.7
+
+[下载 Android ARM64 APK](https://github.com/FORSTNOVA/VPN/releases/download/v0.5.4-dev.7/SmartVPN-0.5.4-dev.7-release-arm64-v8a.apk) · [发布说明与 SHA-256](https://github.com/FORSTNOVA/VPN/releases/tag/v0.5.4-dev.7)
+
+已在 Android Studio 模拟器验证 VMess AEAD（WebSocket）和 TUIC v5（QUIC）单节点链接的导入、连接及 TCP、UDP 双向传输。
+
+### v0.4.0-alpha.5 纯 Rust 预览版
 - **Windows x64 便携 ZIP**：[SmartVPN-0.4.0-alpha.5-rust-pure-windows-x64.zip](https://github.com/FORSTNOVA/VPN/releases/download/v0.4.0-alpha.5/SmartVPN-0.4.0-alpha.5-rust-pure-windows-x64.zip)（~27 MiB）
 - **Android ARM64 APK**：[SmartVPN-0.4.0-alpha.5-rust-pure-arm64-v8a.apk](https://github.com/FORSTNOVA/VPN/releases/download/v0.4.0-alpha.5/SmartVPN-0.4.0-alpha.5-rust-pure-arm64-v8a.apk)（~16.7 MiB，支持 Android 16 KB 页对齐）
 - **发布说明与 SHA-256 校验**：[v0.4.0-alpha.5 Release](https://github.com/FORSTNOVA/VPN/releases/tag/v0.4.0-alpha.5)
