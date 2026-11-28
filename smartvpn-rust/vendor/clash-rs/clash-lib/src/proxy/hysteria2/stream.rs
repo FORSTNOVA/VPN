@@ -14,22 +14,11 @@ pub struct HystStream {
     send: quinn::SendStream,
     recv: quinn::RecvStream,
     /// Bytes read past the framed header that must be delivered before reading
-    /// further from the QUIC stream. Empty for the client side.
+    /// further from the QUIC stream.
     prefix: Bytes,
 }
 
 impl HystStream {
-    pub fn new(send: quinn::SendStream, recv: quinn::RecvStream) -> Self {
-        Self {
-            send,
-            recv,
-            prefix: Bytes::new(),
-        }
-    }
-
-    /// Like [`new`](Self::new) but delivers `prefix` before the stream — used
-    /// by the server to preserve payload bytes pipelined into the request
-    /// frame.
     pub fn with_prefix(
         send: quinn::SendStream,
         recv: quinn::RecvStream,

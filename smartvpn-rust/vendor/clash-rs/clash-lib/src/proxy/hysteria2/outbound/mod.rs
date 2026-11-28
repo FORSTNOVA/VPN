@@ -44,7 +44,7 @@ use std::{
     sync::{Arc, RwLock, atomic::AtomicU32},
 };
 use tokio::sync::Mutex;
-use tracing::{debug, trace, warn};
+use tracing::{trace, warn};
 
 #[derive(Clone)]
 pub struct SalamanderObfs {
@@ -539,36 +539,20 @@ impl HysteriaConnection {
     }
 
     pub async fn connect_tcp(&self, sess: &Session) -> std::io::Result<HystStream> {
-        let (mut tx, mut rx) = self.conn.open_bi().await?;
+        let (mut tx, rx) = self.conn.open_bi().await?;
         tokio_util::codec::FramedWrite::new(&mut tx, Hy2TcpCodec)
             .send(&sess.destination)
             .await?;
 
-        match tokio_util::codec::FramedRead::new(&mut rx, Hy2TcpCodec)
-            .next()
-            .await
-        {
-            Some(Ok(resp)) => {
-                if resp.status != 0x00 {
-                    return Err(std::io::Error::other(format!(
-                        "server response error, msg: {:?}",
-                        resp.msg
-                    )));
-                } else {
-                    debug!(
-                        "hysteria2 tcp request success: status: {}, msg: {:?}",
-                        resp.status, resp.msg
-                    );
-                }
-            }
-            _ => {
-                return Err(std::io::Error::other(
-                    "not receive hysteria2 response from server",
-                ));
-            }
-        };
-
-        Ok(HystStream::new(tx, rx))
+        let mut reader = tokio_util::codec::FramedRead::new(rx, Hy2TcpCodec);
+        let response = reader.next().await.ok_or_else(|| std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof, "missing Hysteria2 response"
+        ))??;
+        if response.status != 0 {
+            return Err(std::io::Error::other(format!("Hysteria2 server: {}", response.msg)));
+        }
+        let parts = reader.into_parts();
+        Ok(HystStream::with_prefix(tx, parts.io, parts.read_buf.freeze()))
     }
 
     pub async fn connect_udp(

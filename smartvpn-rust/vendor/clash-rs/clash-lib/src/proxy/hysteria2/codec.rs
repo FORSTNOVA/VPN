@@ -176,32 +176,33 @@ impl Decoder for Hy2TcpCodec {
         &mut self,
         src: &mut BytesMut,
     ) -> Result<Option<Self::Item>, Self::Error> {
-        if !src.has_remaining() {
-            return Err(ErrorKind::UnexpectedEof.into());
+        let mut frame = &src[..];
+        if frame.is_empty() {
+            return Ok(None);
         }
-        let status = src.get_u8();
-        let msg_len = VarInt::decode(src)
-            .map_err(|_| ErrorKind::InvalidData)?
-            .into_inner() as usize;
-
-        if src.remaining() < msg_len {
-            return Err(ErrorKind::UnexpectedEof.into());
+        let status = frame.get_u8();
+        let Ok(len) = VarInt::decode(&mut frame) else { return Ok(None) };
+        let msg_len = len.into_inner();
+        if msg_len > 65535 {
+            return Err(std::io::Error::new(ErrorKind::InvalidData, "oversized Hysteria2 response message"));
         }
-
-        let msg: Vec<u8> = src.split_to(msg_len).into();
-        let msg: String = String::from_utf8(msg)
-            .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?;
-
-        let padding_len = VarInt::decode(src)
-            .map_err(|_| ErrorKind::UnexpectedEof)?
-            .into_inner() as usize;
-
-        if src.remaining() < padding_len {
-            return Err(ErrorKind::UnexpectedEof.into());
+        if frame.len() < msg_len as usize {
+            return Ok(None);
         }
-        src.advance(padding_len);
-
-        Ok(Hy2TcpResp { status, msg }.into())
+        let (message, mut rest) = frame.split_at(msg_len as usize);
+        let Ok(len) = VarInt::decode(&mut rest) else { return Ok(None) };
+        let padding = len.into_inner();
+        if padding > MAX_PADDING_LEN as u64 {
+            return Err(std::io::Error::new(ErrorKind::InvalidData, "oversized Hysteria2 response padding"));
+        }
+        if rest.len() < padding as usize {
+            return Ok(None);
+        }
+        let msg = std::str::from_utf8(message)
+            .map_err(|e| std::io::Error::new(ErrorKind::InvalidData, e))?.to_owned();
+        let consumed = src.len() - rest.len() + padding as usize;
+        src.advance(consumed);
+        Ok(Some(Hy2TcpResp { status, msg }))
     }
 }
 
