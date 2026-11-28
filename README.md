@@ -8,9 +8,9 @@
 
 ## 下载
 
-### Windows x64 / Android ARM64 预发布版 v0.5.4-dev.9
+### Windows x64 / Android ARM64 预发布版 v0.5.4-dev.10
 
-[下载 Windows x64 便携 ZIP](https://github.com/FORSTNOVA/VPN/releases/download/v0.5.4-dev.9/SmartVPN-0.5.4-dev.9-rust-pure-windows-x64.zip) · [下载 Android ARM64 APK](https://github.com/FORSTNOVA/VPN/releases/download/v0.5.4-dev.9/SmartVPN-0.5.4-dev.9-release-arm64-v8a.apk) · [发布说明与 SHA-256](https://github.com/FORSTNOVA/VPN/releases/tag/v0.5.4-dev.9)
+[下载 Windows x64 便携 ZIP](https://github.com/FORSTNOVA/VPN/releases/download/v0.5.4-dev.10/SmartVPN-0.5.4-dev.10-rust-pure-windows-x64.zip) · [下载 Android ARM64 APK](https://github.com/FORSTNOVA/VPN/releases/download/v0.5.4-dev.10/SmartVPN-0.5.4-dev.10-release-arm64-v8a.apk) · [发布说明与 SHA-256](https://github.com/FORSTNOVA/VPN/releases/tag/v0.5.4-dev.10)
 
 支持按节点开启 TCP 多路复用（Yamux）或 QUIC 长连接保活。Windows 和 Android 均支持将 Hysteria2 或 TUIC 放在支持 UDP 转发的第一跳之后。
 
