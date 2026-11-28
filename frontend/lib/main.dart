@@ -116,6 +116,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String? _selectedNode;
   String _activeNode = '';
   bool _chainEnabled = false;
+  Map<String, Map<String,String>>? _chainSessions;
   Map<String, Map<String,List<String>>>? _chainBackups;
   Map<String, List<String>> _chains = {};
   String _chainName = '';
@@ -710,6 +711,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       _chainName = chain['name'] as String? ?? '';
       _chains = (value['chains'] as Map<String, dynamic>? ?? {})
           .map((k, v) => MapEntry(k, (v as List).cast<String>()));
+      _chainSessions = (value['chainSessions'] as Map<String,dynamic>?)?.map((k,v) => MapEntry(k, Map<String,String>.from(v as Map)));
       _chainBackups = (value['chainBackups'] as Map<String,dynamic>?)?.map((k, v) => MapEntry(k, (v as Map<String,dynamic>).map((primary, backups) => MapEntry(primary, (backups as List).cast<String>()))));
       _chainHops =
           (chain['hops'] as List? ?? const []).whereType<String>().toList();
@@ -1150,16 +1152,19 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               initialHops: _chains[original] ?? [],
                               tunnelActive: Platform.isWindows && _kernelRunning &&
                                   _connectionMode != 'system-proxy',
+                              sessionTypes: Platform.isAndroid && _chainSessions != null ? {for (final n in _nodes) n.name: n.type.toLowerCase()} : const {},
+                              initialSessions: _chainSessions?[original] ?? const {},
                               initialBackups: _chainBackups == null ? null : _chainBackups![original] ?? {},
                               initialName: original ?? '',
                               book: _probes,
                               speeds: _speeds,
-                              save: (name, hops, backups) async {
+                              save: (name, hops, backups, sessions) async {
                                 await _request(
                                     'PUT', '/api/nodes/chain/profile', body: {
                                   'original': original ?? '',
                                   'name': name,
                                   if (_chainBackups != null) 'backups': backups,
+                                  if (_chainSessions != null) 'sessions': sessions,
                                   'hops': hops
                                 });
                               },

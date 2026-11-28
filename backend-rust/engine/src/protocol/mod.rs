@@ -8,3 +8,4 @@ pub mod hysteria2;
 
 pub mod vmess;
 pub mod tuic;
+pub mod mux;

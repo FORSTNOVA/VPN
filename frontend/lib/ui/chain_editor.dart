@@ -8,11 +8,12 @@ class ChainEditor extends StatefulWidget {
   final List<String> initialHops;
   final String initialName;
   final Map<String, List<String>>? initialBackups;
+  final Map<String,String> sessionTypes, initialSessions;
   final bool tunnelActive;
   final ProbeBook book;
   final SpeedBook speeds;
   final Future<void> Function(
-      String name, List<String> hops, Map<String, List<String>> backups) save;
+      String name, List<String> hops, Map<String, List<String>> backups, Map<String,String> sessions) save;
 
   const ChainEditor({
     super.key,
@@ -22,6 +23,8 @@ class ChainEditor extends StatefulWidget {
     required this.initialHops,
     required this.initialName,
     this.initialBackups,
+    this.sessionTypes = const {},
+    this.initialSessions = const {},
     this.tunnelActive = false,
     required this.book,
     required this.speeds,
@@ -39,6 +42,7 @@ class _ChainEditorState extends State<ChainEditor> {
   late final Map<String, List<String>> _backups;
   Set<String> get _used => {..._hops, ..._backups.values.expand((v) => v)};
   ProbeBook get _pathBook => widget.book.forBackups(_backups);
+  late final Map<String,String> _sessions;
   bool _isSaving = false;
   String? _globalError;
 
@@ -46,6 +50,7 @@ class _ChainEditorState extends State<ChainEditor> {
   void initState() {
     super.initState();
     _nameController = TextEditingController(text: widget.initialName);
+    _sessions = Map.of(widget.initialSessions);
     _backups = {
       for (final e
           in (widget.initialBackups ?? <String, List<String>>{}).entries)
@@ -192,7 +197,7 @@ class _ChainEditorState extends State<ChainEditor> {
     });
 
     try {
-      await widget.save(name, List<String>.unmodifiable(_hops), _backups);
+      await widget.save(name, List<String>.unmodifiable(_hops), _backups, {for (final n in _used) if (_sessions.containsKey(n)) n: _sessions[n]!});
       if (!mounted) return;
       Navigator.of(context).pop(true);
     } catch (e) {
@@ -383,6 +388,7 @@ class _ChainEditorState extends State<ChainEditor> {
                 const SizedBox(width: 8),
               ],
             ),
+            ..._sessionOption(hopName),
             Wrap(children: [
               PathProbeButton(
                   book: widget.book, hops: [hopName], title: '测单节点'),
@@ -408,6 +414,7 @@ class _ChainEditorState extends State<ChainEditor> {
                               members.remove(backup);
                               if (members.isEmpty) _backups.remove(hopName);
                             }))),
+              for (final backup in _backups[hopName] ?? <String>[]) ..._sessionOption(backup),
               TextButton.icon(
                   icon: const Icon(Icons.add),
                   label: const Text('添加备用节点'),
@@ -448,6 +455,20 @@ class _ChainEditorState extends State<ChainEditor> {
         ),
       ),
     );
+  }
+
+  List<Widget> _sessionOption(String node) {
+    final type = widget.sessionTypes[node];
+    final mux = const {'vmess','vless','ss','trojan'}.contains(type);
+    final quic = const {'hysteria2','hy2','tuic'}.contains(type);
+    if (!mux && !quic) return [];
+    final mode = mux ? 'mux' : 'keepalive';
+    return [SwitchListTile(
+      title: Text(mux ? '$node · TCP 多路复用' : '$node · QUIC 长连接保活'),
+      subtitle: Text(mux ? '服务端需启用 sing-mux（Yamux）' : '启用后心跳间隔最长 5 秒'),
+      value: _sessions[node] == mode,
+      onChanged: (on) => setState(() { if (on) { _sessions[node] = mode; } else { _sessions.remove(node); } }),
+    )];
   }
 
   Widget _buildActionBtn({

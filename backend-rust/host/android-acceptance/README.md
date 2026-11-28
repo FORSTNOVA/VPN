@@ -81,3 +81,27 @@ empty subscription catalog. The runner adds a loopback subscription, merges
 while connected, selects its node and checks the descriptor before the
 cross-UID traffic challenge. Use a read-only AVD or a disposable data image
 because merging also updates the active profile and selected node.
+
+### Per-node Mux and QUIC keepalive
+
+Install the ARM64 client and the matching instrumentation APK on a disposable
+Android Studio AVD and grant SmartVPN permission to establish a VPN. The runner
+overwrites its test chain, manual nodes, app groups and selected node. With
+Python 3.11+, cryptography and sing-box 1.14.6 installed, run a case from this
+directory:
+
+```powershell
+python session_fixture.py --adb $adb --serial $serial --sing-box $singBox --protocol vmess --mode mux --out $results
+```
+
+Use separate result directories for the VMess `default` control, TCP `mux`
+cases (`vmess`, `vless`, `trojan`, `shadowsocks`), and QUIC cases
+(`hysteria2` or `tuic`, with `default` or `keepalive`). The isolated chain
+routes only the peer app through the selected entry and a SOCKS5 exit. It sends
+random payloads on six concurrent TCP connections, checks every reply, closes
+all six sockets, waits 40 seconds and opens a seventh. Observe the outer
+handshakes at the first hop. QUIC Initial retransmissions are grouped by the
+client source connection ID and socket. The JSON output includes handshake
+times and the direction of traffic that wakes an idle QUIC transport.
+
+Pass `--second-hop` for a TCP Mux case to place the tested node after SOCKS5.

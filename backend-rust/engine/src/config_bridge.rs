@@ -57,6 +57,7 @@ struct Proxy {
     server: String,
     port: u16,
     dialer_proxy: Option<String>,
+    smartvpn_session: Option<String>,
     #[serde(alias = "servername")]
     sni: Option<String>,
     #[serde(default)]
@@ -402,6 +403,7 @@ impl Proxy {
                     password,
                     sni: tls.sni,
                     insecure: tls.insecure,
+                    keepalive: false,
                     up_mbps: bandwidth(up)?,
                     down_mbps: bandwidth(down)?,
                     obfs_salamander,
@@ -569,7 +571,15 @@ pub fn build_router_from_clash_yaml(
         }
         let name = std::mem::take(&mut proxy.name);
         let parent = proxy.dialer_proxy.take();
-        if let Ok(spec) = proxy.into_spec() {
+        if let Some(mode) = proxy.smartvpn_session.take() {
+            let spec = match (mode.as_str(), proxy.into_spec()?) {
+                ("mux", node @ (NodeSpec::Vmess(_) | NodeSpec::Vless(_) | NodeSpec::Shadowsocks(_) | NodeSpec::Trojan(_))) => NodeSpec::Mux(Box::new(node)),
+                ("keepalive", NodeSpec::Hysteria2(mut cfg)) => { cfg.keepalive = true; NodeSpec::Hysteria2(cfg) }
+                ("keepalive", NodeSpec::Tuic(mut cfg)) => { cfg.heartbeat = cfg.heartbeat.min(Duration::from_secs(5)); NodeSpec::Tuic(cfg) }
+                _ => return Err(invalid(format!("unsupported session mode {mode} for {name}"))),
+            };
+            insert(name, Definition::Node(spec, parent))?;
+        } else if let Ok(spec) = proxy.into_spec() {
             insert(name, Definition::Node(spec, parent))?;
         }
     }

@@ -18,6 +18,8 @@ public final class DeviceRun extends Instrumentation {
     private boolean requireWriteHost;
     private boolean testLiveMerge;
     private String nodeLink;
+    private String sessionMode;
+    private boolean secondHop;
     private String nodeType;
     private String storeStep;
     private String storeFixture;
@@ -30,6 +32,8 @@ public final class DeviceRun extends Instrumentation {
             requireWriteHost = "1".equals(args.getString("writeHost"));
             testLiveMerge = "1".equals(args.getString("liveMerge"));
             requireReadHost = "1".equals(args.getString("readHost"));
+            secondHop = Boolean.parseBoolean(args.getString("secondHop"));
+            sessionMode = args.getString("sessionMode");
             nodeLink = args.getString("nodeLink64");
             nodeType = args.getString("nodeType");
             storeStep = args.getString("storeStep");
@@ -110,7 +114,7 @@ public final class DeviceRun extends Instrumentation {
         String started = shell("am start -f 0x18000000 -n com.smartvpn.acceptance/.Peer --es nonce " + nonce
             + " --ez " + action + " true");
         check(started.contains("Starting: Intent") && !started.contains("Error") && !started.contains("not started"), started);
-        for (int n = 0; n < 150; n++) {
+        for (int n = 0; n < (action.equals("sessionTest") ? 400 : 150); n++) {
             String log = shell("logcat -d -s SmartVPNPeer:I");
             if (log.contains(nonce + " PASS"))
                 return;
@@ -121,6 +125,43 @@ public final class DeviceRun extends Instrumentation {
         throw new IOException("peer timed out");
     }
     // Run only on a disposable Android Studio AVD with the paired protocol fixture.
+    private void checkSessionChain() throws Exception {
+        String uri = new String(android.util.Base64.decode(nodeLink, android.util.Base64.URL_SAFE), StandardCharsets.UTF_8);
+        api("POST", "nodes/manual", new JSONObject().put("name", "session-entry").put("uri", uri));
+        String socksHost = secondHop ? "10.0.2.2" : "127.0.0.1";
+        api("POST", "nodes/manual", new JSONObject().put("name", "session-exit").put("uri", "socks5://"+socksHost+":38681#session-exit"));
+        api("POST", "nodes/manual", new JSONObject().put("name", "unused").put("uri", "socks5://127.0.0.1:9#unused"));
+        JSONObject modes = new JSONObject();
+        if (!sessionMode.equals("default")) modes.put("session-entry", sessionMode);
+        api("PUT", "nodes/chain/profile", new JSONObject().put("id","avd-chain").put("name","Session test")
+            .put("hops", new org.json.JSONArray().put(secondHop ? "session-exit" : "session-entry")
+                .put(secondHop ? "session-entry" : "session-exit")).put("sessions", modes));
+        check(api("GET","state",null).getJSONObject("chainSessions").getJSONObject("Session test").toString().equals(modes.toString()), "session policy was not saved");
+        // Restrict the measured chain to Peer so system background traffic cannot refresh an idle session.
+        api("PUT", "nodes/select", new JSONObject().put("name","unused"));
+        JSONObject group = new JSONObject().put("id","peer").put("name","peer").put("enabled",true)
+            .put("targetType","chain").put("targetChainId","avd-chain")
+            .put("apps",new org.json.JSONArray().put("com.smartvpn.acceptance"));
+        api("PUT","settings",new JSONObject().put("appGroups",new org.json.JSONArray().put(group)));
+        check(VpnService.prepare(app) == null, "emulator VPN consent required");
+        app.startForegroundService(vpn().setAction("com.smartvpn.client.START"));
+        for (int i=0; ; i++) {
+            try {
+                api("POST","connect",null);
+                break;
+            } catch (IOException e) {
+                if (i == 99 || !e.getMessage().contains("VPN tunnel is not authorized yet")) throw e;
+                Thread.sleep(100);
+            }
+        }
+        try {
+            peer(null, "sessionTest");
+            report("Six concurrent streams and one new stream after 40 seconds idle verified");
+        } finally {
+            api("POST","disconnect",null);
+        }
+    }
+
     private void checkNodeLink() throws Exception {
         check("vmess".equals(nodeType) || "tuic".equals(nodeType), "invalid test protocol");
         String uri = new String(android.util.Base64.decode(nodeLink, android.util.Base64.URL_SAFE), StandardCharsets.UTF_8);
@@ -267,7 +308,7 @@ public final class DeviceRun extends Instrumentation {
             }
             check(bootstrap.has("port"), "bootstrap failed: " + bootstrap.optString("error"));
             if (nodeLink != null) {
-                checkNodeLink();
+                if (sessionMode != null) checkSessionChain(); else checkNodeLink();
                 passed = true;
                 return;
             }

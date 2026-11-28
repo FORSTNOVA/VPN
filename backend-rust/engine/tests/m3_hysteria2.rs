@@ -41,6 +41,7 @@ fn config(peer: SocketAddr) -> Hysteria2Config {
         password: "auth pass".into(),
         sni: Some("localhost".into()),
         insecure: true,
+        keepalive: false,
         up_mbps: 10,
         down_mbps: 20,
         obfs_salamander: None,

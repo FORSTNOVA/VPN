@@ -19,6 +19,7 @@ use std::{
 
 #[derive(Clone)]
 pub enum NodeSpec {
+    Mux(Box<NodeSpec>),
     Direct,
     Reject,
     Socks5(TargetAddr, Option<(String, String)>),
@@ -47,6 +48,7 @@ pub fn build_dialer(spec: &NodeSpec) -> io::Result<Dialer> {
 fn extend(spec: &NodeSpec, underlay: Option<Dialer>) -> io::Result<Option<Dialer>> {
     let under_tcp = || underlay.clone().unwrap_or_else(|| Arc::new(DirectDialer));
     let dialer: Dialer = match spec {
+        NodeSpec::Mux(node) => Arc::new(crate::protocol::mux::Mux::new(extend(node, underlay)?.ok_or_else(|| io::Error::other("Mux requires a proxy outbound"))?)),
         NodeSpec::Reject => Arc::new(crate::proxy_group::Reject),
         NodeSpec::Tested(config, nodes) => {
             let members = nodes

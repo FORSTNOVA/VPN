@@ -729,6 +729,7 @@ impl ControlPlane {
                 let id = "default-chain".to_owned();
                 st.persisted.chains.retain(|c| c.id != id);
                 st.persisted.chains.push(ProxyChain {
+                    sessions: Default::default(),
                     backups: Default::default(),
                     id: id.clone(),
                     name: clean.join(" → "),
@@ -753,11 +754,13 @@ impl ControlPlane {
         let original = val.get("original").and_then(|v| v.as_str()).unwrap_or("").trim().to_owned();
         #[derive(serde::Deserialize)]
         struct Members {
+            #[serde(default)]
+            sessions: std::collections::BTreeMap<String, String>,
             hops: Vec<String>,
             #[serde(default)]
             backups: std::collections::BTreeMap<String, Vec<String>>,
         }
-        let Ok(Members { hops, backups }) = serde_json::from_value(val.clone()) else {
+        let Ok(Members { hops, backups, sessions }) = serde_json::from_value(val.clone()) else {
             return text_resp(StatusCode::BAD_REQUEST, "invalid chain members");
         };
         let mut used = std::collections::HashSet::new();
@@ -768,6 +771,15 @@ impl ControlPlane {
             return text_resp(StatusCode::BAD_REQUEST, "代理链需要 2 至 8 跳，首选和备用节点不可重复");
         }
         let mut st = self.state.lock().await;
+        let nodes = st.all_proxy_values();
+        for (node, mode) in &sessions {
+            let kind = nodes.iter().find(|p| p["name"] == node.as_str()).and_then(|p| p["type"].as_str());
+            if !used.contains(node) || !matches!((kind, mode.as_str()),
+                (Some("vmess" | "vless" | "ss" | "trojan"), "mux") |
+                (Some("hysteria2" | "hy2" | "tuic"), "keepalive")) {
+                return text_resp(StatusCode::BAD_REQUEST, &format!("节点 {node} 不支持连接选项 {mode}"));
+            }
+        }
         let previous_id = st.persisted.active_chain_id.clone();
         let previous_chains = st.persisted.chains.clone();
         let existing_id = if !original.is_empty() {
@@ -798,6 +810,7 @@ impl ControlPlane {
             name,
             hops,
             backups,
+            sessions,
         });
         st.persisted.active_chain_id = id;
         if let Err(e) = st.save() {

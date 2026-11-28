@@ -119,6 +119,8 @@ pub struct ManualNode {
 #[serde(rename_all = "camelCase")]
 pub struct ProxyChain {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sessions: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub backups: BTreeMap<String, Vec<String>>,
     pub id: String,
     pub name: String,
@@ -563,6 +565,7 @@ impl RuntimeState {
                 "hops": active_chain_hops,
             },
             "chains": chains_map,
+            "chainSessions": self.persisted.chains.iter().map(|c| (&c.name, &c.sessions)).collect::<BTreeMap<_, _>>(),
             "chainBackups": self.persisted.chains.iter().map(|c| (&c.name, &c.backups)).collect::<BTreeMap<_, _>>(),
             "activeChainId": self.persisted.active_chain_id,
             "activeRegion": self.persisted.locked_region,

@@ -41,6 +41,30 @@ public final class Peer extends Activity {
             verifyReply(request, response);
         }
     }
+    private static void streamBatch(int count) throws Exception {
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(count);
+        java.util.concurrent.CyclicBarrier ready = new java.util.concurrent.CyclicBarrier(count);
+        java.util.List<java.util.concurrent.Future<Void>> tasks = new java.util.ArrayList<>();
+        try {
+            for (int i=0; i<count; i++) tasks.add(pool.submit(() -> {
+                byte[] data = new byte[512];
+                new java.security.SecureRandom().nextBytes(data);
+                try (Socket socket = new Socket()) {
+                    socket.connect(new InetSocketAddress("198.51.100.61",18061),8000);
+                    socket.setSoTimeout(12000);
+                    socket.getOutputStream().write(data);
+                    byte[] reply = new byte[data.length];
+                    new DataInputStream(socket.getInputStream()).readFully(reply);
+                    verifyReply(data, reply);
+                    ready.await(12, java.util.concurrent.TimeUnit.SECONDS);
+                }
+                return null;
+            }));
+            for (java.util.concurrent.Future<Void> task : tasks) task.get();
+        } finally {
+            pool.shutdownNow();
+        }
+    }
     @Override
     public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -63,6 +87,10 @@ public final class Peer extends Activity {
                     if (getIntent().getBooleanExtra("revoke", false)) {
                         if (VpnService.prepare(this) != null)
                             throw new IOException("peer requires test VPN consent");
+                    } else if (getIntent().getBooleanExtra("sessionTest", false)) {
+                        streamBatch(6);
+                        Thread.sleep(40000);
+                        streamBatch(1);
                     } else if (getIntent().getBooleanExtra("packetTest", false)) {
                         checkPackets();
                     } else {

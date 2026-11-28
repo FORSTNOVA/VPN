@@ -29,7 +29,7 @@ fn engine_yaml(
         if !(2..=8).contains(&chain.hops.len()) {
             return Err(format!("代理链「{}」需要 2 至 8 跳", chain.name));
         }
-        if !chain.backups.is_empty() {
+        if !chain.backups.is_empty() || !chain.sessions.is_empty() {
             let mut stages = Vec::new();
             // A later hop's first check may need to wait for earlier candidates to time out.
             let mut budget = 6;
@@ -49,9 +49,29 @@ fn engine_yaml(
                         hop + 1
                     ));
                 }
+                let mut candidates = Vec::new();
+                for (slot, node) in available.into_iter().enumerate() {
+                    if let Some(mode) = chain.sessions.get(node) {
+                        let alias = format!("__smartvpn_session_{index}_{hop}_{slot}");
+                        if active_proxies.iter().any(|p| p["name"] == alias) {
+                            return Err(format!("代理链内部节点名冲突：{alias}"));
+                        }
+                        let mut copy = proxies.iter().find(|p| p["name"] == node.as_str()).unwrap().clone();
+                        copy["name"] = json!(alias);
+                        copy["smartvpn-session"] = json!(mode);
+                        active_proxies.push(copy);
+                        candidates.push(alias);
+                    } else {
+                        candidates.push(node.clone());
+                    }
+                }
+                if chain.backups.is_empty() {
+                    stages.push(candidates.remove(0));
+                    continue;
+                }
                 let stage = format!("__smartvpn_policy_{index}_{hop}");
-                policy_groups.push(json!({"name":stage,"type":"ordered-failover","proxies":available,"hop-timeout":budget}));
-                budget += 8 * available.len();
+                policy_groups.push(json!({"name":stage,"type":"ordered-failover","proxies":candidates,"hop-timeout":budget}));
+                budget += 8 * candidates.len();
                 stages.push(stage);
             }
             let exit = format!("__smartvpn_relay_{index}");
@@ -339,8 +359,30 @@ mod tests {
     }
 
     #[test]
+    fn session_setting_belongs_to_one_chain_candidate() {
+        let mut state = PersistedState::default();
+        state.chains = serde_json::from_value(json!([{
+            "id":"route","name":"route","hops":["A","B"],"backups":{"A":["C"]},
+            "sessions":{"C":"mux"}
+        }])).unwrap();
+        state.active_chain_id = "route".into();
+        let proxies: Vec<_> = ["A","B","C"].iter().map(|name| json!({
+            "name":name,"type":"trojan","server":"localhost","port":443,"password":"test"
+        })).collect();
+        let yaml = build_engine_yaml(&state, &proxies).unwrap();
+        let doc: Value = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert_eq!(doc["proxies"][3]["smartvpn-session"], "mux");
+        assert_eq!(doc["proxy-groups"][1]["proxies"][1], doc["proxies"][3]["name"]);
+        for original in &doc["proxies"].as_array().unwrap()[..3] {
+            assert!(original.get("smartvpn-session").is_none());
+        }
+        smartvpn_engine::config_bridge::build_router_from_clash_yaml(&yaml, None).unwrap();
+    }
+
+    #[test]
     fn app_groups_share_chain_and_preserve_global_route() {
         let chain = |id: &str, hops: &[&str]| ProxyChain {
+            sessions: Default::default(),
             backups: Default::default(),
             id: id.into(),
             name: id.into(),

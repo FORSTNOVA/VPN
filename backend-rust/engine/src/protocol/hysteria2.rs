@@ -32,6 +32,7 @@ pub struct Hysteria2Config {
     pub password: String,
     pub sni: Option<String>,
     pub insecure: bool,
+    pub keepalive: bool,
     pub up_mbps: u64,
     pub down_mbps: u64,
     pub obfs_salamander: Option<String>,
@@ -245,9 +246,15 @@ impl Hysteria2Dialer {
         });
         let crypto =
             quinn::crypto::rustls::QuicClientConfig::try_from(tls).map_err(io::Error::other)?;
+        let mut client = quinn::ClientConfig::new(Arc::new(crypto));
+        if cfg.keepalive {
+            let mut transport = quinn::TransportConfig::default();
+            transport.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+            client.transport_config(Arc::new(transport));
+        }
         let conn = endpoint
             .connect_with(
-                quinn::ClientConfig::new(Arc::new(crypto)),
+                client,
                 peer,
                 cfg.sni.as_deref().unwrap_or(&host),
             )

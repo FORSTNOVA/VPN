@@ -108,6 +108,7 @@ pub fn path_router(
         id: probe.active_chain_id.clone(),
         name: "测速".into(),
         hops: hops.to_vec(),
+        sessions: state.persisted.chains.iter().find(|c| c.id == state.persisted.active_chain_id && c.hops == hops && &c.backups == backups).map(|c| c.sessions.clone()).unwrap_or_default(),
         backups: backups.clone(),
     });
     let yaml = super::tunnel::build_engine_yaml(&probe, &proxies)?;

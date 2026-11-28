@@ -10,7 +10,8 @@ crate-type = ["rlib", "cdylib"]
 [dependencies]
 marmo-proto = "0.0.4"
 marmo-net = "0.0.4"
-tokio-util = { version = "0.7", features = ["codec", "io"] }
+yamux = "0.13"
+tokio-util = { version = "0.7", features = ["codec", "io", "compat"] }
 wind-tuic = { git = "https://github.com/rust-proxy/wind", rev = "3ab2388761a32337e9f810348869ce68bfcc3067", default-features = false, features = ["client", "quinn", "ring"] }
 wind-core = { git = "https://github.com/rust-proxy/wind", rev = "3ab2388761a32337e9f810348869ce68bfcc3067" }
 hyper = { version = "1", features = ["client", "http1"] }
