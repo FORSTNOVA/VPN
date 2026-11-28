@@ -84,7 +84,7 @@ fn extend(spec: &NodeSpec, underlay: Option<Dialer>) -> io::Result<Option<Dialer
         }
         NodeSpec::Direct => return Ok(underlay),
         NodeSpec::Socks5(server, credentials) => Arc::new(crate::socks5::SocksOutbound {
-            server: server.clone(), credentials: credentials.clone(), underlay: under_tcp(),
+            first_hop: underlay.is_none(), server: server.clone(), credentials: credentials.clone(), underlay: under_tcp(),
         }),
         NodeSpec::Shadowsocks(c) => {
             Arc::new(ShadowsocksDialer::with_underlay(c.clone(), under_tcp()))
@@ -93,8 +93,10 @@ fn extend(spec: &NodeSpec, underlay: Option<Dialer>) -> io::Result<Option<Dialer
         NodeSpec::AnyTls(c) => Arc::new(AnyTlsDialer::with_underlay(c.clone(), under_tcp())),
         NodeSpec::Vmess(c) => Arc::new(crate::protocol::vmess::Dialer::new(c.clone(), under_tcp())),
         NodeSpec::Tuic(c) => {
-            if underlay.is_some() { return Err(io::Error::new(io::ErrorKind::Unsupported, "TUIC must be the first hop")); }
-            Arc::new(crate::protocol::tuic::Dialer::new(c.clone()))
+            if underlay.as_ref().is_some_and(|u| u.udp().is_none()) {
+                return Err(io::Error::new(io::ErrorKind::Unsupported, "previous hop does not support UDP relay for TUIC"));
+            }
+            Arc::new(crate::protocol::tuic::Dialer::new(c.clone(), underlay))
         }
         NodeSpec::Vless(c) => Arc::new(VlessDialer::with_underlay(c.clone(), under_tcp())),
         NodeSpec::Hysteria2(c) => match underlay {

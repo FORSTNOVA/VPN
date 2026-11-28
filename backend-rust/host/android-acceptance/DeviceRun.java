@@ -19,7 +19,8 @@ public final class DeviceRun extends Instrumentation {
     private boolean testLiveMerge;
     private String nodeLink;
     private String sessionMode;
-    private boolean secondHop;
+    private boolean secondHop, tunPackets;
+    private String packetRun;
     private String nodeType;
     private String storeStep;
     private String storeFixture;
@@ -32,6 +33,8 @@ public final class DeviceRun extends Instrumentation {
             requireWriteHost = "1".equals(args.getString("writeHost"));
             testLiveMerge = "1".equals(args.getString("liveMerge"));
             requireReadHost = "1".equals(args.getString("readHost"));
+            tunPackets = "true".equals(args.getString("tunPackets"));
+            packetRun = args.getString("packetRun");
             secondHop = Boolean.parseBoolean(args.getString("secondHop"));
             sessionMode = args.getString("sessionMode");
             nodeLink = args.getString("nodeLink64");
@@ -128,7 +131,7 @@ public final class DeviceRun extends Instrumentation {
     private void checkSessionChain() throws Exception {
         String uri = new String(android.util.Base64.decode(nodeLink, android.util.Base64.URL_SAFE), StandardCharsets.UTF_8);
         api("POST", "nodes/manual", new JSONObject().put("name", "session-entry").put("uri", uri));
-        String socksHost = secondHop ? "10.0.2.2" : "127.0.0.1";
+        String socksHost = secondHop && !tunPackets ? "10.0.2.2" : "127.0.0.1";
         api("POST", "nodes/manual", new JSONObject().put("name", "session-exit").put("uri", "socks5://"+socksHost+":38681#session-exit"));
         api("POST", "nodes/manual", new JSONObject().put("name", "unused").put("uri", "socks5://127.0.0.1:9#unused"));
         JSONObject modes = new JSONObject();
@@ -137,12 +140,16 @@ public final class DeviceRun extends Instrumentation {
             .put("hops", new org.json.JSONArray().put(secondHop ? "session-exit" : "session-entry")
                 .put(secondHop ? "session-entry" : "session-exit")).put("sessions", modes));
         check(api("GET","state",null).getJSONObject("chainSessions").getJSONObject("Session test").toString().equals(modes.toString()), "session policy was not saved");
-        // Restrict the measured chain to Peer so system background traffic cannot refresh an idle session.
-        api("PUT", "nodes/select", new JSONObject().put("name","unused"));
-        JSONObject group = new JSONObject().put("id","peer").put("name","peer").put("enabled",true)
-            .put("targetType","chain").put("targetChainId","avd-chain")
-            .put("apps",new org.json.JSONArray().put("com.smartvpn.acceptance"));
-        api("PUT","settings",new JSONObject().put("appGroups",new org.json.JSONArray().put(group)));
+        if (tunPackets) {
+            api("PUT", "nodes/chain", new JSONObject().put("id","avd-chain"));
+        } else {
+            // Restrict the measured chain to Peer so system background traffic cannot refresh an idle session.
+            api("PUT", "nodes/select", new JSONObject().put("name","unused"));
+            JSONObject group = new JSONObject().put("id","peer").put("name","peer").put("enabled",true)
+                .put("targetType","chain").put("targetChainId","avd-chain")
+                .put("apps",new org.json.JSONArray().put("com.smartvpn.acceptance"));
+            api("PUT","settings",new JSONObject().put("appGroups",new org.json.JSONArray().put(group)));
+        }
         check(VpnService.prepare(app) == null, "emulator VPN consent required");
         app.startForegroundService(vpn().setAction("com.smartvpn.client.START"));
         for (int i=0; ; i++) {
@@ -154,11 +161,58 @@ public final class DeviceRun extends Instrumentation {
                 Thread.sleep(100);
             }
         }
+        if (tunPackets) {
+            // Start the on-device reference server after the system VPN is published.
+            // Android network changes can otherwise close its UDP associations mid-test.
+            try (ServerSocket ready = new ServerSocket(0,1,InetAddress.getByName("127.0.0.1"))) {
+                ready.setSoTimeout(30000);
+                android.util.Log.i("SmartVPN-QuicTest", packetRun + " " + ready.getLocalPort());
+                try (Socket ack = ready.accept()) {
+                    ack.setSoTimeout(5000);
+                    check(ack.getInputStream().read() == 89, "test server readiness failed");
+                }
+            }
+        }
         try {
-            peer(null, "sessionTest");
-            report("Six concurrent streams and one new stream after 40 seconds idle verified");
+            if (tunPackets) {
+                verifyTunPackets();
+                report("TUN TCP 32768 and UDP 1024 byte replies verified");
+            } else {
+                peer(null, "sessionTest");
+                report("Six concurrent streams and one new stream after 40 seconds idle verified");
+            }
         } finally {
             api("POST","disconnect",null);
+        }
+    }
+
+    private void verifyTunPackets() throws Exception {
+        InetAddress loop = InetAddress.getByName("127.0.0.1");
+        try (ServerSocket tcp = new ServerSocket(18061, 1, loop);
+             DatagramSocket udp = new DatagramSocket(18061, loop)) {
+            java.util.concurrent.FutureTask<Void> echo = new java.util.concurrent.FutureTask<>(() -> {
+                try (Socket client = tcp.accept()) {
+                    client.setSoTimeout(10000);
+                    byte[] data = new byte[32768];
+                    new DataInputStream(client.getInputStream()).readFully(data);
+                    for (int i=0; i<data.length; i++) data[i] ^= 90;
+                    client.getOutputStream().write(data);
+                }
+                // Peer records each reply independently. Closing the fixture ends the receive loop.
+                while (!udp.isClosed()) {
+                    DatagramPacket p = new DatagramPacket(new byte[1025],1025);
+                    try { udp.receive(p); }
+                    catch (SocketException e) { if (udp.isClosed()) break; throw e; }
+                    check(p.getLength()==1024,"wrong UDP request size");
+                    for (int i=0;i<p.getLength();i++) p.getData()[i]^=90;
+                    udp.send(p);
+                }
+                return null;
+            });
+            new Thread(echo, "tun-test-echo").start();
+            peer(null, "chainPacketTest");
+            udp.close();
+            echo.get(10, java.util.concurrent.TimeUnit.SECONDS);
         }
     }
 

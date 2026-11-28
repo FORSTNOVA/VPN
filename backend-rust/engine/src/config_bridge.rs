@@ -575,7 +575,7 @@ pub fn build_router_from_clash_yaml(
             let spec = match (mode.as_str(), proxy.into_spec()?) {
                 ("mux", node @ (NodeSpec::Vmess(_) | NodeSpec::Vless(_) | NodeSpec::Shadowsocks(_) | NodeSpec::Trojan(_))) => NodeSpec::Mux(Box::new(node)),
                 ("keepalive", NodeSpec::Hysteria2(mut cfg)) => { cfg.keepalive = true; NodeSpec::Hysteria2(cfg) }
-                ("keepalive", NodeSpec::Tuic(mut cfg)) => { cfg.heartbeat = cfg.heartbeat.min(Duration::from_secs(5)); NodeSpec::Tuic(cfg) }
+                ("keepalive", NodeSpec::Tuic(mut cfg)) => { cfg.heartbeat = cfg.heartbeat.min(Duration::from_secs(3)); NodeSpec::Tuic(cfg) }
                 _ => return Err(invalid(format!("unsupported session mode {mode} for {name}"))),
             };
             insert(name, Definition::Node(spec, parent))?;

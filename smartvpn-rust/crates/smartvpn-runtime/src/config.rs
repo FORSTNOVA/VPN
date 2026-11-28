@@ -167,8 +167,8 @@ pub(crate) fn probe_config_with_dns(
 
 fn validate_chained_transport(node: &Value, index: usize) -> Result<()> {
     ensure!(
-        index == 0 || !matches!(node["type"].as_str(), Some("hysteria2" | "tuic")),
-        "Windows supports {} only as the first hop: {}",
+        index <= 1 || !matches!(node["type"].as_str(), Some("hysteria2" | "tuic")),
+        "Windows supports {} only as the first or second hop: {}",
         node["type"], node["name"]
     );
     Ok(())

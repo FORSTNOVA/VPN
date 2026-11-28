@@ -195,7 +195,7 @@ impl RemoteConnector for ProxyConnector {
             port
         );
 
-        let s = if self.connector.is_direct() && matches!(self.proxy.proto(), crate::proxy::OutboundType::Hysteria2 | crate::proxy::OutboundType::Tuic) {
+        let s = if (self.connector.is_direct() || self.proxy.support_dialer().is_some()) && matches!(self.proxy.proto(), crate::proxy::OutboundType::Hysteria2 | crate::proxy::OutboundType::Tuic) {
             self.proxy.connect_stream(&sess,resolver).await?
         } else {
             self.proxy.connect_stream_with_connector(&sess,resolver,self.connector.as_ref()).await?
@@ -225,7 +225,7 @@ impl RemoteConnector for ProxyConnector {
             so_mark,
             ..Default::default()
         };
-        let s = if self.connector.is_direct() && matches!(self.proxy.proto(), crate::proxy::OutboundType::Hysteria2 | crate::proxy::OutboundType::Tuic) {
+        let s = if (self.connector.is_direct() || self.proxy.support_dialer().is_some()) && matches!(self.proxy.proto(), crate::proxy::OutboundType::Hysteria2 | crate::proxy::OutboundType::Tuic) {
             self.proxy.connect_datagram(&sess,resolver).await?
         } else {
             self.proxy.connect_datagram_with_connector(&sess,resolver,self.connector.as_ref()).await?

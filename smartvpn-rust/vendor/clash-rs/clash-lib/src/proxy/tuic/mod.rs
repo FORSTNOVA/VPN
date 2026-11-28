@@ -1,6 +1,7 @@
 mod datagram;
 pub(crate) mod types;
 
+use crate::proxy::{quic_relay::QuicRelay, utils::RemoteConnector};
 use crate::common::tls::{DefaultTlsVerifier, build_tls_client_config};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -79,6 +80,7 @@ pub struct HandlerOptions {
 }
 
 pub struct Handler {
+    connector: tokio::sync::RwLock<Option<Arc<dyn RemoteConnector>>>,
     opts: HandlerOptions,
     outbound: Mutex<Option<CachedOutbound>>,
 }
@@ -103,7 +105,13 @@ impl Drop for CachedOutbound {
     }
 }
 
-impl DialWithConnector for Handler {}
+#[async_trait::async_trait]
+impl DialWithConnector for Handler {
+    fn support_dialer(&self) -> Option<&str> { self.opts.common_opts.connector.as_deref() }
+    async fn register_connector(&self, connector: Arc<dyn RemoteConnector>) {
+        *self.connector.write().await = Some(connector);
+    }
+}
 
 type TuicTcpStream =
     tokio::io::Join<wind_quic::quinn::QuinnRecv, wind_quic::quinn::QuinnSend>;
@@ -196,6 +204,7 @@ impl Handler {
         Self {
             opts,
             outbound: Mutex::new(None),
+            connector: Default::default(),
         }
     }
 
@@ -206,6 +215,7 @@ impl Handler {
     /// connection/TLS surface stays under Clash's configuration.
     async fn init_outbound(
         opts: HandlerOptions,
+        via: Option<&dyn RemoteConnector>,
         ctx: Arc<AppContext>,
         resolver: ThreadSafeDNSResolver,
         sess: &Session,
@@ -275,9 +285,18 @@ impl Handler {
             })
         };
 
+        let (peer_addr, peer_resolver, socket_factory) = match via {
+            Some(connector) => {
+                let relay = QuicRelay::open(connector, resolver, sess, peer_addr).await?;
+                let local_peer = relay.peer;
+                let factory: UdpSocketFactory = Arc::new(move |_| relay.clone_socket());
+                (local_peer, None, factory)
+            }
+            None => (peer_addr, Some(peer_resolver), socket_factory),
+        };
         let wind_opts = TuicOutboundOpts {
             peer_addr,
-            peer_resolver: Some(peer_resolver),
+            peer_resolver,
             sni: server.server_name().to_owned(),
             auth: (
                 opts.uuid,
@@ -338,7 +357,7 @@ impl Handler {
         // Stop the old QUIC reconnect supervisor before opening the new endpoint.
         cached.take();
         let ctx = Arc::new(AppContext::default());
-        let client = Self::init_outbound(self.opts.clone(), ctx.clone(), resolver.clone(), sess).await?;
+        let client = Self::init_outbound(self.opts.clone(), self.connector.read().await.as_deref(), ctx.clone(), resolver.clone(), sess).await?;
         *cached = Some(CachedOutbound { generation, ctx: ctx.clone(), client: client.clone() });
         Ok((client,ctx))
     }

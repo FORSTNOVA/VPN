@@ -47,6 +47,7 @@ pub struct Hysteria2Dialer {
 }
 
 struct Session {
+    _relay: Option<super::quic_relay::Relay>,
     conn: Connection,
     sessions: Option<Arc<Sessions>>,
     _auth: h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>,
@@ -172,22 +173,14 @@ impl Hysteria2Dialer {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
         let host = cfg.server.host();
         let runtime = Arc::new(quinn::TokioRuntime);
-        let (peer, raw_udp): (SocketAddr, Arc<dyn quinn::AsyncUdpSocket>) =
+        let (peer, raw_udp, relay): (_, Arc<dyn quinn::AsyncUdpSocket>, _) =
             if let Some(underlay) = &self.underlay {
-                let udp_dialer = underlay.udp().ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::Unsupported,
-                        "previous hop does not support UDP relay for Hysteria2",
-                    )
-                })?;
-                let udp_sock = udp_dialer.dial_udp().await?;
-                let synthetic_peer: SocketAddr = match &cfg.server {
-                    TargetAddr::Ip(addr) => *addr,
-                    TargetAddr::Domain(_, port) => ([127, 0, 0, 1], *port).into(),
-                };
-                let tunnel_sock =
-                    socket::TunnelUdpSocket::new(udp_sock, cfg.server.clone(), synthetic_peer);
-                (synthetic_peer, tunnel_sock)
+                let client = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+                client.set_nonblocking(true)?;
+                let (peer, relay) = super::quic_relay::open_relay(
+                    underlay.as_ref(), cfg.server.clone(), client.local_addr()?,
+                ).await?;
+                (peer, runtime.wrap_udp_socket(client)?, Some(relay))
             } else {
                 let peer = match &cfg.server {
                     TargetAddr::Ip(addr) => *addr,
@@ -225,7 +218,7 @@ impl Hysteria2Dialer {
                     ([0; 16], 0).into()
                 };
                 let wrapped = runtime.wrap_udp_socket(socket::bind_protected(bind)?)?;
-                (peer, wrapped)
+                (peer, wrapped, None)
             };
         let socket = Arc::new(PacketTransport::new(
             raw_udp,
@@ -298,6 +291,7 @@ impl Hysteria2Dialer {
         socket.rate.store(cap, Ordering::Relaxed);
         let sessions = udp.then(|| Sessions::start(conn.clone()));
         Ok(Session {
+            _relay: relay,
             conn,
             sessions,
             _auth: auth,

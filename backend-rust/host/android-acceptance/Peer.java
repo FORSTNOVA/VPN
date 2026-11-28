@@ -15,7 +15,7 @@ public final class Peer extends Activity {
             if ((byte)(request[i] ^ 0x5a) != reply[i]) throw new IOException("wrong reply at byte " + i);
     }
 
-    private static void checkPackets() throws IOException {
+    private static void checkPackets(int samples) throws IOException {
         InetSocketAddress target = new InetSocketAddress("198.51.100.61", 18061);
         java.security.SecureRandom rng = new java.security.SecureRandom();
         byte[] request = new byte[32768];
@@ -28,18 +28,29 @@ public final class Peer extends Activity {
             new DataInputStream(socket.getInputStream()).readFully(response);
             verifyReply(request, response);
         }
-        request = new byte[1024];
-        rng.nextBytes(request);
+        int verified = 0;
         try (DatagramSocket socket = new DatagramSocket()) {
             socket.connect(target);
-            socket.setSoTimeout(8000);
-            socket.send(new DatagramPacket(request, request.length));
-            byte[] response = new byte[request.length+1];
-            DatagramPacket reply = new DatagramPacket(response, response.length);
-            socket.receive(reply);
-            if (reply.getLength() != request.length) throw new IOException("wrong UDP payload size");
-            verifyReply(request, response);
+            socket.setSoTimeout(1500);
+            for (int sample=0; sample<samples; sample++) {
+                request = new byte[1024];
+                rng.nextBytes(request);
+                socket.send(new DatagramPacket(request, request.length));
+                byte[] response = new byte[request.length+1];
+                DatagramPacket reply = new DatagramPacket(response,response.length);
+                try {
+                    socket.receive(reply);
+                } catch (SocketTimeoutException timeout) {
+                    android.util.Log.i("SmartVPNPeer", "UDP sample " + sample + " timed out");
+                    continue;
+                }
+                if (reply.getLength()!=request.length) throw new IOException("wrong UDP payload size");
+                verifyReply(request,response);
+                verified++;
+            }
         }
+        android.util.Log.i("SmartVPNPeer", "verified UDP replies " + verified + "/" + samples);
+        if (verified == 0) throw new IOException("no verified UDP replies out of "+samples);
     }
     private static void streamBatch(int count) throws Exception {
         java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(count);
@@ -91,8 +102,8 @@ public final class Peer extends Activity {
                         streamBatch(6);
                         Thread.sleep(40000);
                         streamBatch(1);
-                    } else if (getIntent().getBooleanExtra("packetTest", false)) {
-                        checkPackets();
+                    } else if (getIntent().getBooleanExtra("packetTest", false) || getIntent().getBooleanExtra("chainPacketTest", false)) {
+                        checkPackets(getIntent().getBooleanExtra("chainPacketTest", false) ? 5 : 1);
                     } else {
                         String nonce = getIntent().getStringExtra("nonce");
                         try (Socket s = new Socket()) {

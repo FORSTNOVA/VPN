@@ -1,3 +1,4 @@
+use crate::proxy::{quic_relay::QuicRelay, utils::RemoteConnector};
 use super::{
     codec::{self, Fragments, Hy2TcpCodec},
     congestion::{Burtal, DynController},
@@ -58,6 +59,7 @@ pub enum Obfs {
 
 #[derive(Clone)]
 pub struct HystOption {
+    pub dialer: Option<String>,
     pub keep_alive_interval: u64,
     pub name: String,
     pub addr: SocksAddr,
@@ -108,8 +110,8 @@ pub struct Handler {
     client_config: quinn::ClientConfig,
     conn: Mutex<Option<(u64, Arc<HysteriaConnection>)>>,
     next_session_id: AtomicU32,
-    // a send request guard to keep the connection alive
-    guard: Mutex<Option<H3ClientGuard>>,
+    connector: tokio::sync::RwLock<Option<Arc<dyn RemoteConnector>>>,
+    relay: Mutex<Option<QuicRelay>>,
     // support udp is decided by server
     support_udp: RwLock<bool>,
 }
@@ -169,7 +171,8 @@ impl Handler {
             client_config,
             next_session_id: AtomicU32::new(0),
             conn: Mutex::new(None),
-            guard: Mutex::new(None),
+            connector: Default::default(),
+            relay: Mutex::new(None),
             support_udp: RwLock::new(true),
         })
     }
@@ -200,7 +203,19 @@ impl Handler {
 
         // Here maybe we should use a AsyncUdpSocket which implement salamander
         // obfs and port hopping
+        let connector = self.connector.read().await;
+        let relay = match connector.as_deref() {
+            Some(via) => {
+                anyhow::ensure!(self.opts.ports.is_none(), "chained Hysteria2 port hopping is unsupported");
+                Some(QuicRelay::open(via, resolver, sess, server_socket_addr).await?)
+            }
+            None => None,
+        };
+        let server_socket_addr = relay.as_ref().map_or(server_socket_addr, |r| r.peer);
         let create_socket = || async {
+            if let Some(r) = &relay {
+                return tokio::net::UdpSocket::from_std(r.socket.try_clone()?);
+            }
             new_udp_socket(
                 None,
                 sess.iface.as_ref(),
@@ -297,6 +312,7 @@ impl Handler {
             }
         }
 
+        *self.relay.lock().await = relay;
         Ok((session, guard))
     }
 
@@ -385,14 +401,19 @@ impl Handler {
                     Some(guard),
                 );
                 *quinn_conn_lock = Some((generation, hyst_conn.clone()));
-                *self.guard.lock().await = None;
                 Ok(hyst_conn)
             }
         }
     }
 }
 
-impl DialWithConnector for Handler {}
+#[async_trait::async_trait]
+impl DialWithConnector for Handler {
+    fn support_dialer(&self) -> Option<&str> { self.opts.dialer.as_deref() }
+    async fn register_connector(&self, connector: Arc<dyn RemoteConnector>) {
+        *self.connector.write().await = Some(connector);
+    }
+}
 
 #[async_trait::async_trait]
 impl OutboundHandler for Handler {
@@ -761,6 +782,7 @@ mod tests {
         );
 
         let opts = HystOption {
+            dialer: None,
             keep_alive_interval: 10,
             name: "test-hysteria".to_owned(),
             sni: "example.org".to_owned().into(),

@@ -64,9 +64,10 @@ async def exercise(args, directory, uri):
             name = nodes[0]["name"]
             api("POST","nodes/manual",{"name":"hop-socks","uri":f"socks5://127.0.0.1:{fixture.EXIT}"})
             if args.protocol in ("hysteria2", "tuic"):
-                invalid = {"name":"invalid","hops":["hop-socks",name],"original":""}
+                api("POST","nodes/manual",{"name":"extra-socks","uri":f"socks5://127.0.0.1:{fixture.EXIT+4}"})
+                invalid = {"name":"invalid","hops":["hop-socks","extra-socks",name],"original":""}
                 result = api("PUT","nodes/chain/profile",invalid,expected_status=400)
-                assert "only as the first hop" in str(result), result
+                assert "only as the first or second hop" in str(result), result
             hops = ["hop-socks",name] if args.second_hop else [name,"hop-socks"]
             policy = {} if args.mode=="default" else {name:args.mode}
             api("PUT","nodes/chain/profile",{"name":"test","original":"","hops":hops,"sessions":policy})

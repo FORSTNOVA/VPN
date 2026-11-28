@@ -105,3 +105,17 @@ client source connection ID and socket. The JSON output includes handshake
 times and the direction of traffic that wakes an idle QUIC transport.
 
 Pass `--second-hop` for a TCP Mux case to place the tested node after SOCKS5.
+
+
+For second-hop QUIC TUN acceptance on a physical Android device, install the
+release APK and matching runner, grant VPN consent and use an isolated SmartVPN
+profile. Run each protocol separately with the Android ARM64 sing-box binary:
+
+```powershell
+python quic_second_tun.py --adb $adb --serial $serial --sing-box $androidSingBox --protocol hysteria2 --out $hyResults
+python quic_second_tun.py --adb $adb --serial $serial --sing-box $androidSingBox --protocol tuic --out $tuicResults
+```
+
+The fixture binds its test services on device loopback. The peer app sends
+32 KiB over TCP and five independent 1 KiB UDP samples through the selected global chain. The
+peer checks each received reply and logs the number received and the script checks the SOCKS5 and QUIC server logs.

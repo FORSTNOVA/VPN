@@ -543,6 +543,8 @@ pub struct Totp {
 #[derive(Clone, serde::Serialize, serde::Deserialize, Debug, Default)]
 #[serde(rename_all = "kebab-case")]
 pub struct OutboundHysteria2 {
+    #[serde(rename = "dialer-proxy", alias = "connect-via")]
+    pub dialer: Option<String>,
     pub keep_alive_interval: Option<u64>,
     pub name: String,
     pub server: String,

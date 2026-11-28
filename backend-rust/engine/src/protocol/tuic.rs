@@ -1,3 +1,4 @@
+use super::quic_relay::open_relay;
 use crate::dialer::{
     BoxFuture, BoxedStream, OutboundDialer, OutboundUdpDialer, TargetAddr, UdpPacketSocket,
 };
@@ -13,7 +14,7 @@ use wind_core::{
     AppContext, FlowContext, Outbound,
 };
 use wind_tuic::quinn::{
-    outbound::{ReconnectConfig, TuicOutbound, TuicOutboundOpts},
+    outbound::{PeerResolver, ReconnectConfig, TuicOutbound, TuicOutboundOpts, UdpSocketFactory},
     CongestionControl, UdpRelayMode,
 };
 
@@ -39,7 +40,32 @@ impl Drop for Session {
         self.ctx.token.cancel();
     }
 }
+async fn chained_endpoint(
+    upstream: Arc<dyn OutboundDialer>,
+    remote: TargetAddr,
+) -> io::Result<(SocketAddr, Option<PeerResolver>, UdpSocketFactory)> {
+    let client = std::net::UdpSocket::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+    client.set_nonblocking(true)?;
+    let local = client.local_addr()?;
+    let (peer, relay) = open_relay(upstream.as_ref(), remote.clone(), local).await?;
+    let current = Arc::new(Mutex::new(relay));
+    let reconnect: PeerResolver = Arc::new(move || {
+        let upstream = upstream.clone();
+        let remote = remote.clone();
+        let current = current.clone();
+        Box::pin(async move {
+            let (peer, relay) = open_relay(upstream.as_ref(), remote, local)
+                .await
+                .map_err(|e| e.to_string())?;
+            *current.lock().await = relay;
+            Ok(peer)
+        })
+    });
+    Ok((peer, Some(reconnect), Arc::new(move |_| client.try_clone())))
+}
+
 pub struct Dialer {
+    underlay: Option<Arc<dyn OutboundDialer>>,
     cfg: Config,
     session: OnceCell<Session>,
 }
@@ -59,9 +85,10 @@ async fn resolve(server: &TargetAddr) -> io::Result<SocketAddr> {
     }
 }
 impl Dialer {
-    pub fn new(cfg: Config) -> Self {
+    pub fn new(cfg: Config, underlay: Option<Arc<dyn OutboundDialer>>) -> Self {
         Self {
             cfg,
+            underlay,
             session: OnceCell::new(),
         }
     }
@@ -73,12 +100,38 @@ impl Dialer {
                 tls.enable_sni = !cfg.disable_sni;
                 tls.enable_early_data = cfg.reduce_rtt;
                 let server = cfg.server.clone();
+                let (peer_addr, peer_resolver, socket_factory): (
+                    _,
+                    Option<PeerResolver>,
+                    UdpSocketFactory,
+                ) = match &self.underlay {
+                    Some(upstream) => chained_endpoint(upstream.clone(), server).await?,
+                    None => (
+                        resolve(&server).await?,
+                        Some(Arc::new(move || {
+                            let server = server.clone();
+                            Box::pin(
+                                async move { resolve(&server).await.map_err(|e| e.to_string()) },
+                            )
+                        })),
+                        Arc::new(|peer| {
+                            let bind: SocketAddr = if peer.is_ipv4() {
+                                ([0; 4], 0).into()
+                            } else {
+                                ([0; 16], 0).into()
+                            };
+                            let sock = std::net::UdpSocket::bind(bind)?;
+                            #[cfg(unix)]
+                            crate::dialer::protect_socket_fd(std::os::fd::AsRawFd::as_raw_fd(
+                                &sock,
+                            ))?;
+                            Ok(sock)
+                        }),
+                    ),
+                };
                 let opts = TuicOutboundOpts {
-                    peer_addr: resolve(&server).await?,
-                    peer_resolver: Some(Arc::new(move || {
-                        let server = server.clone();
-                        Box::pin(async move { resolve(&server).await.map_err(|e| e.to_string()) })
-                    })),
+                    peer_addr,
+                    peer_resolver,
                     sni: cfg.tls.sni.clone().unwrap_or_else(|| cfg.server.host()),
                     auth: (cfg.uuid, Arc::from(cfg.password.as_bytes())),
                     zero_rtt_handshake: cfg.reduce_rtt,
@@ -102,17 +155,7 @@ impl Dialer {
                     stream_receive_window: None,
                     max_idle_time: None,
                     udp_relay_mode: cfg.relay,
-                    socket_factory: Some(Arc::new(|peer| {
-                        let bind: SocketAddr = if peer.is_ipv4() {
-                            ([0; 4], 0).into()
-                        } else {
-                            ([0; 16], 0).into()
-                        };
-                        let sock = std::net::UdpSocket::bind(bind)?;
-                        #[cfg(unix)]
-                        crate::dialer::protect_socket_fd(std::os::fd::AsRawFd::as_raw_fd(&sock))?;
-                        Ok(sock)
-                    })),
+                    socket_factory: Some(socket_factory),
                 };
                 let ctx = Arc::new(AppContext::default());
                 let client = TuicOutbound::new(ctx.clone(), opts)
